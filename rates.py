@@ -3,6 +3,7 @@
 import time
 from datetime import datetime, timedelta
 
+import FinanceDataReader as fdr
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -50,7 +51,7 @@ def _load_kr3y_range(start: str, end: str) -> list:
                 time.sleep(0.5)
         return None
 
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=3) as ex:
         results = list(ex.map(fetch, wins))
     rows = [x for r in results if r for x in r]
     if not rows:
@@ -66,6 +67,13 @@ def load_rate(kind: str, start: str, end: str):
             s = _load_fred_dgs10()
             s = s[(s.index >= pd.Timestamp(start)) & (s.index <= pd.Timestamp(end))]
             return s * 100
+        try:
+            d = fdr.DataReader("KR3YT=RR", start, end)
+            s = d["Close"].dropna()
+            if len(s) > 0:
+                return s
+        except Exception:  # noqa: BLE001
+            pass
         rows = _load_kr3y_range(start.replace("-", ""), end.replace("-", ""))
         s = pd.Series({pd.to_datetime(t, format="%Y%m%d"): v for t, v in rows}).sort_index()
         return s
