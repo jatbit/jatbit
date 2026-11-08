@@ -91,11 +91,33 @@ def load_prices(code: str, start: str, end: str) -> pd.DataFrame:
     raise last_err
 
 
-# 해외 선물: Yahoo 연속(근월물 이어붙인) 시세. 표시 이름을 붙여 둔다. 목록에 없는 '=F' 심볼도 그대로 조회는 된다.
-FUTURES_NAMES = {
-    "GC=F": "금 선물", "SI=F": "은 선물", "HG=F": "구리 선물", "CL=F": "WTI 원유 선물",
-    "ES=F": "S&P500 선물", "NQ=F": "나스닥 선물",
+# 해외 선물: Yahoo 연속(근월물 이어붙인) 시세. 티커 → (표시 이름, 한글 별칭들). 목록에 없는 '=F' 심볼도 그대로 조회는 된다.
+FUTURES = {
+    "GC=F": ("금 선물", ["금선물", "금"]),
+    "SI=F": ("은 선물", ["은선물", "은"]),
+    "HG=F": ("구리 선물", ["구리선물", "구리"]),
+    "CL=F": ("WTI 원유 선물", ["원유선물", "원유", "wti", "wti원유", "wti원유선물", "유가"]),
+    "BZ=F": ("브렌트유 선물", ["브렌트유선물", "브렌트유", "브렌트", "brent"]),
+    "NG=F": ("천연가스 선물", ["천연가스선물", "천연가스", "가스선물"]),
+    "PL=F": ("백금 선물", ["백금선물", "백금"]),
+    "PA=F": ("팔라듐 선물", ["팔라듐선물", "팔라듐"]),
+    "ES=F": ("S&P500 선물", ["s&p500선물", "sp500선물", "에스앤피선물"]),
+    "NQ=F": ("나스닥 선물", ["나스닥선물", "나스닥100선물"]),
 }
+FUTURES_NAMES = {t: v[0] for t, v in FUTURES.items()}
+# 한글로 '금', '은'만 치면 일반 종목명(예: ~금융, ~은행)과 겹치므로, 한 글자 별칭은 '금 선물'처럼 '선물'을 붙였을 때만 쓴다.
+_FUT_ALIAS = {}
+for _t, (_n, _al) in FUTURES.items():
+    for _a in _al:
+        if len(_a) >= 2 or _a.endswith("선물"):
+            _FUT_ALIAS[_a] = _t
+    _FUT_ALIAS[_n.replace(" ", "").lower()] = _t
+
+
+def _futures_candidate(t: str) -> dict:
+    nm = FUTURES_NAMES.get(t, t)
+    label = f"{nm} ({t}, 해외 선물)" if t in FUTURES_NAMES else f"{t} (해외 티커)"
+    return {"code": t, "label": label, "name": nm, "domestic": False, "market": "US"}
 
 
 def find_candidates(query: str, listing: pd.DataFrame) -> list[dict]:
@@ -114,14 +136,13 @@ def find_candidates(query: str, listing: pd.DataFrame) -> list[dict]:
         for r in found.head(30).itertuples()
     ]
 
+    # 한글/영문 별칭으로 해외 선물 찾기 (예: '원유 선물' → CL=F). 별칭과 정확히 일치할 때만.
+    key = q.replace(" ", "").lower()
+    if key in _FUT_ALIAS:
+        candidates.insert(0, _futures_candidate(_FUT_ALIAS[key]))
     # 국내에서 못 찾았고 영문 티커 형태면 해외 티커로 시도
-    if not candidates and re.fullmatch(r"[A-Za-z][A-Za-z0-9.\-=]{0,9}", q):
-        t = q.upper()
-        if t in FUTURES_NAMES:  # 해외 선물(Yahoo 연속 근월물)
-            nm = FUTURES_NAMES[t]
-            candidates.append({"code": t, "label": f"{nm} ({t}, 해외 선물)", "name": nm, "domestic": False, "market": "US"})
-        else:
-            candidates.append({"code": t, "label": f"{t} (해외 티커)", "name": t, "domestic": False, "market": "US"})
+    elif not candidates and re.fullmatch(r"[A-Za-z][A-Za-z0-9.\-=]{0,9}", q):
+        candidates.append(_futures_candidate(q.upper()))
     return candidates
 
 
@@ -521,7 +542,7 @@ def render_single(listing: pd.DataFrame) -> None:
     c1, c3 = st.columns([3, 2])
     query = c1.text_input(
         "종목 검색", key="single_query",
-        placeholder="종목명 (예: 삼성전자) 또는 종목코드 / 해외 티커 (예: AAPL, GC=F)",
+        placeholder="종목명 (예: 삼성전자) 또는 종목코드 / 해외 티커 (예: AAPL, 원유 선물)",
     )
     chart_type = c3.radio("차트 종류", ["선", "캔들"], horizontal=True, key="single_type")
     period = period_input("single_period")
@@ -655,10 +676,10 @@ def render_compare(listing: pd.DataFrame) -> None:
     period = period_input("cmp_period", mirror="pf_period", presets=True)
     extra = st.text_input(
         "해외 티커 또는 종목 추가 (쉼표로 구분)", key="cmp_extra",
-        placeholder="예: AAPL, NVDA, 005930, GC=F(금 선물)",
+        placeholder="예: AAPL, NVDA, 005930, 원유 선물, 금 선물",
         on_change=_mirror, args=("cmp_extra", "pf_extra"),
     )
-    st.caption("종목·기간 입력은 '포트폴리오 최적화' 탭과 함께 바뀝니다. 해외 선물: GC=F 금, SI=F 은, HG=F 구리, CL=F 원유.")
+    st.caption("종목·기간 입력은 '포트폴리오 최적화' 탭과 함께 바뀝니다. 해외 선물은 이름으로 검색됩니다: 금 선물, 은 선물, 구리 선물, 원유 선물 등.")
 
     # 선택 항목 정리 (중복 제거)
     items: list[dict] = []
@@ -814,10 +835,10 @@ def render_portfolio(listing: pd.DataFrame) -> None:
     period = period_input("pf_period", mirror="cmp_period", presets=True)
     extra = st.text_input(
         "해외 티커 또는 종목 추가 (쉼표로 구분)", key="pf_extra",
-        placeholder="예: AAPL, NVDA, 005930, GC=F(금 선물)",
+        placeholder="예: AAPL, NVDA, 005930, 원유 선물, 금 선물",
         on_change=_mirror, args=("pf_extra", "cmp_extra"),
     )
-    st.caption("종목·기간 입력은 '수익률 비교' 탭과 함께 바뀝니다. 해외 선물: GC=F 금, SI=F 은, HG=F 구리, CL=F 원유.")
+    st.caption("종목·기간 입력은 '수익률 비교' 탭과 함께 바뀝니다. 해외 선물은 이름으로 검색됩니다: 금 선물, 은 선물, 구리 선물, 원유 선물 등.")
 
     items: list[dict] = []
     seen: set[str] = set()
