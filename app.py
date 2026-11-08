@@ -34,7 +34,6 @@ def series_color(i: int) -> str:
         return SERIES_COLORS[i]
     return f"hsl({(i * 47) % 360}, 60%, 45%)"
 
-
 st.set_page_config(page_title="주가 차트", layout="wide")
 
 # 글자 크기 축소
@@ -69,8 +68,10 @@ def load_listing() -> pd.DataFrame:
     df = fdr.StockListing("KRX")
     if "Symbol" in df.columns and "Code" not in df.columns:
         df = df.rename(columns={"Symbol": "Code"})
-    cols = [c for c in ["Code", "Name", "Market"] if c in df.columns]
+    cols = [c for c in ["Code", "Name", "Market", "Marcap"] if c in df.columns]
     df = df[cols].dropna(subset=["Code", "Name"]).copy()
+    if "Marcap" not in df.columns:
+        df["Marcap"] = float("nan")
     if "Market" not in df.columns:
         df["Market"] = "KRX"
     df["Code"] = df["Code"].astype(str)
@@ -181,7 +182,31 @@ def _on_date(key: str, mirror) -> None:
         _sync_period(key, mirror)
 
 
-def period_input(key: str, mirror: str = None):
+US_TOP5 = ["NVDA", "AAPL", "GOOGL", "MSFT", "AMZN"]  # 고정 목록(2026-11 기준 시가총액 상위, 수시로 바뀔 수 있음)
+
+
+def _preset(kind: str) -> None:
+    """시가총액 상위 5개 종목을 두 탭(수익률 비교·포트폴리오)에 동시에 채운다."""
+    listing = st.session_state.get("_listing")
+    if kind == "KR":
+        labels = []
+        if listing is not None and "Marcap" in listing.columns:
+            d = listing.dropna(subset=["Marcap"])
+            d = d[d["Code"].astype(str).str.endswith("0")]  # 우선주 제외(보통주 코드는 0으로 끝남)
+            d = d.sort_values("Marcap", ascending=False).head(5)
+            labels = [f"{r.Name} ({r.Code})" for r in d.itertuples()]
+        for k in ("cmp_selected", "pf_selected"):
+            st.session_state[k] = labels
+        for k in ("cmp_extra", "pf_extra"):
+            st.session_state[k] = ""
+    else:
+        for k in ("cmp_selected", "pf_selected"):
+            st.session_state[k] = []
+        for k in ("cmp_extra", "pf_extra"):
+            st.session_state[k] = ", ".join(US_TOP5)
+
+
+def period_input(key: str, mirror: str = None, presets: bool = False):
     """빠른 기간 버튼(오늘 기준) + 직접 선택 달력. 종료일은 오늘이며, 데이터는 가장 최근 영업일까지 나온다.
     mirror: 같은 기간을 공유할 다른 탭의 period_input 키."""
     today = kst_today()
@@ -190,15 +215,26 @@ def period_input(key: str, mirror: str = None):
             "빠른 기간 (오늘 기준 ~ 가장 최근 영업일)", list(QUICK_RANGES),
             key=f"{key}_quick", on_change=_on_quick, args=(key, mirror),
         )
-    p = st.date_input(
-        "기간",
-        value=(today - timedelta(days=180), today),
-        max_value=today,
-        format="YYYY-MM-DD",
-        key=key,
-        on_change=_on_date,
-        args=(key, mirror),
-    )
+    if presets:
+        c1, c2, c3 = st.columns([6, 1.6, 1.6])
+    else:
+        c1 = st.container()
+    with c1:
+        p = st.date_input(
+            "기간",
+            value=(today - timedelta(days=180), today),
+            max_value=today,
+            format="YYYY-MM-DD",
+            key=key,
+            on_change=_on_date,
+            args=(key, mirror),
+        )
+    if presets:
+        for col, kind, label in ((c2, "KR", "한국 Top5"), (c3, "US", "미국 Top5")):
+            with col:
+                st.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
+                st.button(label, key=f"{key}_preset_{kind}", on_click=_preset, args=(kind,),
+                          use_container_width=True, help="시가총액 상위 5개 종목을 한 번에 입력 (테스트용)")
     if isinstance(p, (tuple, list)) and len(p) == 2:
         return p
     return None
@@ -605,7 +641,7 @@ def render_compare(listing: pd.DataFrame) -> None:
         list(options.keys()), key="cmp_selected",
         on_change=_mirror, args=("cmp_selected", "pf_selected"),
     )
-    period = period_input("cmp_period", mirror="pf_period")
+    period = period_input("cmp_period", mirror="pf_period", presets=True)
     extra = st.text_input(
         "해외 티커 또는 종목 추가 (쉼표로 구분)", key="cmp_extra",
         placeholder="예: AAPL, NVDA, 005930",
@@ -764,7 +800,7 @@ def render_portfolio(listing: pd.DataFrame) -> None:
         list(options.keys()), key="pf_selected",
         on_change=_mirror, args=("pf_selected", "cmp_selected"),
     )
-    period = period_input("pf_period", mirror="cmp_period")
+    period = period_input("pf_period", mirror="cmp_period", presets=True)
     extra = st.text_input(
         "해외 티커 또는 종목 추가 (쉼표로 구분)", key="pf_extra",
         placeholder="예: AAPL, NVDA, 005930",
@@ -841,6 +877,7 @@ def render_portfolio(listing: pd.DataFrame) -> None:
     st.caption(
         f"분석 구간: {P.index[0]:%Y-%m-%d} ~ {P.index[-1]:%Y-%m-%d} (모든 종목·지수가 함께 거래된 {len(R):,}일 수익률 기준, 통화 환산 없음)"
     )
+
     if n > len(R):
         st.warning(
             f"종목 수({n}개)가 공통 거래일 수({len(R)}일)보다 많아 공분산이 불안정합니다. "
@@ -981,6 +1018,7 @@ def render_portfolio(listing: pd.DataFrame) -> None:
 # ======================================================================
 try:
     LISTING = load_listing()
+    st.session_state["_listing"] = LISTING
 except Exception as e:  # noqa: BLE001
     st.error(f"종목 목록을 불러오지 못했습니다: {e}")
     st.stop()
