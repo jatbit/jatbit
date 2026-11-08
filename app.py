@@ -289,6 +289,45 @@ def capm_stats(r: pd.Series, m: pd.Series, rf: float):
     }
 
 
+Z95, Z99 = 1.6449, 2.3263
+
+
+def risk_metrics(r: pd.Series) -> dict:
+    """1일 기준 VaR / ES (손실률, 양수). 과거 시뮬레이션(실제 수익률 분포)과 정규분포 가정 두 가지."""
+    out = {}
+    mu_d, sd_d = float(r.mean()), float(r.std(ddof=1))
+    for cl, z, tag in ((0.95, Z95, "95"), (0.99, Z99, "99")):
+        q = float(r.quantile(1 - cl))
+        tail = r[r <= q]
+        out[f"var{tag}"] = -q
+        out[f"es{tag}"] = -float(tail.mean()) if len(tail) else -q
+        out[f"nvar{tag}"] = -(mu_d - z * sd_d)
+    out["worst"] = -float(r.min())
+    out["n"] = len(r)
+    return out
+
+
+def risk_grid(k: dict) -> None:
+    metric_grid([
+        ("VaR 95% (1일, 과거)", _pct(k["var95"]), None, True),
+        ("ES 95% (1일, 과거)", _pct(k["es95"]), None, True),
+        ("VaR 99% (1일, 과거)", _pct(k["var99"]), None, True),
+        ("ES 99% (1일, 과거)", _pct(k["es99"]), None, True),
+        ("VaR 95% (정규분포)", _pct(k["nvar95"]), None, True),
+        ("VaR 99% (정규분포)", _pct(k["nvar99"]), None, True),
+        ("최악의 하루 손실", _pct(k["worst"]), None, True),
+        ("표본 수", f"{k['n']:,}일", None, True),
+    ], cols=4)
+
+
+RISK_NOTE = (
+    "VaR(Value at Risk) = 하루 동안 해당 신뢰수준에서 넘지 않을 것으로 보는 최대 손실률, "
+    "ES(Expected Shortfall, CVaR) = VaR를 넘는 나쁜 날들의 평균 손실률. 모두 손실을 양수로 표시합니다. "
+    "'과거'는 조회 기간의 실제 일별 수익률 분포(과거 시뮬레이션)에서, '정규분포'는 평균·표준편차만으로 계산합니다. "
+    "조회 기간이 짧으면 특히 99% 값은 최악의 하루 한두 개에 좌우되므로 참고용으로만 보세요."
+)
+
+
 def capm_grid(c: dict, name: str) -> None:
     metric_grid([
         ("벤치마크", name, None, True),
@@ -759,6 +798,7 @@ def render_portfolio(listing: pd.DataFrame) -> None:
     for nm in names:
         r = Rs[nm]
         c = capm_stats(r, m, rf)
+        rk = risk_metrics(r)
         px = P[nm]
         mdd = float((px / px.cummax() - 1).min())
         sd = float(r.std(ddof=1)) * TRADING_DAYS ** 0.5
@@ -776,9 +816,13 @@ def render_portfolio(listing: pd.DataFrame) -> None:
             "젠센 알파": _pct(c["alpha"], True),
             "트레이너": f"{c['treynor']:.3f}" if c["treynor"] == c["treynor"] else "-",
             "MDD": _pct(mdd),
+            "VaR 95%(1일)": _pct(rk["var95"]),
+            "ES 95%(1일)": _pct(rk["es95"]),
+            "VaR 99%(1일)": _pct(rk["var99"]),
+            "ES 99%(1일)": _pct(rk["es99"]),
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-    st.caption(f"무위험수익률: {rf_label}. 벤치마크: {bench_name}.")
+    st.caption(f"무위험수익률: {rf_label}. 벤치마크: {bench_name}. VaR·ES는 1일 기준 과거 시뮬레이션 손실률입니다.")
 
     # ---- 최적화
     res = optimize_portfolios(mu, cov, rf, cap)
@@ -814,6 +858,7 @@ def render_portfolio(listing: pd.DataFrame) -> None:
         rp = pd.Series(rp, index=Rs.index)
         pseries[k] = rp
         c = capm_stats(rp, m, rf)
+        rk = risk_metrics(rp)
         mean_a, sd = c["mean_a"], c["std_a"]
         cum = (1 + rp).cumprod()
         prow[k] = {
@@ -828,6 +873,12 @@ def render_portfolio(listing: pd.DataFrame) -> None:
             "CAPM 기대수익률": _pct(c["capm"], True),
             "젠센 알파": _pct(c["alpha"], True),
             "트레이너": f"{c['treynor']:.3f}" if c["treynor"] == c["treynor"] else "-",
+            "VaR 95% (1일, 과거)": _pct(rk["var95"]),
+            "ES 95% (1일, 과거)": _pct(rk["es95"]),
+            "VaR 99% (1일, 과거)": _pct(rk["var99"]),
+            "ES 99% (1일, 과거)": _pct(rk["es99"]),
+            "VaR 95% (1일, 정규)": _pct(rk["nvar95"]),
+            "VaR 99% (1일, 정규)": _pct(rk["nvar99"]),
         }
     st.dataframe(pd.DataFrame(prow), use_container_width=True)
     st.caption("각 포트폴리오는 위 비중을 기간 내내 매일 유지(일별 리밸런싱)한다고 가정한 일별 수익률로 계산했습니다. 거래비용·세금은 반영하지 않았습니다.")
@@ -837,6 +888,10 @@ def render_portfolio(listing: pd.DataFrame) -> None:
     c_opt = capm_stats(pseries["최대 샤프 (최적)"], m, rf)
     capm_grid(c_opt, bench_name)
     st.caption(capm_note(bench_name))
+
+    st.subheader("최적 포트폴리오(최대 샤프)의 VaR · ES")
+    risk_grid(risk_metrics(pseries["최대 샤프 (최적)"]))
+    st.caption(RISK_NOTE)
 
     # ---- 효율적 투자선
     st.subheader("위험-수익 평면")
