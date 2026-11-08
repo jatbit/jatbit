@@ -110,7 +110,7 @@ def _extend_back(code: str, start: str, d):
         old = None
         for suf in (".KS", ".KQ"):
             try:
-                y = fdr.DataReader(code + suf, start, (first + pd.Timedelta(days=5)).strftime("%Y-%m-%d"))
+                y = fdr.DataReader("YAHOO:" + code + suf, start, (first + pd.Timedelta(days=5)).strftime("%Y-%m-%d"))
             except Exception:  # noqa: BLE001
                 continue
             if y is not None and len(y) > 0 and "Close" in y.columns:
