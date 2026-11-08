@@ -113,6 +113,13 @@ for _t, (_n, _al) in FUTURES.items():
             _FUT_ALIAS[_a] = _t
     _FUT_ALIAS[_n.replace(" ", "").lower()] = _t
 
+FUT_OPTIONS = {f"{v[0]} ({t})": t for t, v in FUTURES.items()}  # 목록에서 골라 넣는 선물
+
+
+def _futures_items(labels) -> list[dict]:
+    return [{"code": FUT_OPTIONS[l], "name": FUTURES_NAMES[FUT_OPTIONS[l]], "domestic": False, "market": "US"}
+            for l in labels if l in FUT_OPTIONS]
+
 
 def _futures_candidate(t: str) -> dict:
     nm = FUTURES_NAMES.get(t, t)
@@ -673,13 +680,17 @@ def render_compare(listing: pd.DataFrame) -> None:
         list(options.keys()), key="cmp_selected",
         on_change=_mirror, args=("cmp_selected", "pf_selected"),
     )
+    fut_sel = st.multiselect(
+        "해외 선물 (목록에서 선택)", list(FUT_OPTIONS), key="cmp_fut",
+        on_change=_mirror, args=("cmp_fut", "pf_fut"),
+    )
     period = period_input("cmp_period", mirror="pf_period", presets=True)
     extra = st.text_input(
         "해외 티커 또는 종목 추가 (쉼표로 구분)", key="cmp_extra",
         placeholder="예: AAPL, NVDA, 005930, 원유 선물, 금 선물",
         on_change=_mirror, args=("cmp_extra", "pf_extra"),
     )
-    st.caption("종목·기간 입력은 '포트폴리오 최적화' 탭과 함께 바뀝니다. 해외 선물은 이름으로 검색됩니다: 금 선물, 은 선물, 구리 선물, 원유 선물 등.")
+    st.caption("종목·기간 입력은 '포트폴리오 최적화' 탭과 함께 바뀝니다. 해외 선물은 위 목록에서 고르거나, 아래 입력창에 이름(예: 원유 선물)을 쳐도 됩니다.")
 
     # 선택 항목 정리 (중복 제거)
     items: list[dict] = []
@@ -689,6 +700,10 @@ def render_compare(listing: pd.DataFrame) -> None:
         if code not in seen:
             seen.add(code)
             items.append({"code": code, "name": names[code], "domestic": True})
+    for it in _futures_items(fut_sel):
+        if it["code"] not in seen:
+            seen.add(it["code"])
+            items.append(it)
     for token in [t.strip() for t in extra.split(",") if t.strip()]:
         cands = find_candidates(token, listing)
         if not cands:
@@ -832,13 +847,17 @@ def render_portfolio(listing: pd.DataFrame) -> None:
         list(options.keys()), key="pf_selected",
         on_change=_mirror, args=("pf_selected", "cmp_selected"),
     )
+    fut_sel = st.multiselect(
+        "해외 선물 (목록에서 선택)", list(FUT_OPTIONS), key="pf_fut",
+        on_change=_mirror, args=("pf_fut", "cmp_fut"),
+    )
     period = period_input("pf_period", mirror="cmp_period", presets=True)
     extra = st.text_input(
         "해외 티커 또는 종목 추가 (쉼표로 구분)", key="pf_extra",
         placeholder="예: AAPL, NVDA, 005930, 원유 선물, 금 선물",
         on_change=_mirror, args=("pf_extra", "cmp_extra"),
     )
-    st.caption("종목·기간 입력은 '수익률 비교' 탭과 함께 바뀝니다. 해외 선물은 이름으로 검색됩니다: 금 선물, 은 선물, 구리 선물, 원유 선물 등.")
+    st.caption("종목·기간 입력은 '수익률 비교' 탭과 함께 바뀝니다. 해외 선물은 위 목록에서 고르거나, 아래 입력창에 이름(예: 원유 선물)을 쳐도 됩니다.")
 
     items: list[dict] = []
     seen: set[str] = set()
@@ -847,6 +866,10 @@ def render_portfolio(listing: pd.DataFrame) -> None:
         if code not in seen:
             seen.add(code)
             items.append({"code": code, "name": name, "domestic": True, "market": market})
+    for it in _futures_items(fut_sel):
+        if it["code"] not in seen:
+            seen.add(it["code"])
+            items.append(it)
     for token in [t.strip() for t in extra.split(",") if t.strip()]:
         cands = find_candidates(token, listing)
         if not cands:
