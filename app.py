@@ -11,6 +11,7 @@
 
 import math
 import re
+import time
 from datetime import date, datetime, timedelta, timezone
 
 import FinanceDataReader as fdr
@@ -78,7 +79,15 @@ def load_listing() -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner="주가 데이터를 불러오는 중...")
 def load_prices(code: str, start: str, end: str) -> pd.DataFrame:
-    return fdr.DataReader(code, start, end)
+    """일시적인 네트워크 오류로 데이터가 빠지지 않도록 최대 3번까지 다시 시도한다. (성공한 결과만 캐시됨)"""
+    last_err = None
+    for attempt in range(3):
+        try:
+            return fdr.DataReader(code, start, end)
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            time.sleep(1.5 * (attempt + 1))
+    raise last_err
 
 
 def find_candidates(query: str, listing: pd.DataFrame) -> list[dict]:
@@ -721,7 +730,7 @@ def optimize_portfolios(mu: np.ndarray, cov: np.ndarray, rf: float, cap: float, 
     """무작위 후보 + 비중 이동 탐색으로 최대 샤프 / 최소 분산 포트폴리오를 찾는다. (SciPy 없이 numpy만 사용)"""
     n = len(mu)
     rng = np.random.default_rng(seed)
-    per = 6000
+    per = 15000  # 정확도를 위해 후보를 넉넉히 만든다 (시간이 조금 더 걸림)
     W = np.vstack([rng.dirichlet(np.ones(n) * a, size=per) for a in (0.3, 1.0, 3.0)] + [np.full((1, n), 1.0 / n)])
     W = W[W.max(axis=1) <= cap + 1e-9]
     ret, vol, sh = _port_stats(W, mu, cov, rf)
@@ -732,8 +741,14 @@ def optimize_portfolios(mu: np.ndarray, cov: np.ndarray, rf: float, cap: float, 
     def negvar(Wb):
         return -np.einsum("ij,jk,ik->i", Wb, cov, Wb)
 
-    w_sh = _refine(W[int(np.argmax(sh))], sharpe_f, cap)
-    w_mv = _refine(W[int(np.argmin(vol))], negvar, cap)
+    # 한 군데에서만 출발하면 국소 최적에 머물 수 있어, 상위 후보 여러 개에서 각각 다듬은 뒤 가장 좋은 것을 고른다
+    def best_of(starts, score):
+        cands = [_refine(W[i], score, cap) for i in starts]
+        return max(cands, key=lambda x: float(score(x[None, :])[0]))
+
+    k = min(8, len(W))
+    w_sh = best_of(np.argsort(-sh)[:k], sharpe_f)
+    w_mv = best_of(np.argsort(vol)[:k], negvar)
     return {
         "max_sharpe": w_sh, "min_var": w_mv, "equal": np.full(n, 1.0 / n),
         "cloud": (vol[::6], ret[::6]),
