@@ -738,7 +738,7 @@ def render_single(listing: pd.DataFrame) -> None:
         fig.add_hline(y=0, row=1, col=1, line_width=1, line_dash="dot", line_color="#718096")
     fig.update_yaxes(title_text="거래량", row=2, col=1, tickformat=",")
     fig.update_layout(
-        height=560, showlegend=False, hovermode="x unified",
+        height=430, showlegend=False, hovermode="x unified",
         margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
         boxgap=box_gap, bargap=0.3 if n_bars <= 150 else 0.4,
     )
@@ -857,7 +857,7 @@ def render_compare(listing: pd.DataFrame) -> None:
     if rate_sel:
         add_rates(fig, rate_sel, start_d, end_d, 2)
     fig.update_layout(
-        height=520, hovermode="x unified", font=dict(size=11),
+        height=420, hovermode="x unified", font=dict(size=11),
         margin=dict(l=10, r=10, t=10, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
     )
