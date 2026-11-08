@@ -85,7 +85,13 @@ def load_prices(code: str, start: str, end: str) -> pd.DataFrame:
     last_err = None
     for attempt in range(3):
         try:
-            return fdr.DataReader(code, start, end)
+            d = fdr.DataReader(code, start, end)
+            if d is not None and "Close" in d.columns:
+                d = d[d["Close"] != 0].copy()  # 오래된 구간의 0원(거래정지 등) 행 제거
+                for _c in ("Open", "High", "Low"):
+                    if _c in d.columns:
+                        d[_c] = d[_c].where(d[_c] != 0, d["Close"])
+            return d
         except Exception as e:  # noqa: BLE001
             last_err = e
             time.sleep(1.5 * (attempt + 1))
