@@ -1,6 +1,6 @@
 """주가 차트 조회 프로그램.
 
-탭 1) 주가 조회: 종목 하나의 기간별 주가 차트 + 기간 통계
+탭 1) 주가 조회: 종목 하나의 기간별 주가 차트
 탭 2) 수익률 비교: 여러 종목을 기간 시작일 = 0% 기준으로 겹쳐서 비교
 
 데이터: FinanceDataReader (국내 KRX 전 종목 + 해외 티커). 일봉 기준이며 실시간 틱 데이터는 아닙니다.
@@ -170,38 +170,87 @@ def _with_date(text: str, d) -> str:
     return f'{text}<br><span style="font-size:0.7rem;opacity:0.7">{d:%Y-%m-%d}</span>'
 
 
-# 무위험수익률: 한국 종목 = 국고채 3년물, 해외(미국) 종목 = 미국 국채 10년물
-# 한국 국고채 3년물은 고정값이므로 금리가 크게 바뀌면 이 값을 갱신해야 한다.
-RF_KR = 0.0374
-RF_KR_ASOF = "2026-11-02"
-# 미국 10년물은 FRED에서 가져오고, 실패하면 아래 고정값을 쓴다.
+# 무위험수익률: 조회 기간의 마지막 영업일 기준 금리를 가져온다.
+#  - 한국 종목: 국고채 3년물 (한국은행 ECOS 일별 시장금리, 공개 sample 인증키)
+#  - 해외 티커: 미국 국채 10년물 (FRED DGS10)
+# 금리를 가져오지 못하면 아래 고정값을 쓰고, 화면에 그 사실을 표시한다.
+RF_KR = 0.03613
+RF_KR_ASOF = "2026-11-06"
 RF_US_FALLBACK = 0.0487
 RF_US_FALLBACK_ASOF = "2026-11-06"
 
 
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
-def get_us10y() -> tuple:
-    """(금리, 기준일, 실시간 여부). FRED DGS10 CSV를 읽고, 실패하면 고정값."""
+def _load_fred_dgs10() -> pd.Series:
+    import io
+    import urllib.request
+
+    url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS10"
+    with urllib.request.urlopen(url, timeout=8) as resp:
+        raw = resp.read().decode("utf-8")
+    data = pd.read_csv(io.StringIO(raw), na_values=["."]).dropna()
+    return pd.Series(data.iloc[:, 1].astype(float).values / 100, index=pd.to_datetime(data.iloc[:, 0]))
+
+
+def us10y_asof(asof: date):
+    """asof 이전(당일 포함) 가장 최근 미국 10년물 금리 → (금리, 기준일) 또는 None."""
     try:
-        import io
-        import urllib.request
-
-        url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS10"
-        with urllib.request.urlopen(url, timeout=6) as resp:
-            raw = resp.read().decode("utf-8")
-        data = pd.read_csv(io.StringIO(raw), na_values=["."]).dropna()
-        return float(data.iloc[-1, 1]) / 100, str(data.iloc[-1, 0]), True
+        s = _load_fred_dgs10()
+        s = s[s.index <= pd.Timestamp(asof)]
+        if s.empty:
+            return None
+        return float(s.iloc[-1]), s.index[-1].strftime("%Y-%m-%d")
     except Exception:  # noqa: BLE001
-        return RF_US_FALLBACK, RF_US_FALLBACK_ASOF, False
+        return None
 
 
-def risk_free_for(domestic: bool) -> tuple:
-    """종목이 속한 나라에 맞는 (무위험수익률, 설명 문구)."""
+@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
+def _load_kr3y(start: str, end: str) -> list:
+    import json
+    import urllib.request
+
+    url = f"https://ecos.bok.or.kr/api/StatisticSearch/sample/json/kr/1/10/817Y002/D/{start}/{end}/010200000"
+    with urllib.request.urlopen(url, timeout=8) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    rows = data["StatisticSearch"]["row"]
+    return [(r["TIME"], float(r["DATA_VALUE"])) for r in rows if r.get("DATA_VALUE")]
+
+
+def kr3y_asof(asof: date):
+    """asof 이전(당일 포함) 가장 최근 국고채 3년물 금리 → (금리, 기준일) 또는 None.
+    sample 인증키는 한 번에 10건까지라서 최근 12일 구간만 요청한다."""
+    try:
+        start = (asof - timedelta(days=12)).strftime("%Y%m%d")
+        end = asof.strftime("%Y%m%d")
+        rows = [x for x in _load_kr3y(start, end) if x[0] <= end]
+        if not rows:
+            return None
+        t, v = max(rows)
+        return v / 100, f"{t[:4]}-{t[4:6]}-{t[6:]}"
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def risk_free_for(domestic: bool, asof: date) -> tuple:
+    """종목이 속한 나라의 (조회 기간 마지막 영업일 기준 무위험수익률, 설명 문구)."""
     if domestic:
-        return RF_KR, f"한국 국고채 3년물 {RF_KR * 100:.2f}% ({RF_KR_ASOF} 기준, 고정값)"
-    rate, asof, live = get_us10y()
-    src = "FRED" if live else "고정값"
-    return rate, f"미국 국채 10년물 {rate * 100:.2f}% ({asof} 기준, {src}) · 해외 티커는 모두 미국 금리 적용"
+        got = kr3y_asof(asof)
+        if got:
+            return got[0], f"한국 국고채 3년물 {got[0] * 100:.2f}% ({got[1]} 기준 · 조회 기간 마지막 영업일 · 한국은행 ECOS)"
+        return RF_KR, (
+            f"한국 국고채 3년물 {RF_KR * 100:.2f}% (금리 조회 실패로 {RF_KR_ASOF} 고정값 사용, "
+            "조회 기간 마지막 영업일 값이 아님)"
+        )
+    got = us10y_asof(asof)
+    if got:
+        return got[0], (
+            f"미국 국채 10년물 {got[0] * 100:.2f}% ({got[1]} 기준 · 조회 기간 마지막 영업일 · FRED) "
+            "· 해외 티커는 모두 미국 금리 적용"
+        )
+    return RF_US_FALLBACK, (
+        f"미국 국채 10년물 {RF_US_FALLBACK * 100:.2f}% (금리 조회 실패로 {RF_US_FALLBACK_ASOF} 고정값 사용, "
+        "조회 기간 마지막 영업일 값이 아님)"
+    )
 
 
 def show_stats(df: pd.DataFrame, rf: float, rf_label: str) -> None:
@@ -361,7 +410,7 @@ def render_single(listing: pd.DataFrame) -> None:
         st.caption("기간이 길어 캔들을 주봉(1주 = 1개)으로 묶어서 표시합니다. 위 지표는 일별 데이터 기준입니다.")
 
     st.subheader("기간 통계")
-    rf, rf_label = risk_free_for(domestic)
+    rf, rf_label = risk_free_for(domestic, df.index[-1].date())
     show_stats(df, rf, rf_label)
 
     with st.expander("데이터 표 보기"):
