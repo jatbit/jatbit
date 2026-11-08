@@ -105,7 +105,7 @@ def add_rates(fig, kinds: list, start_d, end_d, axis_n: int, domain=None) -> Non
         ))
         drawn = True
     if drawn:
-        ax = dict(title="금리(%)", overlaying="y", side="right", showgrid=False, ticksuffix="%", anchor="x")
+        ax = dict(title="금리(%)", overlaying="y", side="right", showgrid=False, ticksuffix="%", tickformat=".2f", anchor="x")
         if domain:
             ax["domain"] = domain
         fig.update_layout(**{f"yaxis{axis_n}": ax})
