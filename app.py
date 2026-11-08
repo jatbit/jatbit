@@ -170,7 +170,41 @@ def _with_date(text: str, d) -> str:
     return f'{text}<br><span style="font-size:0.7rem;opacity:0.7">{d:%Y-%m-%d}</span>'
 
 
-def show_stats(df: pd.DataFrame, rf: float) -> None:
+# 무위험수익률: 한국 종목 = 국고채 3년물, 해외(미국) 종목 = 미국 국채 10년물
+# 한국 국고채 3년물은 고정값이므로 금리가 크게 바뀌면 이 값을 갱신해야 한다.
+RF_KR = 0.0374
+RF_KR_ASOF = "2026-11-02"
+# 미국 10년물은 FRED에서 가져오고, 실패하면 아래 고정값을 쓴다.
+RF_US_FALLBACK = 0.0487
+RF_US_FALLBACK_ASOF = "2026-11-06"
+
+
+@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
+def get_us10y() -> tuple:
+    """(금리, 기준일, 실시간 여부). FRED DGS10 CSV를 읽고, 실패하면 고정값."""
+    try:
+        import io
+        import urllib.request
+
+        url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS10"
+        with urllib.request.urlopen(url, timeout=6) as resp:
+            raw = resp.read().decode("utf-8")
+        data = pd.read_csv(io.StringIO(raw), na_values=["."]).dropna()
+        return float(data.iloc[-1, 1]) / 100, str(data.iloc[-1, 0]), True
+    except Exception:  # noqa: BLE001
+        return RF_US_FALLBACK, RF_US_FALLBACK_ASOF, False
+
+
+def risk_free_for(domestic: bool) -> tuple:
+    """종목이 속한 나라에 맞는 (무위험수익률, 설명 문구)."""
+    if domestic:
+        return RF_KR, f"한국 국고채 3년물 {RF_KR * 100:.2f}% ({RF_KR_ASOF} 기준, 고정값)"
+    rate, asof, live = get_us10y()
+    src = "FRED" if live else "고정값"
+    return rate, f"미국 국채 10년물 {rate * 100:.2f}% ({asof} 기준, {src}) · 해외 티커는 모두 미국 금리 적용"
+
+
+def show_stats(df: pd.DataFrame, rf: float, rf_label: str) -> None:
     """조회 기간의 기본 통계 (일별 종가 수익률 기준)."""
     close = df["Close"].dropna()
     r = close.pct_change().dropna()
@@ -203,13 +237,14 @@ def show_stats(df: pd.DataFrame, rf: float) -> None:
         ("최대 일간 상승", _with_date(_pct(float(r.max()), True), best_date), None, True),
         ("최대 일간 하락", _with_date(_pct(float(r.min()), True), worst_date), None, True),
         ("상승일 비율", _pct(up_ratio), None, True),
-        ("샤프비율", "-" if sharpe != sharpe else f"{sharpe:.2f}", None, True),
+        (f"샤프비율 (무위험 {rf * 100:.2f}%)", "-" if sharpe != sharpe else f"{sharpe:.2f}", None, True),
         ("수익률 표본 수", f"{n:,}일", None, True),
     ], cols=3)
     st.caption(
         "일별 종가 기준 단순 수익률로 계산한 과거 통계입니다. "
         "기대수익률 = 일별 수익률 평균, 연환산은 평균×252 · 표준편차×√252. "
         "샤프비율 = (연환산 기대수익률 − 무위험수익률) ÷ 연환산 표준편차. "
+        f"무위험수익률: {rf_label}. "
         "조회 기간이 짧으면 연환산 값이 크게 부풀려질 수 있고, 미래 수익을 보장하지 않습니다."
     )
 
@@ -326,11 +361,8 @@ def render_single(listing: pd.DataFrame) -> None:
         st.caption("기간이 길어 캔들을 주봉(1주 = 1개)으로 묶어서 표시합니다. 위 지표는 일별 데이터 기준입니다.")
 
     st.subheader("기간 통계")
-    rf_pct = st.number_input(
-        "무위험수익률 (연 %, 샤프비율 계산용)", min_value=0.0, max_value=30.0,
-        value=0.0, step=0.1, format="%.2f", key="single_rf",
-    )
-    show_stats(df, rf_pct / 100)
+    rf, rf_label = risk_free_for(domestic)
+    show_stats(df, rf, rf_label)
 
     with st.expander("데이터 표 보기"):
         st.dataframe(df.sort_index(ascending=False), use_container_width=True)
