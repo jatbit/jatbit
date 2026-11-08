@@ -6,7 +6,7 @@
 
 탭 2와 탭 3은 종목·기간 입력이 서로 동기화되고, 탭 1은 독립적입니다.
 
-데이터: FinanceDataReader (국내 KRX 전 종목 + 해외 티커). 일봉 기준이며 실시간 틱 데이터는 아닙니다.
+데이터: FinanceDataReader (국내 KRX 전 종목 + 해외 티커 + 해외 선물). 일봉 기준이며 실시간 틱 데이터는 아닙니다.
 """
 
 import math
@@ -91,6 +91,13 @@ def load_prices(code: str, start: str, end: str) -> pd.DataFrame:
     raise last_err
 
 
+# 해외 선물: Yahoo 연속(근월물 이어붙인) 시세. 표시 이름을 붙여 둔다. 목록에 없는 '=F' 심볼도 그대로 조회는 된다.
+FUTURES_NAMES = {
+    "GC=F": "금 선물", "SI=F": "은 선물", "HG=F": "구리 선물", "CL=F": "WTI 원유 선물",
+    "ES=F": "S&P500 선물", "NQ=F": "나스닥 선물",
+}
+
+
 def find_candidates(query: str, listing: pd.DataFrame) -> list[dict]:
     """검색어로 종목 후보를 찾는다. (국내: 이름/코드, 해외: 티커)"""
     q = query.strip()
@@ -108,9 +115,13 @@ def find_candidates(query: str, listing: pd.DataFrame) -> list[dict]:
     ]
 
     # 국내에서 못 찾았고 영문 티커 형태면 해외 티커로 시도
-    if not candidates and re.fullmatch(r"[A-Za-z][A-Za-z0-9.\-]{0,9}", q):
+    if not candidates and re.fullmatch(r"[A-Za-z][A-Za-z0-9.\-=]{0,9}", q):
         t = q.upper()
-        candidates.append({"code": t, "label": f"{t} (해외 티커)", "name": t, "domestic": False, "market": "US"})
+        if t in FUTURES_NAMES:  # 해외 선물(Yahoo 연속 근월물)
+            nm = FUTURES_NAMES[t]
+            candidates.append({"code": t, "label": f"{nm} ({t}, 해외 선물)", "name": nm, "domestic": False, "market": "US"})
+        else:
+            candidates.append({"code": t, "label": f"{t} (해외 티커)", "name": t, "domestic": False, "market": "US"})
     return candidates
 
 
@@ -510,7 +521,7 @@ def render_single(listing: pd.DataFrame) -> None:
     c1, c3 = st.columns([3, 2])
     query = c1.text_input(
         "종목 검색", key="single_query",
-        placeholder="종목명 (예: 삼성전자) 또는 종목코드 / 해외 티커 (예: AAPL)",
+        placeholder="종목명 (예: 삼성전자) 또는 종목코드 / 해외 티커 (예: AAPL, GC=F)",
     )
     chart_type = c3.radio("차트 종류", ["선", "캔들"], horizontal=True, key="single_type")
     period = period_input("single_period")
@@ -644,10 +655,10 @@ def render_compare(listing: pd.DataFrame) -> None:
     period = period_input("cmp_period", mirror="pf_period", presets=True)
     extra = st.text_input(
         "해외 티커 또는 종목 추가 (쉼표로 구분)", key="cmp_extra",
-        placeholder="예: AAPL, NVDA, 005930",
+        placeholder="예: AAPL, NVDA, 005930, GC=F(금 선물)",
         on_change=_mirror, args=("cmp_extra", "pf_extra"),
     )
-    st.caption("종목·기간 입력은 '포트폴리오 최적화' 탭과 함께 바뀝니다.")
+    st.caption("종목·기간 입력은 '포트폴리오 최적화' 탭과 함께 바뀝니다. 해외 선물: GC=F 금, SI=F 은, HG=F 구리, CL=F 원유.")
 
     # 선택 항목 정리 (중복 제거)
     items: list[dict] = []
@@ -803,10 +814,10 @@ def render_portfolio(listing: pd.DataFrame) -> None:
     period = period_input("pf_period", mirror="cmp_period", presets=True)
     extra = st.text_input(
         "해외 티커 또는 종목 추가 (쉼표로 구분)", key="pf_extra",
-        placeholder="예: AAPL, NVDA, 005930",
+        placeholder="예: AAPL, NVDA, 005930, GC=F(금 선물)",
         on_change=_mirror, args=("pf_extra", "cmp_extra"),
     )
-    st.caption("종목·기간 입력은 '수익률 비교' 탭과 함께 바뀝니다.")
+    st.caption("종목·기간 입력은 '수익률 비교' 탭과 함께 바뀝니다. 해외 선물: GC=F 금, SI=F 은, HG=F 구리, CL=F 원유.")
 
     items: list[dict] = []
     seen: set[str] = set()
