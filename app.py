@@ -1,6 +1,6 @@
 """주가 차트 조회 프로그램.
 
-탭 1) 주가 조회: 종목 하나의 기간별 주가 차트
+탭 1) 주가 조회: 종목 하나의 기간별 주가 차트 + 기간 통계
 탭 2) 수익률 비교: 여러 종목을 기간 시작일 = 0% 기준으로 겹쳐서 비교
 
 데이터: FinanceDataReader (국내 KRX 전 종목 + 해외 티커). 일봉 기준이며 실시간 틱 데이터는 아닙니다.
@@ -157,6 +157,63 @@ def period_input(key: str):
     return None
 
 
+TRADING_DAYS = 252
+
+
+def _pct(x: float, sign: bool = False) -> str:
+    if x != x:  # NaN
+        return "-"
+    return f"{x * 100:+.2f}%" if sign else f"{x * 100:.2f}%"
+
+
+def _with_date(text: str, d) -> str:
+    return f'{text}<br><span style="font-size:0.7rem;opacity:0.7">{d:%Y-%m-%d}</span>'
+
+
+def show_stats(df: pd.DataFrame, rf: float) -> None:
+    """조회 기간의 기본 통계 (일별 종가 수익률 기준)."""
+    close = df["Close"].dropna()
+    r = close.pct_change().dropna()
+    if len(r) < 2:
+        st.info("통계를 계산하기에 데이터가 부족합니다. 기간을 늘려 보세요.")
+        return
+
+    n = len(r)
+    mean_d = float(r.mean())
+    std_d = float(r.std(ddof=1))
+    mean_a = mean_d * TRADING_DAYS
+    std_a = std_d * TRADING_DAYS ** 0.5
+    total = float(close.iloc[-1] / close.iloc[0] - 1)
+    years = n / TRADING_DAYS
+    cagr = (1 + total) ** (1 / years) - 1 if total > -1 and years > 0 else float("nan")
+    dd = close / close.cummax() - 1
+    mdd, mdd_date = float(dd.min()), dd.idxmin()
+    best_date, worst_date = r.idxmax(), r.idxmin()
+    up_ratio = float((r > 0).mean())
+    sharpe = (mean_a - rf) / std_a if std_a > 0 else float("nan")
+
+    metric_grid([
+        ("기간 수익률", _pct(total, True), None, True),
+        ("연환산 수익률(복리)", _pct(cagr, True), None, True),
+        ("일평균 수익률", _pct(mean_d, True), None, True),
+        ("연환산 기대수익률", _pct(mean_a, True), None, True),
+        ("일간 표준편차", _pct(std_d), None, True),
+        ("연환산 표준편차", _pct(std_a), None, True),
+        ("최대 낙폭(MDD)", _with_date(_pct(mdd), mdd_date), None, True),
+        ("최대 일간 상승", _with_date(_pct(float(r.max()), True), best_date), None, True),
+        ("최대 일간 하락", _with_date(_pct(float(r.min()), True), worst_date), None, True),
+        ("상승일 비율", _pct(up_ratio), None, True),
+        ("샤프비율", "-" if sharpe != sharpe else f"{sharpe:.2f}", None, True),
+        ("수익률 표본 수", f"{n:,}일", None, True),
+    ], cols=3)
+    st.caption(
+        "일별 종가 기준 단순 수익률로 계산한 과거 통계입니다. "
+        "기대수익률 = 일별 수익률 평균, 연환산은 평균×252 · 표준편차×√252. "
+        "샤프비율 = (연환산 기대수익률 − 무위험수익률) ÷ 연환산 표준편차. "
+        "조회 기간이 짧으면 연환산 값이 크게 부풀려질 수 있고, 미래 수익을 보장하지 않습니다."
+    )
+
+
 # ======================================================================
 # 탭 1: 주가 조회
 # ======================================================================
@@ -267,6 +324,13 @@ def render_single(listing: pd.DataFrame) -> None:
     st.plotly_chart(fig, use_container_width=True)
     if weekly:
         st.caption("기간이 길어 캔들을 주봉(1주 = 1개)으로 묶어서 표시합니다. 위 지표는 일별 데이터 기준입니다.")
+
+    st.subheader("기간 통계")
+    rf_pct = st.number_input(
+        "무위험수익률 (연 %, 샤프비율 계산용)", min_value=0.0, max_value=30.0,
+        value=0.0, step=0.1, format="%.2f", key="single_rf",
+    )
+    show_stats(df, rf_pct / 100)
 
     with st.expander("데이터 표 보기"):
         st.dataframe(df.sort_index(ascending=False), use_container_width=True)
