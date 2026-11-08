@@ -2,14 +2,17 @@
 
 탭 1) 주가 조회: 종목 하나의 기간별 주가 차트
 탭 2) 수익률 비교: 여러 종목을 기간 시작일 = 0% 기준으로 겹쳐서 비교
+탭 3) 포트폴리오 최적화: 종목별 CAPM 수치 + 최대 샤프 포트폴리오와 그 CAPM
 
 데이터: FinanceDataReader (국내 KRX 전 종목 + 해외 티커). 일봉 기준이며 실시간 틱 데이터는 아닙니다.
 """
 
+import math
 import re
 from datetime import date, datetime, timedelta, timezone
 
 import FinanceDataReader as fdr
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -21,6 +24,7 @@ DOWN_COLOR = "#2B6CB0"    # 하락 = 파랑
 VOLUME_COLOR = "#A0AEC0"
 SERIES_COLORS = ["#2B6CB0", "#D64545", "#2F855A", "#B7791F", "#6B46C1", "#0987A0", "#DD6B20", "#4A5568"]
 MAX_COMPARE = 8
+MAX_PF = 10
 
 st.set_page_config(page_title="주가 차트", layout="wide")
 
@@ -262,6 +266,56 @@ def benchmark_for(market: str, domestic: bool) -> tuple:
     return "KS11", "코스피 지수"
 
 
+def capm_stats(r: pd.Series, m: pd.Series, rf: float):
+    """같은 날짜로 맞춘 일별 수익률 r(종목/포트폴리오), m(시장)의 CAPM 지표 딕셔너리."""
+    var_m = float(m.var(ddof=1))
+    if var_m <= 0:
+        return None
+    beta = float(r.cov(m)) / var_m
+    corr = float(r.corr(m))
+    mean_a = float(r.mean()) * TRADING_DAYS
+    mean_m = float(m.mean()) * TRADING_DAYS
+    std_a = float(r.std(ddof=1)) * TRADING_DAYS ** 0.5
+    std_m = float(m.std(ddof=1)) * TRADING_DAYS ** 0.5
+    capm = rf + beta * (mean_m - rf)
+    sys_risk = abs(beta) * std_m
+    return {
+        "beta": beta, "corr": corr, "r2": corr ** 2,
+        "mean_a": mean_a, "mean_m": mean_m, "std_a": std_a, "std_m": std_m,
+        "capm": capm, "alpha": mean_a - capm,
+        "treynor": (mean_a - rf) / beta if beta != 0 else float("nan"),
+        "sys": sys_risk, "idio": max(std_a ** 2 - sys_risk ** 2, 0.0) ** 0.5,
+        "n": len(r),
+    }
+
+
+def capm_grid(c: dict, name: str) -> None:
+    metric_grid([
+        ("벤치마크", name, None, True),
+        ("베타 (β)", f"{c['beta']:.2f}", None, True),
+        ("상관계수 (ρ)", f"{c['corr']:.2f}", None, True),
+        ("결정계수 (R²)", f"{c['r2']:.2f}", None, True),
+        ("시장 연환산 수익률", _pct(c["mean_m"], True), None, True),
+        ("시장 연환산 표준편차", _pct(c["std_m"]), None, True),
+        ("CAPM 기대수익률", _pct(c["capm"], True), None, True),
+        ("젠센 알파 (연)", _pct(c["alpha"], True), None, True),
+        ("트레이너 비율", "-" if c["treynor"] != c["treynor"] else f"{c['treynor']:.3f}", None, True),
+        ("체계적 위험 (|β|σm)", _pct(c["sys"]), None, True),
+        ("비체계적 위험", _pct(c["idio"]), None, True),
+        ("공통 표본 수", f"{c['n']:,}일", None, True),
+    ], cols=4)
+
+
+def capm_note(name: str) -> str:
+    return (
+        f"베타 = 종목(또는 포트폴리오)·{name} 일별 수익률의 공분산 ÷ 지수 분산. "
+        "CAPM 기대수익률 = 무위험수익률 + β × (시장 수익률 − 무위험수익률), 여기서 시장 수익률은 같은 기간 지수의 연환산 평균 수익률(과거 실현값)입니다. "
+        "젠센 알파 = 연환산 수익률 − CAPM 기대수익률. 트레이너 비율 = (연환산 수익률 − 무위험수익률) ÷ β. "
+        "체계적 위험 = |β| × 시장 표준편차, 비체계적 위험 = √(총 분산 − 체계적 분산). "
+        "조회 기간이 짧으면 값이 크게 흔들립니다."
+    )
+
+
 def show_capm(df: pd.DataFrame, rf: float, bench: tuple) -> None:
     """CAPM 기본 지표: 벤치마크 지수 대비 베타, 알파 등 (일별 수익률 회귀)."""
     code, name = bench
@@ -276,45 +330,12 @@ def show_capm(df: pd.DataFrame, rf: float, bench: tuple) -> None:
     if len(j) < 20:
         st.caption(f"CAPM 지표: 벤치마크({name})와 겹치는 거래일이 {len(j)}일뿐이라 계산하지 않았습니다. 기간을 늘려 보세요.")
         return
-
-    var_m = float(j["m"].var(ddof=1))
-    if var_m <= 0:
+    c = capm_stats(j["r"], j["m"], rf)
+    if c is None:
         return
-    beta = float(j["r"].cov(j["m"])) / var_m
-    corr = float(j["r"].corr(j["m"]))
-    r2 = corr ** 2
-    mean_a = float(j["r"].mean()) * TRADING_DAYS
-    mean_m = float(j["m"].mean()) * TRADING_DAYS
-    std_a = float(j["r"].std(ddof=1)) * TRADING_DAYS ** 0.5
-    std_m = float(j["m"].std(ddof=1)) * TRADING_DAYS ** 0.5
-    capm = rf + beta * (mean_m - rf)
-    alpha = mean_a - capm
-    treynor = (mean_a - rf) / beta if beta != 0 else float("nan")
-    sys_risk = abs(beta) * std_m
-    idio = max(std_a ** 2 - sys_risk ** 2, 0.0) ** 0.5
-
     st.markdown("**CAPM 기본 지표**")
-    metric_grid([
-        ("벤치마크", name, None, True),
-        ("베타 (β)", f"{beta:.2f}", None, True),
-        ("상관계수 (ρ)", f"{corr:.2f}", None, True),
-        ("결정계수 (R²)", f"{r2:.2f}", None, True),
-        ("시장 연환산 수익률", _pct(mean_m, True), None, True),
-        ("시장 연환산 표준편차", _pct(std_m), None, True),
-        ("CAPM 기대수익률", _pct(capm, True), None, True),
-        ("젠센 알파 (연)", _pct(alpha, True), None, True),
-        ("트레이너 비율", "-" if treynor != treynor else f"{treynor:.3f}", None, True),
-        ("체계적 위험 (|β|σm)", _pct(sys_risk), None, True),
-        ("비체계적 위험", _pct(idio), None, True),
-        ("공통 표본 수", f"{len(j):,}일", None, True),
-    ], cols=4)
-    st.caption(
-        f"베타 = 종목·{name} 일별 수익률의 공분산 ÷ 지수 분산. "
-        "CAPM 기대수익률 = 무위험수익률 + β × (시장 수익률 − 무위험수익률), 여기서 시장 수익률은 같은 기간 지수의 연환산 평균 수익률(과거 실현값)입니다. "
-        "젠센 알파 = 종목 연환산 수익률 − CAPM 기대수익률. 트레이너 비율 = (종목 연환산 수익률 − 무위험수익률) ÷ β. "
-        "체계적 위험 = |β| × 시장 표준편차, 비체계적 위험 = √(총 분산 − 체계적 분산). "
-        "조회 기간이 짧으면 값이 크게 흔들립니다."
-    )
+    capm_grid(c, name)
+    st.caption(capm_note(name))
 
 
 def show_stats(df: pd.DataFrame, rf: float, rf_label: str, bench: tuple = None) -> None:
@@ -588,6 +609,264 @@ def render_compare(listing: pd.DataFrame) -> None:
 
 
 # ======================================================================
+# 탭 3: 포트폴리오 최적화
+# ======================================================================
+def _port_stats(W: np.ndarray, mu: np.ndarray, cov: np.ndarray, rf: float):
+    ret = W @ mu
+    vol = np.sqrt(np.maximum(np.einsum("ij,jk,ik->i", W, cov, W), 1e-18))
+    return ret, vol, (ret - rf) / vol
+
+
+def _refine(w: np.ndarray, score, cap: float) -> np.ndarray:
+    """한 종목에서 다른 종목으로 비중을 옮겨 보며 score를 더 키울 수 있으면 계속 옮긴다. (공매도 불가, 종목당 상한 cap)"""
+    w = w.copy()
+    best = score(w)
+    n = len(w)
+    for step in (0.05, 0.02, 0.01, 0.005, 0.002, 0.001):
+        improved = True
+        while improved:
+            improved = False
+            for i in range(n):
+                for j in range(n):
+                    if i == j:
+                        continue
+                    amt = min(step, w[j], cap - w[i])
+                    if amt < 1e-12:
+                        continue
+                    t = w.copy()
+                    t[i] += amt
+                    t[j] -= amt
+                    v = score(t)
+                    if v > best + 1e-12:
+                        w, best, improved = t, v, True
+    return w
+
+
+def optimize_portfolios(mu: np.ndarray, cov: np.ndarray, rf: float, cap: float, seed: int = 42):
+    """무작위 후보 + 비중 이동 탐색으로 최대 샤프 / 최소 분산 포트폴리오를 찾는다. (SciPy 없이 numpy만 사용)"""
+    n = len(mu)
+    rng = np.random.default_rng(seed)
+    per = 6000
+    W = np.vstack([rng.dirichlet(np.ones(n) * a, size=per) for a in (0.3, 1.0, 3.0)] + [np.full((1, n), 1.0 / n)])
+    W = W[W.max(axis=1) <= cap + 1e-9]
+    ret, vol, sh = _port_stats(W, mu, cov, rf)
+
+    def sharpe_f(w):
+        r_, v_, s_ = _port_stats(w[None, :], mu, cov, rf)
+        return float(s_[0])
+
+    def negvar(w):
+        return -float(w @ cov @ w)
+
+    w_sh = _refine(W[int(np.argmax(sh))], sharpe_f, cap)
+    w_mv = _refine(W[int(np.argmin(vol))], negvar, cap)
+    return {
+        "max_sharpe": w_sh, "min_var": w_mv, "equal": np.full(n, 1.0 / n),
+        "cloud": (vol[::6], ret[::6]),
+    }
+
+
+def render_portfolio(listing: pd.DataFrame) -> None:
+    ordered = listing.sort_values("Name")
+    options = {f"{r.Name} ({r.Code})": (r.Code, r.Name, str(r.Market)) for r in ordered.itertuples()}
+
+    selected = st.multiselect(
+        f"포트폴리오에 넣을 종목 (2~{MAX_PF}개, 이름을 입력하면 검색됩니다)",
+        list(options.keys()), key="pf_selected",
+    )
+    period = period_input("pf_period")
+    extra = st.text_input(
+        "해외 티커 또는 종목 추가 (쉼표로 구분)", key="pf_extra",
+        placeholder="예: AAPL, NVDA, 005930",
+    )
+
+    items: list[dict] = []
+    seen: set[str] = set()
+    for label in selected:
+        code, name, market = options[label]
+        if code not in seen:
+            seen.add(code)
+            items.append({"code": code, "name": name, "domestic": True, "market": market})
+    for token in [t.strip() for t in extra.split(",") if t.strip()]:
+        cands = find_candidates(token, listing)
+        if not cands:
+            st.warning(f"'{token}' 종목을 찾지 못했습니다.")
+            continue
+        c = cands[0]
+        if c["code"] not in seen:
+            seen.add(c["code"])
+            items.append({"code": c["code"], "name": c["name"], "domestic": c["domestic"], "market": c.get("market", "")})
+
+    if len(items) < 2:
+        st.info("종목을 2개 이상 선택하세요.")
+        return
+    if period is None:
+        st.info("기간의 시작일과 종료일을 모두 선택하세요.")
+        return
+    if len(items) > MAX_PF:
+        st.warning(f"종목이 너무 많아 앞의 {MAX_PF}개만 사용합니다.")
+        items = items[:MAX_PF]
+    start_d, end_d = period
+    n = len(items)
+
+    # 벤치마크: 전부 국내 종목이면 국내 지수, 해외가 섞이면 S&P 500 (직접 바꿀 수 있음)
+    bench_opts = {"코스피 지수": "KS11", "코스닥 지수": "KQ11", "S&P 500": "US500"}
+    if all(it["domestic"] for it in items):
+        default_bench = 1 if all(it["market"].upper().startswith("KOSDAQ") for it in items) else 0
+    else:
+        default_bench = 2
+    cc1, cc2 = st.columns(2)
+    bench_name = cc1.selectbox("CAPM 벤치마크(시장 지수)", list(bench_opts), index=default_bench)
+    cap_pct = cc2.slider("종목당 최대 비중 (%)", min_value=int(math.ceil(100 / n)), max_value=100, value=100, step=1)
+    cap = cap_pct / 100
+    bench_code = bench_opts[bench_name]
+
+    names = [it["name"] for it in items]
+    if len(names) != len(set(names)):
+        st.error("이름이 같은 종목이 있습니다. 종목을 다시 선택하세요.")
+        return
+
+    # 가격 불러오기 → 공통 거래일로 정렬
+    series = {}
+    for it in items + [{"code": bench_code, "name": bench_name}]:
+        try:
+            d = load_prices(it["code"], start_d.isoformat(), end_d.isoformat())
+        except Exception as e:  # noqa: BLE001
+            st.error(f"{it['name']}: 데이터를 불러오지 못했습니다 ({e})")
+            return
+        if d is None or d.empty or "Close" not in d:
+            st.error(f"{it['name']}: 선택한 기간에 데이터가 없습니다.")
+            return
+        series[it["name"]] = d["Close"].dropna()
+    P = pd.concat(series, axis=1, join="inner").dropna()
+    R = P.pct_change().dropna()
+    if len(R) < 30:
+        st.warning(f"모든 종목이 겹치는 거래일이 {len(R)}일뿐입니다. 기간을 늘리거나 종목을 바꿔 보세요.")
+        return
+    Rs, m = R[names], R[bench_name]
+
+    rf, rf_label = risk_free_for(bench_code != "US500", R.index[-1].date())
+    mu = Rs.mean().values * TRADING_DAYS
+    cov = Rs.cov().values * TRADING_DAYS
+
+    st.caption(
+        f"분석 구간: {P.index[0]:%Y-%m-%d} ~ {P.index[-1]:%Y-%m-%d} (모든 종목·지수가 함께 거래된 {len(R):,}일 수익률 기준, 통화 환산 없음)"
+    )
+
+    # ---- 종목별 수치
+    st.subheader("종목별 수치")
+    rows = []
+    for nm in names:
+        r = Rs[nm]
+        c = capm_stats(r, m, rf)
+        px = P[nm]
+        mdd = float((px / px.cummax() - 1).min())
+        sd = float(r.std(ddof=1)) * TRADING_DAYS ** 0.5
+        mean_a = float(r.mean()) * TRADING_DAYS
+        rows.append({
+            "종목": nm,
+            "기간 수익률": _pct(float(px.iloc[-1] / px.iloc[0] - 1), True),
+            "연환산 기대수익률": _pct(mean_a, True),
+            "연환산 표준편차": _pct(sd),
+            "샤프비율": f"{(mean_a - rf) / sd:.2f}" if sd > 0 else "-",
+            "베타": f"{c['beta']:.2f}",
+            "상관계수": f"{c['corr']:.2f}",
+            "R²": f"{c['r2']:.2f}",
+            "CAPM 기대수익률": _pct(c["capm"], True),
+            "젠센 알파": _pct(c["alpha"], True),
+            "트레이너": f"{c['treynor']:.3f}" if c["treynor"] == c["treynor"] else "-",
+            "MDD": _pct(mdd),
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.caption(f"무위험수익률: {rf_label}. 벤치마크: {bench_name}.")
+
+    # ---- 최적화
+    res = optimize_portfolios(mu, cov, rf, cap)
+    ports = {
+        "최대 샤프 (최적)": res["max_sharpe"],
+        "최소 분산": res["min_var"],
+        "동일 비중": res["equal"],
+    }
+
+    st.subheader("최적 투자비율")
+    wdf = pd.DataFrame({"종목": names, **{k: [f"{x * 100:.1f}%" for x in w] for k, w in ports.items()}})
+    st.dataframe(wdf, use_container_width=True, hide_index=True)
+
+    bar = go.Figure()
+    for (k, w), color in zip(ports.items(), [SERIES_COLORS[1], SERIES_COLORS[0], "#A0AEC0"]):
+        bar.add_trace(go.Bar(x=names, y=w * 100, name=k, marker_color=color,
+                             hovertemplate="%{x}<br>" + k + " %{y:.1f}%<extra></extra>"))
+    bar.update_layout(barmode="group", height=300, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
+                      yaxis=dict(title="비중(%)", ticksuffix="%"),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0))
+    st.plotly_chart(bar, use_container_width=True)
+    st.caption(
+        "최대 샤프 = (기대수익률 − 무위험수익률) ÷ 표준편차가 가장 큰 조합(접점 포트폴리오), 공매도 없이 비중 합 100%, "
+        f"종목당 최대 {cap_pct}%. 과거 평균 수익률을 미래 기대수익률로 쓰기 때문에 기간이 짧으면 한두 종목에 비중이 쏠릴 수 있습니다."
+    )
+
+    # ---- 포트폴리오 수치 비교
+    st.subheader("포트폴리오 비교")
+    prow = {}
+    pseries = {}
+    for k, w in ports.items():
+        rp = Rs.values @ w
+        rp = pd.Series(rp, index=Rs.index)
+        pseries[k] = rp
+        c = capm_stats(rp, m, rf)
+        mean_a, sd = c["mean_a"], c["std_a"]
+        cum = (1 + rp).cumprod()
+        prow[k] = {
+            "기간 수익률": _pct(float(cum.iloc[-1] - 1), True),
+            "연환산 기대수익률": _pct(mean_a, True),
+            "연환산 표준편차": _pct(sd),
+            "샤프비율": f"{(mean_a - rf) / sd:.2f}" if sd > 0 else "-",
+            "MDD": _pct(float((cum / cum.cummax() - 1).min())),
+            "베타": f"{c['beta']:.2f}",
+            "상관계수": f"{c['corr']:.2f}",
+            "R²": f"{c['r2']:.2f}",
+            "CAPM 기대수익률": _pct(c["capm"], True),
+            "젠센 알파": _pct(c["alpha"], True),
+            "트레이너": f"{c['treynor']:.3f}" if c["treynor"] == c["treynor"] else "-",
+        }
+    st.dataframe(pd.DataFrame(prow), use_container_width=True)
+    st.caption("각 포트폴리오는 위 비중을 기간 내내 매일 유지(일별 리밸런싱)한다고 가정한 일별 수익률로 계산했습니다. 거래비용·세금은 반영하지 않았습니다.")
+
+    # ---- 최적 포트폴리오 CAPM
+    st.subheader("최적 포트폴리오(최대 샤프)의 CAPM")
+    c_opt = capm_stats(pseries["최대 샤프 (최적)"], m, rf)
+    capm_grid(c_opt, bench_name)
+    st.caption(capm_note(bench_name))
+
+    # ---- 효율적 투자선
+    st.subheader("위험-수익 평면")
+    vol_c, ret_c = res["cloud"]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=vol_c * 100, y=ret_c * 100, mode="markers", name="무작위 포트폴리오",
+                             marker=dict(size=4, color="#CBD5E0", opacity=0.6), hoverinfo="skip"))
+    sd_i = np.sqrt(np.diag(cov))
+    fig.add_trace(go.Scatter(x=sd_i * 100, y=mu * 100, mode="markers+text", text=names, textposition="top center",
+                             name="개별 종목", marker=dict(size=9, symbol="diamond", color=SERIES_COLORS[2])))
+    markers = {"최대 샤프 (최적)": ("star", 16, SERIES_COLORS[1]), "최소 분산": ("circle", 11, SERIES_COLORS[0]),
+               "동일 비중": ("square", 9, "#718096")}
+    for k, w in ports.items():
+        sym, size, col = markers[k]
+        fig.add_trace(go.Scatter(x=[float(np.sqrt(w @ cov @ w)) * 100], y=[float(w @ mu) * 100], mode="markers", name=k,
+                                 marker=dict(size=size, symbol=sym, color=col, line=dict(width=1, color="white"))))
+    w_o = ports["최대 샤프 (최적)"]
+    s_o, r_o = float(np.sqrt(w_o @ cov @ w_o)), float(w_o @ mu)
+    x_max = max(float(vol_c.max()), float(sd_i.max())) * 1.1
+    if s_o > 0:
+        fig.add_trace(go.Scatter(x=[0, x_max * 100], y=[rf * 100, (rf + (r_o - rf) / s_o * x_max) * 100], mode="lines",
+                                 name="자본시장선(무위험 ↔ 최적)", line=dict(color=SERIES_COLORS[1], dash="dot", width=1)))
+    fig.update_xaxes(title_text="연환산 표준편차(%)", ticksuffix="%")
+    fig.update_yaxes(title_text="연환산 기대수익률(%)", ticksuffix="%")
+    fig.update_layout(height=460, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0))
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# ======================================================================
 # 실행
 # ======================================================================
 try:
@@ -596,10 +875,12 @@ except Exception as e:  # noqa: BLE001
     st.error(f"종목 목록을 불러오지 못했습니다: {e}")
     st.stop()
 
-tab_single, tab_compare = st.tabs(["주가 조회", "수익률 비교"])
+tab_single, tab_compare, tab_pf = st.tabs(["주가 조회", "수익률 비교", "포트폴리오 최적화"])
 with tab_single:
     render_single(LISTING)
 with tab_compare:
     render_compare(LISTING)
+with tab_pf:
+    render_portfolio(LISTING)
 
 st.caption("일봉 기준 데이터이며 실시간 시세가 아닙니다. 장중에는 지연되거나 당일 값이 반영되지 않을 수 있습니다.")
