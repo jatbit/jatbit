@@ -37,11 +37,11 @@ st.markdown(
     [data-testid="stMetricDelta"] { font-size: 0.72rem !important; }
     button[data-baseweb="tab"] p { font-size: 0.9rem !important; }
     .block-container { padding-top: 2.5rem !important; }
-    .mg { display: grid; gap: 0.6rem 0.8rem; margin: 0.4rem 0 0.8rem 0; }
+    .mg { display: grid; gap: 0.5rem 0.6rem; margin: 0.4rem 0 0.8rem 0; }
     .mg-cell { min-width: 0; }
-    .mg-label { font-size: 0.72rem; opacity: 0.75; }
-    .mg-value { font-size: clamp(0.85rem, 3.8vw, 1.1rem); font-weight: 500; word-break: keep-all; }
-    .mg-delta { font-size: 0.72rem; }
+    .mg-label { font-size: 0.64rem; opacity: 0.75; }
+    .mg-value { font-size: clamp(0.72rem, 2.6vw, 0.95rem); font-weight: 500; word-break: keep-all; }
+    .mg-delta { font-size: 0.64rem; }
     .mg-delta.up { color: #E5534B; }
     .mg-delta.down { color: #4C8DF6; }
     </style>
@@ -81,14 +81,14 @@ def find_candidates(query: str, listing: pd.DataFrame) -> list[dict]:
     found = pd.concat([by_code, exact, partial]).drop_duplicates(subset="Code")
 
     candidates = [
-        {"code": r.Code, "label": f"{r.Name} ({r.Code}, {r.Market})", "name": r.Name, "domestic": True}
+        {"code": r.Code, "label": f"{r.Name} ({r.Code}, {r.Market})", "name": r.Name, "domestic": True, "market": str(r.Market)}
         for r in found.head(30).itertuples()
     ]
 
     # 국내에서 못 찾았고 영문 티커 형태면 해외 티커로 시도
     if not candidates and re.fullmatch(r"[A-Za-z][A-Za-z0-9.\-]{0,9}", q):
         t = q.upper()
-        candidates.append({"code": t, "label": f"{t} (해외 티커)", "name": t, "domestic": False})
+        candidates.append({"code": t, "label": f"{t} (해외 티커)", "name": t, "domestic": False, "market": "US"})
     return candidates
 
 
@@ -167,7 +167,7 @@ def _pct(x: float, sign: bool = False) -> str:
 
 
 def _with_date(text: str, d) -> str:
-    return f'{text}<br><span style="font-size:0.7rem;opacity:0.7">{d:%Y-%m-%d}</span>'
+    return f'{text}<br><span style="font-size:0.6rem;opacity:0.7">{d:%Y-%m-%d}</span>'
 
 
 # 무위험수익률: 조회 기간의 마지막 영업일 기준 금리를 가져온다.
@@ -253,7 +253,71 @@ def risk_free_for(domestic: bool, asof: date) -> tuple:
     )
 
 
-def show_stats(df: pd.DataFrame, rf: float, rf_label: str) -> None:
+def benchmark_for(market: str, domestic: bool) -> tuple:
+    """종목이 속한 시장의 벤치마크 지수 (코드, 이름)."""
+    if not domestic:
+        return "US500", "S&P 500"
+    if str(market).upper().startswith("KOSDAQ"):
+        return "KQ11", "코스닥 지수"
+    return "KS11", "코스피 지수"
+
+
+def show_capm(df: pd.DataFrame, rf: float, bench: tuple) -> None:
+    """CAPM 기본 지표: 벤치마크 지수 대비 베타, 알파 등 (일별 수익률 회귀)."""
+    code, name = bench
+    try:
+        mk = load_prices(code, df.index[0].strftime("%Y-%m-%d"), df.index[-1].strftime("%Y-%m-%d"))
+        m = mk["Close"].dropna().pct_change().dropna()
+    except Exception as e:  # noqa: BLE001
+        st.caption(f"CAPM 지표: 벤치마크({name}) 데이터를 불러오지 못했습니다 ({e})")
+        return
+    r = df["Close"].dropna().pct_change().dropna()
+    j = pd.concat([r.rename("r"), m.rename("m")], axis=1, join="inner").dropna()
+    if len(j) < 20:
+        st.caption(f"CAPM 지표: 벤치마크({name})와 겹치는 거래일이 {len(j)}일뿐이라 계산하지 않았습니다. 기간을 늘려 보세요.")
+        return
+
+    var_m = float(j["m"].var(ddof=1))
+    if var_m <= 0:
+        return
+    beta = float(j["r"].cov(j["m"])) / var_m
+    corr = float(j["r"].corr(j["m"]))
+    r2 = corr ** 2
+    mean_a = float(j["r"].mean()) * TRADING_DAYS
+    mean_m = float(j["m"].mean()) * TRADING_DAYS
+    std_a = float(j["r"].std(ddof=1)) * TRADING_DAYS ** 0.5
+    std_m = float(j["m"].std(ddof=1)) * TRADING_DAYS ** 0.5
+    capm = rf + beta * (mean_m - rf)
+    alpha = mean_a - capm
+    treynor = (mean_a - rf) / beta if beta != 0 else float("nan")
+    sys_risk = abs(beta) * std_m
+    idio = max(std_a ** 2 - sys_risk ** 2, 0.0) ** 0.5
+
+    st.markdown("**CAPM 기본 지표**")
+    metric_grid([
+        ("벤치마크", name, None, True),
+        ("베타 (β)", f"{beta:.2f}", None, True),
+        ("상관계수 (ρ)", f"{corr:.2f}", None, True),
+        ("결정계수 (R²)", f"{r2:.2f}", None, True),
+        ("시장 연환산 수익률", _pct(mean_m, True), None, True),
+        ("시장 연환산 표준편차", _pct(std_m), None, True),
+        ("CAPM 기대수익률", _pct(capm, True), None, True),
+        ("젠센 알파 (연)", _pct(alpha, True), None, True),
+        ("트레이너 비율", "-" if treynor != treynor else f"{treynor:.3f}", None, True),
+        ("체계적 위험 (|β|σm)", _pct(sys_risk), None, True),
+        ("비체계적 위험", _pct(idio), None, True),
+        ("공통 표본 수", f"{len(j):,}일", None, True),
+    ], cols=4)
+    st.caption(
+        f"베타 = 종목·{name} 일별 수익률의 공분산 ÷ 지수 분산. "
+        "CAPM 기대수익률 = 무위험수익률 + β × (시장 수익률 − 무위험수익률), 여기서 시장 수익률은 같은 기간 지수의 연환산 평균 수익률(과거 실현값)입니다. "
+        "젠센 알파 = 종목 연환산 수익률 − CAPM 기대수익률. 트레이너 비율 = (종목 연환산 수익률 − 무위험수익률) ÷ β. "
+        "체계적 위험 = |β| × 시장 표준편차, 비체계적 위험 = √(총 분산 − 체계적 분산). "
+        "조회 기간이 짧으면 값이 크게 흔들립니다."
+    )
+
+
+def show_stats(df: pd.DataFrame, rf: float, rf_label: str, bench: tuple = None) -> None:
     """조회 기간의 기본 통계 (일별 종가 수익률 기준)."""
     close = df["Close"].dropna()
     r = close.pct_change().dropna()
@@ -288,7 +352,7 @@ def show_stats(df: pd.DataFrame, rf: float, rf_label: str) -> None:
         ("상승일 비율", _pct(up_ratio), None, True),
         (f"샤프비율 (무위험 {rf * 100:.2f}%)", "-" if sharpe != sharpe else f"{sharpe:.2f}", None, True),
         ("수익률 표본 수", f"{n:,}일", None, True),
-    ], cols=3)
+    ], cols=4)
     st.caption(
         "일별 종가 기준 단순 수익률로 계산한 과거 통계입니다. "
         "기대수익률 = 일별 수익률 평균, 연환산은 평균×252 · 표준편차×√252. "
@@ -296,6 +360,8 @@ def show_stats(df: pd.DataFrame, rf: float, rf_label: str) -> None:
         f"무위험수익률: {rf_label}. "
         "조회 기간이 짧으면 연환산 값이 크게 부풀려질 수 있고, 미래 수익을 보장하지 않습니다."
     )
+    if bench:
+        show_capm(df, rf, bench)
 
 
 # ======================================================================
@@ -411,7 +477,7 @@ def render_single(listing: pd.DataFrame) -> None:
 
     st.subheader("기간 통계")
     rf, rf_label = risk_free_for(domestic, df.index[-1].date())
-    show_stats(df, rf, rf_label)
+    show_stats(df, rf, rf_label, benchmark_for(chosen.get("market", ""), domestic))
 
     with st.expander("데이터 표 보기"):
         st.dataframe(df.sort_index(ascending=False), use_container_width=True)
