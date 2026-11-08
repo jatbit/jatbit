@@ -7,7 +7,7 @@
 """
 
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import FinanceDataReader as fdr
 import pandas as pd
@@ -115,14 +115,42 @@ def metric_grid(items: list[tuple], cols: int = 3) -> None:
     )
 
 
+QUICK_RANGES = {"1개월": 1, "3개월": 3, "6개월": 6, "1년": 12, "5년": 60}
+
+
+def kst_today() -> date:
+    """한국 시간 기준 오늘 날짜 (서버가 UTC여도 날짜가 어긋나지 않게)."""
+    return datetime.now(timezone(timedelta(hours=9))).date()
+
+
+def _apply_quick(key: str) -> None:
+    label = st.session_state.get(f"{key}_quick")
+    if label in QUICK_RANGES:
+        end = kst_today()
+        start = (pd.Timestamp(end) - pd.DateOffset(months=QUICK_RANGES[label])).date()
+        st.session_state[key] = (start, end)
+
+
+def _clear_quick(key: str) -> None:
+    st.session_state[f"{key}_quick"] = None
+
+
 def period_input(key: str):
-    today = date.today()
+    """빠른 기간 버튼(오늘 기준) + 직접 선택 달력. 종료일은 오늘이며, 데이터는 가장 최근 영업일까지 나온다."""
+    today = kst_today()
+    if hasattr(st, "pills"):
+        st.pills(
+            "빠른 기간 (오늘 기준 ~ 가장 최근 영업일)", list(QUICK_RANGES),
+            key=f"{key}_quick", on_change=_apply_quick, args=(key,),
+        )
     p = st.date_input(
         "기간",
         value=(today - timedelta(days=180), today),
         max_value=today,
         format="YYYY-MM-DD",
         key=key,
+        on_change=_clear_quick,
+        args=(key,),
     )
     if isinstance(p, (tuple, list)) and len(p) == 2:
         return p
@@ -133,14 +161,13 @@ def period_input(key: str):
 # 탭 1: 주가 조회
 # ======================================================================
 def render_single(listing: pd.DataFrame) -> None:
-    c1, c2, c3 = st.columns([3, 3, 2])
+    c1, c3 = st.columns([3, 2])
     query = c1.text_input(
         "종목 검색", key="single_query",
         placeholder="종목명 (예: 삼성전자) 또는 종목코드 / 해외 티커 (예: AAPL)",
     )
-    with c2:
-        period = period_input("single_period")
     chart_type = c3.radio("차트 종류", ["선", "캔들"], horizontal=True, key="single_type")
+    period = period_input("single_period")
 
     if not query.strip():
         st.info("종목명을 입력하세요.")
@@ -185,13 +212,28 @@ def render_single(listing: pd.DataFrame) -> None:
         ("기간 최저가", fmt_price(float(df["Low"].min()), domestic), None, True),
     ], cols=3)
 
+    st.caption(f"조회 구간: {df.index[0]:%Y-%m-%d} ~ {df.index[-1]:%Y-%m-%d} (가장 최근 거래일 기준, {len(df):,}거래일)")
+
+    # 캔들이 너무 많으면 주봉으로 묶어서 깨져 보이지 않게 한다
+    plot_df = df
+    weekly = False
+    if chart_type == "캔들" and len(df) > 300:
+        agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+        if "Volume" in df.columns:
+            agg["Volume"] = "sum"
+        plot_df = df.resample("W-FRI").agg(agg).dropna(subset=["Open", "Close"])
+        weekly = True
+    n_bars = len(plot_df)
+
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.03)
     if chart_type == "캔들":
         fig.add_trace(
             go.Candlestick(
-                x=df.index,
-                open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
+                x=plot_df.index,
+                open=plot_df["Open"], high=plot_df["High"], low=plot_df["Low"], close=plot_df["Close"],
                 increasing_line_color=UP_COLOR, decreasing_line_color=DOWN_COLOR,
+                increasing_line_width=1, decreasing_line_width=1,
+                whiskerwidth=0.4,
                 name="주가",
             ),
             row=1, col=1,
@@ -206,20 +248,25 @@ def render_single(listing: pd.DataFrame) -> None:
             ),
             row=1, col=1,
         )
-    if "Volume" in df.columns:
+    if "Volume" in plot_df.columns:
         fig.add_trace(
-            go.Bar(x=df.index, y=df["Volume"], marker_color=VOLUME_COLOR, name="거래량",
+            go.Bar(x=plot_df.index, y=plot_df["Volume"], marker_color=VOLUME_COLOR, name="거래량",
                    hovertemplate="%{x|%Y-%m-%d}<br>거래량 %{y:,.0f}<extra></extra>"),
             row=2, col=1,
         )
+    # 봉이 많을수록 간격을 넓혀 봉을 가늘게 (굵고 뭉개져 보이는 현상 방지)
+    box_gap = 0.3 if n_bars <= 60 else 0.45 if n_bars <= 150 else 0.6
     fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])], rangeslider_visible=False)
     fig.update_yaxes(title_text="가격", row=1, col=1, tickformat=",")
     fig.update_yaxes(title_text="거래량", row=2, col=1, tickformat=",")
     fig.update_layout(
         height=560, showlegend=False, hovermode="x unified",
         margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
+        boxgap=box_gap, bargap=0.3 if n_bars <= 150 else 0.4,
     )
     st.plotly_chart(fig, use_container_width=True)
+    if weekly:
+        st.caption("기간이 길어 캔들을 주봉(1주 = 1개)으로 묶어서 표시합니다. 위 지표는 일별 데이터 기준입니다.")
 
     with st.expander("데이터 표 보기"):
         st.dataframe(df.sort_index(ascending=False), use_container_width=True)
@@ -239,13 +286,11 @@ def render_compare(listing: pd.DataFrame) -> None:
     options = {f"{r.Name} ({r.Code})": r.Code for r in ordered.itertuples()}
     names = {r.Code: r.Name for r in ordered.itertuples()}
 
-    c1, c2 = st.columns([3, 2])
-    selected = c1.multiselect(
+    selected = st.multiselect(
         f"비교할 종목 (최대 {MAX_COMPARE}개, 이름을 입력하면 검색됩니다)",
         list(options.keys()), key="cmp_selected",
     )
-    with c2:
-        period = period_input("cmp_period")
+    period = period_input("cmp_period")
     extra = st.text_input(
         "해외 티커 또는 종목 추가 (쉼표로 구분)", key="cmp_extra",
         placeholder="예: AAPL, NVDA, 005930",
