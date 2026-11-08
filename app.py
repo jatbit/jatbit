@@ -211,7 +211,7 @@ def metric_grid(items: list[tuple], cols: int = 3) -> None:
     )
 
 
-QUICK_RANGES = {"1개월": 1, "3개월": 3, "6개월": 6, "1년": 12, "5년": 60}
+QUICK_RANGES = {"1개월": 1, "3개월": 3, "6개월": 6, "1년": 12, "5년": 60, "10년": 120, "20년": 240, "전체": 720}
 
 
 def kst_today() -> date:
@@ -297,6 +297,7 @@ def period_input(key: str, mirror: str = None, presets: bool = False):
         p = st.date_input(
             "기간",
             value=(today - timedelta(days=180), today),
+            min_value=date(1950, 1, 1),
             max_value=today,
             format="YYYY-MM-DD",
             key=key,
