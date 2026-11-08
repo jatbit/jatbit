@@ -25,8 +25,14 @@ UP_COLOR = "#D64545"      # 국내 관행: 상승 = 빨강
 DOWN_COLOR = "#2B6CB0"    # 하락 = 파랑
 VOLUME_COLOR = "#A0AEC0"
 SERIES_COLORS = ["#2B6CB0", "#D64545", "#2F855A", "#B7791F", "#6B46C1", "#0987A0", "#DD6B20", "#4A5568"]
-MAX_COMPARE = 8
-MAX_PF = 10
+
+
+def series_color(i: int) -> str:
+    """종목 수에 제한이 없으므로 기본 8색이 모자라면 색상환에서 추가로 만든다."""
+    if i < len(SERIES_COLORS):
+        return SERIES_COLORS[i]
+    return f"hsl({(i * 47) % 360}, 60%, 45%)"
+
 
 st.set_page_config(page_title="주가 차트", layout="wide")
 
@@ -586,7 +592,7 @@ def render_compare(listing: pd.DataFrame) -> None:
     names = {r.Code: r.Name for r in ordered.itertuples()}
 
     selected = st.multiselect(
-        f"비교할 종목 (최대 {MAX_COMPARE}개, 이름을 입력하면 검색됩니다)",
+        "비교할 종목 (이름을 입력하면 검색됩니다)",
         list(options.keys()), key="cmp_selected",
         on_change=_mirror, args=("cmp_selected", "pf_selected"),
     )
@@ -622,9 +628,6 @@ def render_compare(listing: pd.DataFrame) -> None:
     if period is None:
         st.info("기간의 시작일과 종료일을 모두 선택하세요.")
         return
-    if len(items) > MAX_COMPARE:
-        st.warning(f"종목이 너무 많아 앞의 {MAX_COMPARE}개만 표시합니다.")
-        items = items[:MAX_COMPARE]
     start_d, end_d = period
 
     fig = go.Figure()
@@ -645,7 +648,7 @@ def render_compare(listing: pd.DataFrame) -> None:
         fig.add_trace(
             go.Scatter(
                 x=ret.index, y=ret, mode="lines", name=it["name"],
-                line=dict(color=SERIES_COLORS[i % len(SERIES_COLORS)], width=2),
+                line=dict(color=series_color(i), width=2),
                 hovertemplate="%{y:+.2f}%<extra>" + it["name"] + "</extra>",
             )
         )
@@ -687,28 +690,30 @@ def _port_stats(W: np.ndarray, mu: np.ndarray, cov: np.ndarray, rf: float):
     return ret, vol, (ret - rf) / vol
 
 
-def _refine(w: np.ndarray, score, cap: float) -> np.ndarray:
-    """한 종목에서 다른 종목으로 비중을 옮겨 보며 score를 더 키울 수 있으면 계속 옮긴다. (공매도 불가, 종목당 상한 cap)"""
+def _refine(w: np.ndarray, score_batch, cap: float) -> np.ndarray:
+    """한 종목에서 다른 종목으로 비중을 옮기는 모든 경우를 한꺼번에 평가해, 점수가 가장 많이 오르는 이동을 반복한다.
+    (공매도 불가, 종목당 상한 cap) 종목 수가 많아도 빠르게 돌도록 벡터화했다."""
     w = w.copy()
-    best = score(w)
     n = len(w)
+    best = float(score_batch(w[None, :])[0])
+    ii, jj = np.where(~np.eye(n, dtype=bool))
     for step in (0.05, 0.02, 0.01, 0.005, 0.002, 0.001):
-        improved = True
-        while improved:
-            improved = False
-            for i in range(n):
-                for j in range(n):
-                    if i == j:
-                        continue
-                    amt = min(step, w[j], cap - w[i])
-                    if amt < 1e-12:
-                        continue
-                    t = w.copy()
-                    t[i] += amt
-                    t[j] -= amt
-                    v = score(t)
-                    if v > best + 1e-12:
-                        w, best, improved = t, v, True
+        for _ in range(5000):
+            amt = np.minimum(step, np.minimum(w[jj], cap - w[ii]))
+            ok = amt > 1e-12
+            if not ok.any():
+                break
+            I, J, A = ii[ok], jj[ok], amt[ok]
+            C = np.tile(w, (len(I), 1))
+            idx = np.arange(len(I))
+            C[idx, I] += A
+            C[idx, J] -= A
+            sc = score_batch(C)
+            k = int(np.argmax(sc))
+            if sc[k] > best + 1e-12:
+                w, best = C[k], float(sc[k])
+            else:
+                break
     return w
 
 
@@ -721,12 +726,11 @@ def optimize_portfolios(mu: np.ndarray, cov: np.ndarray, rf: float, cap: float, 
     W = W[W.max(axis=1) <= cap + 1e-9]
     ret, vol, sh = _port_stats(W, mu, cov, rf)
 
-    def sharpe_f(w):
-        r_, v_, s_ = _port_stats(w[None, :], mu, cov, rf)
-        return float(s_[0])
+    def sharpe_f(Wb):
+        return _port_stats(Wb, mu, cov, rf)[2]
 
-    def negvar(w):
-        return -float(w @ cov @ w)
+    def negvar(Wb):
+        return -np.einsum("ij,jk,ik->i", Wb, cov, Wb)
 
     w_sh = _refine(W[int(np.argmax(sh))], sharpe_f, cap)
     w_mv = _refine(W[int(np.argmin(vol))], negvar, cap)
@@ -741,7 +745,7 @@ def render_portfolio(listing: pd.DataFrame) -> None:
     options = {f"{r.Name} ({r.Code})": (r.Code, r.Name, str(r.Market)) for r in ordered.itertuples()}
 
     selected = st.multiselect(
-        f"포트폴리오에 넣을 종목 (2~{MAX_PF}개, 이름을 입력하면 검색됩니다)",
+        "포트폴리오에 넣을 종목 (2개 이상, 이름을 입력하면 검색됩니다)",
         list(options.keys()), key="pf_selected",
         on_change=_mirror, args=("pf_selected", "cmp_selected"),
     )
@@ -776,9 +780,6 @@ def render_portfolio(listing: pd.DataFrame) -> None:
     if period is None:
         st.info("기간의 시작일과 종료일을 모두 선택하세요.")
         return
-    if len(items) > MAX_PF:
-        st.warning(f"종목이 너무 많아 앞의 {MAX_PF}개만 사용합니다.")
-        items = items[:MAX_PF]
     start_d, end_d = period
     n = len(items)
 
@@ -825,6 +826,11 @@ def render_portfolio(listing: pd.DataFrame) -> None:
     st.caption(
         f"분석 구간: {P.index[0]:%Y-%m-%d} ~ {P.index[-1]:%Y-%m-%d} (모든 종목·지수가 함께 거래된 {len(R):,}일 수익률 기준, 통화 환산 없음)"
     )
+    if n > len(R):
+        st.warning(
+            f"종목 수({n}개)가 공통 거래일 수({len(R)}일)보다 많아 공분산이 불안정합니다. "
+            "기간을 늘리거나 종목을 줄이면 결과가 더 믿을 만합니다."
+        )
 
     # ---- 종목별 수치
     st.subheader("종목별 수치")
