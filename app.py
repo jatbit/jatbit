@@ -99,28 +99,38 @@ def load_prices(code: str, start: str, end: str) -> pd.DataFrame:
 
 
 def _extend_back(code: str, start: str, d):
-    """국내 종목은 한 번에 약 3,000거래일까지만 오므로, 시작일보다 데이터가 짧으면 더 과거 구간을 나눠 받아 이어 붙인다."""
+    """국내 종목은 한 번에 약 3,000거래일까지만 오므로, 시작일보다 데이터가 짧으면 더 과거 구간을 야후에서 받아 앞에 이어 붙인다."""
     try:
         if d is None or len(d) < 2900 or not re.fullmatch(r"[0-9]{6}", str(code)):
             return d
         want = pd.Timestamp(start)
-        parts = [d]
-        cur = d
-        for _ in range(12):  # 최대 약 36,000거래일
-            first = cur.index.min()
-            if first <= want + pd.Timedelta(days=7):
-                break
-            prev_end = (first - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-            chunk = fdr.DataReader(code, start, prev_end)
-            if chunk is None or len(chunk) == 0 or chunk.index.min() >= first:
-                break
-            parts.append(chunk)
-            cur = chunk
-            if len(chunk) < 2900:
-                break
-        if len(parts) == 1:
+        first = d.index.min()
+        if first <= want + pd.Timedelta(days=7):
             return d
-        out = pd.concat(parts[::-1])
+        old = None
+        for suf in (".KS", ".KQ"):
+            try:
+                y = fdr.DataReader(code + suf, start, (first + pd.Timedelta(days=5)).strftime("%Y-%m-%d"))
+            except Exception:  # noqa: BLE001
+                continue
+            if y is not None and len(y) > 0 and "Close" in y.columns:
+                old = y
+                break
+        if old is None:
+            return d
+        old = old[old["Close"] > 0]
+        # 이어지는 날짜의 종가 비율로 야후 가격 수준을 맞춘다.
+        ratio = 1.0
+        if first in old.index and float(old.loc[first, "Close"]) > 0:
+            ratio = float(d.loc[first, "Close"]) / float(old.loc[first, "Close"])
+        old = old[old.index < first].copy()
+        if len(old) == 0:
+            return d
+        for _c in ("Open", "High", "Low", "Close"):
+            if _c in old.columns:
+                old[_c] = old[_c] * ratio
+        cols = [c for c in d.columns if c in old.columns]
+        out = pd.concat([old[cols], d])
         return out[~out.index.duplicated(keep="last")].sort_index()
     except Exception:  # noqa: BLE001
         return d
