@@ -20,6 +20,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
+from rates import add_rates, rate_controls
 
 LINE_COLOR = "#2B6CB0"
 UP_COLOR = "#D64545"      # 국내 관행: 상승 = 빨강
@@ -587,6 +588,7 @@ def render_single(listing: pd.DataFrame) -> None:
     )
     chart_type = c3.radio("차트 종류", ["선", "캔들"], horizontal=True, key="single_type")
     period = period_input("single_period")
+    rate_sel = rate_controls("single")
 
     if not query.strip():
         st.info("종목명을 입력하세요.")
@@ -676,6 +678,8 @@ def render_single(listing: pd.DataFrame) -> None:
     # 봉이 많을수록 간격을 넓혀 봉을 가늘게 (굵고 뭉개져 보이는 현상 방지)
     box_gap = 0.3 if n_bars <= 60 else 0.45 if n_bars <= 150 else 0.6
     fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])], rangeslider_visible=False)
+    if rate_sel:
+        add_rates(fig, rate_sel, start_d, end_d, 3, domain=list(fig.layout.yaxis.domain))
     fig.update_yaxes(title_text="가격", row=1, col=1, tickformat=",")
     fig.update_yaxes(title_text="거래량", row=2, col=1, tickformat=",")
     fig.update_layout(
@@ -719,6 +723,7 @@ def render_compare(listing: pd.DataFrame) -> None:
         on_change=_mirror, args=("cmp_fut", "pf_fut"),
     )
     period = period_input("cmp_period", mirror="pf_period", presets=True)
+    rate_sel = rate_controls("cmp")
     extra = st.text_input(
         "해외 티커 또는 종목 추가 (쉼표로 구분)", key="cmp_extra",
         placeholder="예: AAPL, NVDA, 005930, 원유 선물, 금 선물",
@@ -794,6 +799,8 @@ def render_compare(listing: pd.DataFrame) -> None:
     fig.add_hline(y=0, line_width=1, line_dash="dot", line_color="#718096")
     fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
     fig.update_yaxes(title_text="수익률 (기간 시작일 = 0%)", ticksuffix="%")
+    if rate_sel:
+        add_rates(fig, rate_sel, start_d, end_d, 2)
     fig.update_layout(
         height=520, hovermode="x unified", font=dict(size=11),
         margin=dict(l=10, r=10, t=10, b=10),
