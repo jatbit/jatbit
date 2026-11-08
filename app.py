@@ -85,7 +85,7 @@ def load_prices(code: str, start: str, end: str) -> pd.DataFrame:
     last_err = None
     for attempt in range(3):
         try:
-            d = fdr.DataReader(code, start, end)
+            d = _extend_back(code, start, fdr.DataReader(code, start, end))
             if d is not None and "Close" in d.columns:
                 d = d[d["Close"] != 0].copy()  # 오래된 구간의 0원(거래정지 등) 행 제거
                 for _c in ("Open", "High", "Low"):
@@ -96,6 +96,34 @@ def load_prices(code: str, start: str, end: str) -> pd.DataFrame:
             last_err = e
             time.sleep(1.5 * (attempt + 1))
     raise last_err
+
+
+def _extend_back(code: str, start: str, d):
+    """국내 종목은 한 번에 약 3,000거래일까지만 오므로, 시작일보다 데이터가 짧으면 더 과거 구간을 나눠 받아 이어 붙인다."""
+    try:
+        if d is None or len(d) < 2900 or not re.fullmatch(r"[0-9]{6}", str(code)):
+            return d
+        want = pd.Timestamp(start)
+        parts = [d]
+        cur = d
+        for _ in range(12):  # 최대 약 36,000거래일
+            first = cur.index.min()
+            if first <= want + pd.Timedelta(days=7):
+                break
+            prev_end = (first - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+            chunk = fdr.DataReader(code, start, prev_end)
+            if chunk is None or len(chunk) == 0 or chunk.index.min() >= first:
+                break
+            parts.append(chunk)
+            cur = chunk
+            if len(chunk) < 2900:
+                break
+        if len(parts) == 1:
+            return d
+        out = pd.concat(parts[::-1])
+        return out[~out.index.duplicated(keep="last")].sort_index()
+    except Exception:  # noqa: BLE001
+        return d
 
 
 # 해외 선물: Yahoo 연속(근월물 이어붙인) 시세. 티커 → (표시 이름, 한글 별칭들). 목록에 없는 '=F' 심볼도 그대로 조회는 된다.
