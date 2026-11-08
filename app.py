@@ -37,6 +37,13 @@ st.markdown(
     [data-testid="stMetricDelta"] { font-size: 0.72rem !important; }
     button[data-baseweb="tab"] p { font-size: 0.9rem !important; }
     .block-container { padding-top: 2.5rem !important; }
+    .mg { display: grid; gap: 0.6rem 0.8rem; margin: 0.4rem 0 0.8rem 0; }
+    .mg-cell { min-width: 0; }
+    .mg-label { font-size: 0.72rem; opacity: 0.75; }
+    .mg-value { font-size: clamp(0.85rem, 3.8vw, 1.1rem); font-weight: 500; word-break: keep-all; }
+    .mg-delta { font-size: 0.72rem; }
+    .mg-delta.up { color: #E5534B; }
+    .mg-delta.down { color: #4C8DF6; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -89,6 +96,23 @@ def fmt_price(value: float, domestic: bool) -> str:
     if domestic:
         return f"{int(round(value)):,}원"
     return f"{value:,.2f}"
+
+
+def metric_grid(items: list[tuple], cols: int = 3) -> None:
+    """지표를 가로로 cols개씩 나열한다. 화면이 좁아도 세로로 쌓이지 않는다.
+    items: (라벨, 값, 변동 문구 또는 None, 상승 여부)"""
+    cells = ""
+    for label, value, delta, is_up in items:
+        d = ""
+        if delta:
+            cls = "up" if is_up else "down"
+            arrow = "▲" if is_up else "▼"
+            d = f'<div class="mg-delta {cls}">{arrow} {delta}</div>'
+        cells += f'<div class="mg-cell"><div class="mg-label">{label}</div><div class="mg-value">{value}</div>{d}</div>'
+    st.markdown(
+        f'<div class="mg" style="grid-template-columns: repeat({cols}, minmax(0, 1fr));">{cells}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def period_input(key: str):
@@ -153,12 +177,13 @@ def render_single(listing: pd.DataFrame) -> None:
     pct = change / first_close * 100 if first_close else 0.0
 
     st.subheader(chosen["label"])
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("기간 시작 종가", fmt_price(first_close, domestic))
-    m2.metric("기간 마지막 종가", fmt_price(last_close, domestic))
-    m3.metric("기간 변동", fmt_price(change, domestic), f"{pct:+.2f}%")
-    m4.metric("기간 최고가", fmt_price(float(df["High"].max()), domestic))
-    m5.metric("기간 최저가", fmt_price(float(df["Low"].min()), domestic))
+    metric_grid([
+        ("기간 시작 종가", fmt_price(first_close, domestic), None, True),
+        ("기간 마지막 종가", fmt_price(last_close, domestic), None, True),
+        ("기간 변동", fmt_price(change, domestic), f"{abs(pct):.2f}%", change >= 0),
+        ("기간 최고가", fmt_price(float(df["High"].max()), domestic), None, True),
+        ("기간 최저가", fmt_price(float(df["Low"].min()), domestic), None, True),
+    ], cols=3)
 
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.03)
     if chart_type == "캔들":
