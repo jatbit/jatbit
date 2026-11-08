@@ -581,12 +581,13 @@ def show_stats(df: pd.DataFrame, rf: float, rf_label: str, bench: tuple = None) 
 # 탭 1: 주가 조회
 # ======================================================================
 def render_single(listing: pd.DataFrame) -> None:
-    c1, c3 = st.columns([3, 2])
+    c1, c3, c4 = st.columns([3, 1.6, 1.6])
     query = c1.text_input(
         "종목 검색", key="single_query",
         placeholder="종목명 (예: 삼성전자) 또는 종목코드 / 해외 티커 (예: AAPL, 원유 선물)",
     )
     chart_type = c3.radio("차트 종류", ["선", "캔들"], horizontal=True, key="single_type")
+    basis = c4.radio("표시 기준", ["주가", "수익률"], horizontal=True, key="single_basis")
     period = period_input("single_period")
     rate_sel = rate_controls("single")
 
@@ -645,6 +646,13 @@ def render_single(listing: pd.DataFrame) -> None:
         plot_df = df.resample("W-FRI").agg(agg).dropna(subset=["Open", "Close"])
         weekly = True
     n_bars = len(plot_df)
+    pct_mode = basis == "수익률"
+    if pct_mode:
+        base0 = float(df["Close"].dropna().iloc[0])
+        plot_df = plot_df.copy()
+        for _c in ("Open", "High", "Low", "Close"):
+            if _c in plot_df.columns:
+                plot_df[_c] = (plot_df[_c] / base0 - 1) * 100
 
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.03)
     if chart_type == "캔들":
@@ -662,9 +670,9 @@ def render_single(listing: pd.DataFrame) -> None:
     else:
         fig.add_trace(
             go.Scatter(
-                x=df.index, y=df["Close"], mode="lines",
+                x=plot_df.index, y=plot_df["Close"], mode="lines",
                 line=dict(color=LINE_COLOR, width=2), name="종가",
-                hovertemplate="%{x|%Y-%m-%d}<br>종가 %{y:,.0f}<extra></extra>" if domestic
+                hovertemplate="%{x|%Y-%m-%d}<br>수익률 %{y:+.2f}%<extra></extra>" if pct_mode else "%{x|%Y-%m-%d}<br>종가 %{y:,.0f}<extra></extra>" if domestic
                 else "%{x|%Y-%m-%d}<br>종가 %{y:,.2f}<extra></extra>",
             ),
             row=1, col=1,
@@ -680,7 +688,9 @@ def render_single(listing: pd.DataFrame) -> None:
     fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])], rangeslider_visible=False)
     if rate_sel:
         add_rates(fig, rate_sel, start_d, end_d, 3, domain=list(fig.layout.yaxis.domain))
-    fig.update_yaxes(title_text="가격", row=1, col=1, tickformat=",")
+    fig.update_yaxes(title_text="수익률(%)" if pct_mode else "가격", row=1, col=1, tickformat=",.1f" if pct_mode else ",", ticksuffix="%" if pct_mode else "")
+    if pct_mode:
+        fig.add_hline(y=0, row=1, col=1, line_width=1, line_dash="dot", line_color="#718096")
     fig.update_yaxes(title_text="거래량", row=2, col=1, tickformat=",")
     fig.update_layout(
         height=560, showlegend=False, hovermode="x unified",
