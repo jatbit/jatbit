@@ -4,6 +4,8 @@
 탭 2) 수익률 비교: 여러 종목을 기간 시작일 = 0% 기준으로 겹쳐서 비교
 탭 3) 포트폴리오 최적화: 종목별 CAPM 수치 + 최대 샤프 포트폴리오와 그 CAPM
 
+탭 2와 탭 3은 종목·기간 입력이 서로 동기화되고, 탭 1은 독립적입니다.
+
 데이터: FinanceDataReader (국내 KRX 전 종목 + 해외 티커). 일봉 기준이며 실시간 틱 데이터는 아닙니다.
 """
 
@@ -139,13 +141,39 @@ def _clear_quick(key: str) -> None:
     st.session_state[f"{key}_quick"] = None
 
 
-def period_input(key: str):
-    """빠른 기간 버튼(오늘 기준) + 직접 선택 달력. 종료일은 오늘이며, 데이터는 가장 최근 영업일까지 나온다."""
+def _mirror(src: str, dst: str) -> None:
+    """src 위젯의 값을 dst 위젯으로 복사한다 (탭 사이 입력 동기화)."""
+    if src in st.session_state:
+        st.session_state[dst] = st.session_state[src]
+
+
+def _sync_period(key: str, mirror: str) -> None:
+    v = st.session_state.get(key)
+    if isinstance(v, (tuple, list)) and len(v) == 2:  # 시작일만 고른 중간 상태는 복사하지 않는다
+        st.session_state[mirror] = v
+    st.session_state[f"{mirror}_quick"] = st.session_state.get(f"{key}_quick")
+
+
+def _on_quick(key: str, mirror) -> None:
+    _apply_quick(key)
+    if mirror:
+        _sync_period(key, mirror)
+
+
+def _on_date(key: str, mirror) -> None:
+    _clear_quick(key)
+    if mirror:
+        _sync_period(key, mirror)
+
+
+def period_input(key: str, mirror: str = None):
+    """빠른 기간 버튼(오늘 기준) + 직접 선택 달력. 종료일은 오늘이며, 데이터는 가장 최근 영업일까지 나온다.
+    mirror: 같은 기간을 공유할 다른 탭의 period_input 키."""
     today = kst_today()
     if hasattr(st, "pills"):
         st.pills(
             "빠른 기간 (오늘 기준 ~ 가장 최근 영업일)", list(QUICK_RANGES),
-            key=f"{key}_quick", on_change=_apply_quick, args=(key,),
+            key=f"{key}_quick", on_change=_on_quick, args=(key, mirror),
         )
     p = st.date_input(
         "기간",
@@ -153,8 +181,8 @@ def period_input(key: str):
         max_value=today,
         format="YYYY-MM-DD",
         key=key,
-        on_change=_clear_quick,
-        args=(key,),
+        on_change=_on_date,
+        args=(key, mirror),
     )
     if isinstance(p, (tuple, list)) and len(p) == 2:
         return p
@@ -560,12 +588,15 @@ def render_compare(listing: pd.DataFrame) -> None:
     selected = st.multiselect(
         f"비교할 종목 (최대 {MAX_COMPARE}개, 이름을 입력하면 검색됩니다)",
         list(options.keys()), key="cmp_selected",
+        on_change=_mirror, args=("cmp_selected", "pf_selected"),
     )
-    period = period_input("cmp_period")
+    period = period_input("cmp_period", mirror="pf_period")
     extra = st.text_input(
         "해외 티커 또는 종목 추가 (쉼표로 구분)", key="cmp_extra",
         placeholder="예: AAPL, NVDA, 005930",
+        on_change=_mirror, args=("cmp_extra", "pf_extra"),
     )
+    st.caption("종목·기간 입력은 '포트폴리오 최적화' 탭과 함께 바뀝니다.")
 
     # 선택 항목 정리 (중복 제거)
     items: list[dict] = []
@@ -712,12 +743,15 @@ def render_portfolio(listing: pd.DataFrame) -> None:
     selected = st.multiselect(
         f"포트폴리오에 넣을 종목 (2~{MAX_PF}개, 이름을 입력하면 검색됩니다)",
         list(options.keys()), key="pf_selected",
+        on_change=_mirror, args=("pf_selected", "cmp_selected"),
     )
-    period = period_input("pf_period")
+    period = period_input("pf_period", mirror="cmp_period")
     extra = st.text_input(
         "해외 티커 또는 종목 추가 (쉼표로 구분)", key="pf_extra",
         placeholder="예: AAPL, NVDA, 005930",
+        on_change=_mirror, args=("pf_extra", "cmp_extra"),
     )
+    st.caption("종목·기간 입력은 '수익률 비교' 탭과 함께 바뀝니다.")
 
     items: list[dict] = []
     seen: set[str] = set()
