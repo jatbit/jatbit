@@ -21,6 +21,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 from rates import add_rates, rate_controls
+from options import render_options
 
 LINE_COLOR = "#2B6CB0"
 UP_COLOR = "#D64545"      # 국내 관행: 상승 = 빨강
@@ -1075,6 +1076,13 @@ def render_portfolio(listing: pd.DataFrame) -> None:
         "동일 비중": res["equal"],
     }
 
+    st.session_state["pf_opt_result"] = {
+        "items": [{"code": it["code"], "name": it["name"], "domestic": bool(it["domestic"])} for it in items],
+        "weights": [float(x) for x in res["max_sharpe"]],
+        "prices": {nm: float(P[nm].iloc[-1]) for nm in names},
+        "asof": f"{P.index[-1]:%Y-%m-%d}",
+    }
+
     st.subheader("최적 투자비율")
     wdf = pd.DataFrame({"종목": names, **{k: [f"{x * 100:.1f}%" for x in w] for k, w in ports.items()}})
     st.dataframe(wdf, use_container_width=True, hide_index=True)
@@ -1174,12 +1182,14 @@ except Exception as e:  # noqa: BLE001
     st.error(f"종목 목록을 불러오지 못했습니다: {e}")
     st.stop()
 
-tab_single, tab_compare, tab_pf = st.tabs(["주가 조회", "수익률 비교", "포트폴리오 최적화"])
+tab_single, tab_compare, tab_pf, tab_opt = st.tabs(["주가 조회", "수익률 비교", "포트폴리오 최적화", "옵션 조회"])
 with tab_single:
     render_single(LISTING)
 with tab_compare:
     render_compare(LISTING)
 with tab_pf:
     render_portfolio(LISTING)
+with tab_opt:
+    render_options()
 
 st.caption("일봉 기준 데이터이며 실시간 시세가 아닙니다. 장중에는 지연되거나 당일 값이 반영되지 않을 수 있습니다.")
