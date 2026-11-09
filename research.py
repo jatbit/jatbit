@@ -59,7 +59,9 @@ def load_research(ticker: str) -> dict:
     out["targets"] = _safe(lambda: dict(t.analyst_price_targets), {})
     out["calendar"] = _safe(lambda: dict(t.calendar), {})
     out["news"] = _safe(lambda: list(t.news), [])
-    out["hist"] = _safe(lambda: t.history(period="1y")["Close"].dropna(), pd.Series(dtype=float))
+    out["qincome"] = _safe(lambda: t.quarterly_income_stmt, pd.DataFrame())
+    out["eps_est"] = _safe(lambda: t.earnings_estimate, pd.DataFrame())
+    out["hist"] = _safe(lambda: t.history(period="5y")["Close"].dropna(), pd.Series(dtype=float))
     return out
 
 
@@ -126,6 +128,22 @@ def _row(df: pd.DataFrame, *names):
         if n in df.index:
             return df.loc[n]
     return None
+
+
+def ntm_eps(info: dict, est: pd.DataFrame):
+    """12개월 선행(NTM) EPS = 이번 회계연도(0y)와 다음 회계연도(+1y) 컨센서스를 남은 기간 비율로 가중평균."""
+    try:
+        e0, e1 = float(est.loc["0y", "avg"]), float(est.loc["+1y", "avg"])
+        fye = _num(info.get("nextFiscalYearEnd")) or _num(info.get("lastFiscalYearEnd"))
+        if not fye:
+            return None, None
+        end = pd.Timestamp(int(fye), unit="s")
+        while end < pd.Timestamp.now():
+            end += pd.DateOffset(years=1)
+        w = min(max((end - pd.Timestamp.now()).days / 365.0, 0.0), 1.0)
+        return w * e0 + (1 - w) * e1, (e0, e1, w, end)
+    except Exception:  # noqa: BLE001
+        return None, None
 
 
 def _div_yield(info: dict):
@@ -205,19 +223,33 @@ def render_research() -> None:
     lo52, hi52 = _num(info.get("fiftyTwoWeekLow")), _num(info.get("fiftyTwoWeekHigh"))
     pos52 = (px - lo52) / (hi52 - lo52) if px and lo52 and hi52 and hi52 > lo52 else None
     st.markdown("##### 주가 · 밸류에이션")
+    n_eps, n_info = ntm_eps(info, R.get("eps_est"))
+    fwd_eps = _num(info.get("forwardEps"))
+    fwd_note = "Yahoo 'Forward P/E' = 현재가 ÷ forwardEps"
+    if n_info:
+        e0, e1, w, fy_end = n_info
+        which = min(((abs((fwd_eps or 0) - e0), "이번 회계연도"), (abs((fwd_eps or 0) - e1), "다음 회계연도")))[1] if fwd_eps else "?"
+        fwd_note += f" ({fwd_eps:.2f}, {which} 추정치 기준)" if fwd_eps else ""
     mgrid([("현재가", f"{cur}{px:,.2f}" if px else "-"),
            ("시가총액", big(info.get("marketCap"), cur)),
            ("기업가치(EV)", big(info.get("enterpriseValue"), cur)),
            ("52주 범위", f"{lo52:,.2f} ~ {hi52:,.2f}" if lo52 and hi52 else "-",
             f"현재가는 52주 범위의 {pos52 * 100:.0f}% 위치" if pos52 is not None else ""),
            ("PER (최근 12개월)", ratio(info.get("trailingPE"), 1)),
-           ("선행 PER", ratio(info.get("forwardPE"), 1)),
+           ("선행 PER (Yahoo)", ratio(info.get("forwardPE"), 1), fwd_note),
+           ("12M 선행 PER (NTM)", ratio(px / n_eps, 1) if px and n_eps and n_eps > 0 else "-",
+            f"현재가 ÷ 향후 12개월 EPS {n_eps:.2f} (이번 회계연도 {n_info[0]:.2f} × {n_info[2]:.2f} + 다음 회계연도 {n_info[1]:.2f} × {1 - n_info[2]:.2f})" if n_eps else "추정치 없음"),
            ("PBR", ratio(info.get("priceToBook"))),
            ("EV/EBITDA", ratio(info.get("enterpriseToEbitda"), 1)),
            ("PEG", ratio(info.get("trailingPegRatio") or info.get("pegRatio"))),
            ("PSR", ratio(info.get("priceToSalesTrailing12Months"))),
            ("배당수익률", pct(_div_yield(info), 2)),
            ("베타", ratio(info.get("beta")))])
+    if n_info:
+        st.caption(f"선행 PER(Yahoo)은 현재가 ÷ Yahoo forwardEps({fwd_eps:.2f})이며, 이 값은 {which} EPS 컨센서스"
+                   f"({n_info[0] if which == '이번 회계연도' else n_info[1]:.2f})에 가장 가깝습니다. 즉 '향후 12개월'이 아니라 회계연도 기준입니다. 12M 선행 PER(NTM)은 이번 회계연도({n_info[3]:%Y-%m} 종료) 남은 비중 {n_info[2]:.0%}만큼 "
+                   f"이번 회계연도 EPS {n_info[0]:.2f}, 나머지는 다음 회계연도 EPS {n_info[1]:.2f}를 섞어 향후 12개월 EPS {n_eps:.2f}로 계산했습니다."
+                   if fwd_eps else "12M 선행 PER(NTM)은 이번·다음 회계연도 EPS 컨센서스를 남은 기간 비율로 섞은 향후 12개월 EPS 기준입니다.")
 
     # ---- 3. 수익성·성장·재무건전성
     st.markdown("##### 수익성 · 성장 · 재무건전성")
@@ -312,6 +344,49 @@ def render_research() -> None:
             st.plotly_chart(fig, use_container_width=True)
     else:
         st.caption("재무제표를 불러오지 못했습니다 (ETF이거나 Yahoo 응답 지연).")
+
+    # ---- 5-2. 주가 vs 이익 성장률·순이익률
+    st.markdown("##### 주가 · 이익 성장률 · 순이익률")
+    freq = st.radio("기준", ["연간", "분기"], horizontal=True, key="rs_freq")
+    srcdf = inc if freq == "연간" else R.get("qincome")
+    ni = _row(srcdf, "Net Income", "Net Income Common Stockholders")
+    rv = _row(srcdf, "Total Revenue", "Operating Revenue")
+    if ni is None or rv is None:
+        st.caption("이익 데이터를 불러오지 못했습니다.")
+    else:
+        d = pd.DataFrame({"ni": pd.to_numeric(ni, errors="coerce"), "rv": pd.to_numeric(rv, errors="coerce")})
+        d.index = pd.to_datetime(d.index)
+        d = d.dropna(how="all").sort_index()
+        d["margin"] = d["ni"] / d["rv"] * 100
+        lag = 1 if freq == "연간" else 4
+        g_lab = "순이익 성장률(전년 대비)"
+        if freq == "분기" and d["ni"].shift(4).notna().sum() < 2:
+            lag, g_lab = 1, "순이익 성장률(전분기 대비)"
+        prev = d["ni"].shift(lag)
+        d["growth"] = (d["ni"] - prev) / prev.abs() * 100
+        hist = R.get("hist")
+        fig = go.Figure()
+        if isinstance(hist, pd.Series) and len(hist):
+            h = hist.copy()
+            h.index = pd.to_datetime(h.index).tz_localize(None) if getattr(h.index, "tz", None) is not None else pd.to_datetime(h.index)
+            start = d.index.min() - (pd.DateOffset(years=1) if freq == "연간" else pd.DateOffset(months=3))
+            h = h[h.index >= start]
+            fig.add_trace(go.Scatter(x=h.index, y=h.values, name="주가", mode="lines", line=dict(color="#4C9BE8", width=1.6),
+                                     hovertemplate="%{x|%Y-%m-%d} 주가 %{y:,.2f}<extra></extra>"))
+        fig.add_trace(go.Scatter(x=d.index, y=d["growth"], name=g_lab, mode="lines+markers", yaxis="y2",
+                                 line=dict(color="#F2A93B", width=2), marker=dict(size=8),
+                                 hovertemplate="%{x|%Y-%m} " + g_lab + " %{y:.1f}%<extra></extra>"))
+        fig.add_trace(go.Scatter(x=d.index, y=d["margin"], name="순이익률", mode="lines+markers", yaxis="y2",
+                                 line=dict(color="#E5534B", width=2, dash="dot"), marker=dict(size=8, symbol="square"),
+                                 hovertemplate="%{x|%Y-%m} 순이익률 %{y:.1f}%<extra></extra>"))
+        fig.add_shape(type="line", xref="paper", x0=0, x1=1, yref="y2", y0=0, y1=0, line=dict(color="#888", width=1, dash="dot"))
+        fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
+                          yaxis=dict(title=f"주가({cur or '현지 통화'})"),
+                          yaxis2=dict(title="%", overlaying="y", side="right", showgrid=False, ticksuffix="%"),
+                          legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption(f"점은 각 {'회계연도' if freq == '연간' else '분기'} 말 기준(오른쪽 축, %), 선은 일별 주가(왼쪽 축). "
+                   "성장률 = (이번 순이익 − 비교 시점 순이익) ÷ |비교 시점 순이익|. Yahoo는 연간 약 4년·분기 약 5분기만 제공합니다.")
 
     # ---- 6. 일정
     cal = R["calendar"] or {}
