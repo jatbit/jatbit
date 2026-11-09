@@ -61,6 +61,7 @@ def load_research(ticker: str) -> dict:
     out["news"] = _safe(lambda: list(t.news), [])
     out["qincome"] = _safe(lambda: t.quarterly_income_stmt, pd.DataFrame())
     out["eps_est"] = _safe(lambda: t.earnings_estimate, pd.DataFrame())
+    out["edates"] = _safe(lambda: t.get_earnings_dates(limit=60), pd.DataFrame())
     out["hist"] = _safe(lambda: t.history(period="10y")["Close"].dropna(), pd.Series(dtype=float))
     return out
 
@@ -247,6 +248,70 @@ def _div_yield(info: dict):
 # ----------------------------------------------------------------------
 # 화면
 # ----------------------------------------------------------------------
+def per_series(hist: pd.Series, edates: pd.DataFrame):
+    """분기 실적(발표일·발표 EPS)으로 일별 12M PER 두 가지를 만든다.
+    트레일링: 주가 ÷ 그날까지 발표된 최근 4개 분기 EPS 합.
+    선행(사후): 주가 ÷ 그날 이후 발표된 4개 분기 EPS 합 (실제로 나온 이익 기준이라 최근 1년은 계산 불가)."""
+    if not isinstance(edates, pd.DataFrame) or edates.empty or "Reported EPS" not in edates or not len(hist):
+        return None
+    e = edates[["Reported EPS"]].dropna().copy()
+    idx = pd.to_datetime(e.index)
+    e.index = idx.tz_localize(None) if idx.tz is not None else idx
+    e = e[~e.index.duplicated()].sort_index()["Reported EPS"].astype(float)
+    if len(e) < 4:
+        return None
+    h = hist.copy()
+    h.index = pd.to_datetime(h.index)
+    if h.index.tz is not None:
+        h.index = h.index.tz_localize(None)
+    h = h[h.index >= e.index[3]]
+    ttm = e.rolling(4).sum()                       # 발표일 기준 최근 4분기 합
+    fwd = e[::-1].rolling(4).sum()[::-1].shift(-1)  # 다음 발표부터 4분기 합
+    pos = np.searchsorted(e.index.values, h.index.values, side="right") - 1
+    t_eps = np.where(pos >= 0, ttm.values[np.clip(pos, 0, None)], np.nan)
+    f_eps = np.where(pos >= 0, fwd.values[np.clip(pos, 0, None)], np.nan)
+    trail = pd.Series(np.where(t_eps > 0, h.values / t_eps, np.nan), index=h.index)
+    fwd_r = pd.Series(np.where(f_eps > 0, h.values / f_eps, np.nan), index=h.index)
+    return trail, fwd_r, e
+
+
+def _per_chart(R: dict, px, n_eps) -> None:
+    out = per_series(R.get("hist"), R.get("edates"))
+    if out is None:
+        st.caption("분기 실적(발표 EPS) 이력을 불러오지 못해 PER 추이를 그릴 수 없습니다.")
+        return
+    trail, fwd_r, e = out
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=trail.index, y=trail.values, name="12M 트레일링 PER", mode="lines",
+                             line=dict(color="#4C9BE8", width=1.6), hovertemplate="%{x|%Y-%m-%d} 트레일링 %{y:.1f}배<extra></extra>"))
+    if fwd_r.notna().any():
+        fig.add_trace(go.Scatter(x=fwd_r.index, y=fwd_r.values, name="12M 선행 PER (사후 실현 EPS)", mode="lines",
+                                 line=dict(color="#F2A93B", width=1.6, dash="dash"),
+                                 hovertemplate="%{x|%Y-%m-%d} 선행(사후) %{y:.1f}배<extra></extra>"))
+    avg = float(trail.dropna().mean()) if trail.notna().any() else None
+    if avg:
+        sd = float(trail.dropna().std())
+        fig.add_hline(y=avg, line_dash="dot", line_color="#888", annotation_text=f"평균 {avg:.1f}배", annotation_position="top left")
+        fig.add_hrect(y0=avg - sd, y1=avg + sd, fillcolor="#888", opacity=0.08, line_width=0)
+    if px and n_eps and n_eps > 0:
+        now = trail.index[-1] if len(trail) else pd.Timestamp.now()
+        fig.add_trace(go.Scatter(x=[now], y=[px / n_eps], name="현재 12M 선행 PER (컨센서스)", mode="markers",
+                                 marker=dict(size=13, symbol="star", color="#E5534B"),
+                                 hovertemplate=f"현재 12M 선행(NTM) {px / n_eps:.1f}배<extra></extra>"))
+    ymax = np.nanpercentile(np.concatenate([trail.dropna().values, fwd_r.dropna().values]), 98) if trail.notna().any() else None
+    fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
+                      yaxis=dict(title="PER(배)", range=[0, ymax * 1.15] if ymax else None),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+    st.plotly_chart(fig, use_container_width=True)
+    last_t = trail.dropna().iloc[-1] if trail.notna().any() else None
+    st.caption(
+        f"트레일링 PER = 주가 ÷ 그날까지 발표된 최근 4개 분기 EPS 합 (현재 {last_t:.1f}배" + (f", {len(e)}개 분기 실적 기준)" if last_t else ")") +
+        ". 과거의 선행 PER 컨센서스는 무료로 받을 수 없어, 점선은 '그 뒤 실제로 발표된 4개 분기 EPS'로 계산한 사후 값입니다(최근 1년은 아직 계산 불가). "
+        "별 표시는 오늘의 애널리스트 컨센서스 기준 12M 선행 PER입니다. 회색 띠는 트레일링 PER 평균 ±1표준편차. "
+        "EPS는 Yahoo의 분기 발표 EPS(대개 일회성 항목을 뺀 조정 EPS, 액면분할 반영)라 공시 순이익 기준 EPS와 다를 수 있습니다."
+        if last_t else "트레일링 PER을 계산할 수 없습니다 (최근 4분기 EPS 합이 0 이하).")
+
+
 def _set_research(tk):
     st.session_state["rs_ticker"] = tk
 
@@ -496,6 +561,10 @@ def render_research() -> None:
         st.plotly_chart(fig, use_container_width=True)
         st.caption(f"점은 각 {'회계연도' if freq == '연간' else '분기'} 말 기준(오른쪽 축, %), 선은 일별 주가(왼쪽 축). "
                    "성장률 = (이번 순이익 − 비교 시점 순이익) ÷ |비교 시점 순이익|. 연간은 SEC 공시(최대 10년), 분기는 Yahoo(약 5분기) 기준입니다.")
+
+    # ---- 5-3. 12M PER 추이
+    st.markdown("##### 12M PER 추이")
+    _per_chart(R, px, n_eps)
 
     # ---- 6. 일정
     cal = R["calendar"] or {}
