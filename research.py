@@ -62,7 +62,8 @@ def load_research(ticker: str) -> dict:
     out["qincome"] = _safe(lambda: t.quarterly_income_stmt, pd.DataFrame())
     out["eps_est"] = _safe(lambda: t.earnings_estimate, pd.DataFrame())
     out["edates"] = _safe(lambda: t.get_earnings_dates(limit=60), pd.DataFrame())
-    out["hist"] = _safe(lambda: t.history(period="10y")["Close"].dropna(), pd.Series(dtype=float))
+    out["hist"] = _safe(lambda: t.history(period="10y", auto_adjust=False)["Close"].dropna(), pd.Series(dtype=float))
+    out["splits"] = _safe(lambda: t.splits, pd.Series(dtype=float))
     return out
 
 
@@ -83,7 +84,14 @@ SEC_ITEMS = [  # (표시 이름, us-gaap 태그 우선순위, 단위, 기간형 
     ("총자산", ["Assets"], "USD", False),
     ("총부채", ["Liabilities"], "USD", False),
     ("자기자본", ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"], "USD", False),
+    # 아래는 표에는 안 보이고 재무비율 계산에만 쓰는 항목
+    ("유동자산", ["AssetsCurrent"], "USD", False),
+    ("유동부채", ["LiabilitiesCurrent"], "USD", False),
+    ("이자비용", ["InterestExpense", "InterestExpenseNonoperating", "InterestExpenseDebt"], "USD", True),
+    ("희석주식수", ["WeightedAverageNumberOfDilutedSharesOutstanding"], "shares", True),
+    ("배당금", ["PaymentsOfDividends", "PaymentsOfDividendsCommonStock"], "USD", True),
 ]
+SEC_SHOW = ["매출", "매출총이익", "영업이익", "순이익", "희석 EPS", "영업현금흐름", "잉여현금흐름", "총자산", "총부채", "자기자본"]
 
 
 def _sec_json(url: str):
@@ -101,7 +109,7 @@ def _sec_cik_map() -> dict:
     return {str(v["ticker"]).upper(): int(v["cik_str"]) for v in data.values()}
 
 
-def _sec_series(facts: dict, tags: list, unit: str, duration: bool) -> pd.Series:
+def _sec_series(facts: dict, tags: list, unit: str, duration: bool, with_filed: bool = False):
     """10-K에 실린 연간 값. 회계연도 말 날짜별로, 앞 순위 태그를 우선·같은 태그는 가장 최근 제출값(정정 반영)."""
     gaap = facts.get("facts", {}).get("us-gaap", {})
     out = {}
@@ -123,8 +131,12 @@ def _sec_series(facts: dict, tags: list, unit: str, duration: bool) -> pd.Series
             if prev is None or (prev[0] == tag and e.get("filed", "") > prev[2]):
                 out[end] = (tag, e.get("val"), e.get("filed", ""))
     if not out:
-        return pd.Series(dtype=float)
-    return pd.Series({pd.Timestamp(k): float(v[1]) for k, v in out.items()}).sort_index()
+        return (pd.Series(dtype=float), pd.Series(dtype=float)) if with_filed else pd.Series(dtype=float)
+    vals = pd.Series({pd.Timestamp(k): float(v[1]) for k, v in out.items()}).sort_index()
+    if not with_filed:
+        return vals
+    filed = pd.Series({pd.Timestamp(k): float(pd.Timestamp(v[2] or k).toordinal()) for k, v in out.items()}).sort_index()
+    return vals, filed
 
 
 @st.cache_data(ttl=24 * 60 * 60, show_spinner="SEC 공시에서 10개년 재무제표를 불러오는 중...")
@@ -134,12 +146,15 @@ def load_sec_financials(ticker: str, years: int = 10) -> pd.DataFrame:
         raise RuntimeError("SEC에 등록된 미국 공시 기업이 아닙니다")
     facts = _try(lambda: _sec_json(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"), tries=3)
     rows = {name: _sec_series(facts, tags, unit, dur) for name, tags, unit, dur in SEC_ITEMS}
+    for name, tags, unit, dur in SEC_ITEMS:  # 주당 값·주식 수는 제출일을 같이 저장(액면분할 보정용)
+        if name in ("희석 EPS", "희석주식수"):
+            rows[name], rows["_filed_" + name] = _sec_series(facts, tags, unit, dur, with_filed=True)
     base = rows["매출"] if len(rows["매출"]) else rows["순이익"]
     if len(base) == 0:
         raise RuntimeError("연간 재무 데이터(us-gaap)가 없습니다")
     # 회계연도 말 = 손익계산서 기간 끝 날짜. 며칠 차이 나는 재무상태표 날짜는 가까운 연도 말에 맞춘다.
     ends = sorted(base.index)[-years:]
-    df = pd.DataFrame(index=[r[0] for r in SEC_ITEMS], columns=ends, dtype=float)
+    df = pd.DataFrame(index=list(rows), columns=ends, dtype=float)
     for name, ser in rows.items():
         for d in ends:
             if d in ser.index:
@@ -151,8 +166,121 @@ def load_sec_financials(ticker: str, years: int = 10) -> pd.DataFrame:
     if df.loc["설비투자"].notna().any():
         df.loc["잉여현금흐름"] = df.loc["영업현금흐름"] - df.loc["설비투자"].fillna(0)
     df = df.drop(index="설비투자")
-    order = ["매출", "매출총이익", "영업이익", "순이익", "희석 EPS", "영업현금흐름", "잉여현금흐름", "총자산", "총부채", "자기자본"]
-    return df.loc[[o for o in order if o in df.index]].dropna(how="all")
+    return df.dropna(how="all")
+
+
+# ----------------------------------------------------------------------
+# 재무비율 (SEC 10개년 + 회계연도 말 주가)
+# ----------------------------------------------------------------------
+RATIOS = {  # 이름: (단위, 분류)
+    "매출총이익률": ("%", "수익성"), "영업이익률": ("%", "수익성"), "순이익률": ("%", "수익성"), "FCF 마진": ("%", "수익성"),
+    "ROE": ("%", "수익성"), "ROA": ("%", "수익성"),
+    "매출 성장률": ("%", "성장성"), "영업이익 성장률": ("%", "성장성"), "순이익 성장률": ("%", "성장성"), "EPS 성장률": ("%", "성장성"),
+    "부채비율": ("%", "안정성"), "자기자본비율": ("%", "안정성"), "유동비율": ("%", "안정성"), "이자보상배율": ("배", "안정성"),
+    "총자산회전율": ("회", "효율성"), "영업현금흐름/순이익": ("배", "현금흐름"), "배당성향": ("%", "현금흐름"),
+    "PER": ("배", "밸류에이션"), "PBR": ("배", "밸류에이션"), "PSR": ("배", "밸류에이션"),
+}
+
+
+def _split_factor(filed_ord: pd.Series, splits) -> pd.Series:
+    """제출일 이후에 있었던 액면분할 비율의 곱 (그 뒤 분할만큼 주당 값을 나누고 주식 수를 곱해야 오늘 기준이 됨)."""
+    if splits is None or len(splits) == 0 or filed_ord is None:
+        return pd.Series(1.0, index=filed_ord.index if filed_ord is not None else [])
+    sp = splits.copy()
+    sp.index = pd.to_datetime(sp.index)
+    if sp.index.tz is not None:
+        sp.index = sp.index.tz_localize(None)
+    out = {}
+    for d, f in filed_ord.items():
+        if not np.isfinite(f):
+            out[d] = 1.0
+            continue
+        fdate = pd.Timestamp.fromordinal(int(f))
+        out[d] = float(np.prod(sp[sp.index > fdate].values)) if (sp.index > fdate).any() else 1.0
+    return pd.Series(out)
+
+
+def compute_ratios(sec: pd.DataFrame, hist: pd.Series, splits) -> pd.DataFrame:
+    g = lambda k: sec.loc[k] if k in sec.index else pd.Series(np.nan, index=sec.columns)  # noqa: E731
+    rev, gp, oi, ni = g("매출"), g("매출총이익"), g("영업이익"), g("순이익")
+    ocf, fcf, assets, eq = g("영업현금흐름"), g("잉여현금흐름"), g("총자산"), g("자기자본")
+    liab = g("총부채").fillna(assets - eq)
+    avg = lambda x: ((x + x.shift(1)) / 2).fillna(x)  # noqa: E731  평균잔액(전년 말과 올해 말의 평균)
+    growth = lambda x: (x - x.shift(1)) / x.shift(1).abs() * 100  # noqa: E731
+    fac_e = _split_factor(g("_filed_희석 EPS"), splits).reindex(sec.columns).fillna(1.0)
+    fac_s = _split_factor(g("_filed_희석주식수"), splits).reindex(sec.columns).fillna(1.0)
+    eps = g("희석 EPS") / fac_e
+    shares = g("희석주식수") * fac_s
+    price = pd.Series(np.nan, index=sec.columns)
+    if isinstance(hist, pd.Series) and len(hist):
+        h = hist.copy()
+        h.index = pd.to_datetime(h.index)
+        if h.index.tz is not None:
+            h.index = h.index.tz_localize(None)
+        for d in sec.columns:
+            before = h[h.index <= d]
+            if len(before) and (d - before.index[-1]).days <= 10:
+                price[d] = before.iloc[-1]
+    mcap = price * shares
+    r = {
+        "매출총이익률": gp / rev * 100, "영업이익률": oi / rev * 100, "순이익률": ni / rev * 100, "FCF 마진": fcf / rev * 100,
+        "ROE": ni / avg(eq) * 100, "ROA": ni / avg(assets) * 100,
+        "매출 성장률": growth(rev), "영업이익 성장률": growth(oi), "순이익 성장률": growth(ni), "EPS 성장률": growth(eps),
+        "부채비율": liab / eq * 100, "자기자본비율": eq / assets * 100, "유동비율": g("유동자산") / g("유동부채") * 100,
+        "이자보상배율": oi / g("이자비용"), "총자산회전율": rev / avg(assets), "영업현금흐름/순이익": ocf / ni,
+        "배당성향": g("배당금") / ni * 100,
+        "PER": (mcap / ni).where(ni > 0), "PBR": (mcap / eq).where(eq > 0), "PSR": mcap / rev,
+    }
+    out = pd.DataFrame(r).T
+    return out.replace([np.inf, -np.inf], np.nan)
+
+
+def _ratio_chart(sec: pd.DataFrame, R: dict, ticker: str) -> None:
+    rt = compute_ratios(sec, R.get("hist"), R.get("splits"))
+    avail = [k for k in RATIOS if k in rt.index and rt.loc[k].notna().sum() >= 2]
+    if not avail:
+        st.caption("재무비율을 계산할 데이터가 부족합니다.")
+        return
+    groups = {}
+    for k in avail:
+        groups.setdefault(RATIOS[k][1], []).append(k)
+    default = [k for k in ("영업이익률", "ROE", "부채비율") if k in avail] or avail[:2]
+    sel = st.multiselect("그래프에 넣을 재무비율 (여러 개 선택 가능)", avail, default=default, key=f"rs_ratios_{ticker}",
+                         format_func=lambda k: f"{k} ({RATIOS[k][1]}, {RATIOS[k][0]})")
+    st.caption(" · ".join(f"{g}: {', '.join(v)}" for g, v in groups.items()))
+    if not sel:
+        st.info("재무비율을 하나 이상 고르세요.")
+        return
+    palette = ["#4C9BE8", "#F2A93B", "#E5534B", "#5BB56E", "#9B6FD6", "#2BB3B1", "#D97AB0", "#8C8C8C"]
+    cols = [pd.Timestamp(c).strftime("%Y-%m") for c in rt.columns]
+    pct_sel = [k for k in sel if RATIOS[k][0] == "%"]
+    mul_sel = [k for k in sel if RATIOS[k][0] != "%"]
+    fig = go.Figure()
+    for i, k in enumerate(sel):
+        unit = RATIOS[k][0]
+        on_y2 = bool(pct_sel) and unit != "%"
+        fig.add_trace(go.Scatter(x=cols, y=rt.loc[k].values, name=f"{k} ({unit})", mode="lines+markers",
+                                 yaxis="y2" if on_y2 else "y", line=dict(color=palette[i % len(palette)], width=2,
+                                                                        dash="dot" if on_y2 else "solid"),
+                                 marker=dict(size=7), connectgaps=False,
+                                 hovertemplate="%{x} " + k + (" %{y:.1f}%" if unit == "%" else " %{y:.2f}" + unit) + "<extra></extra>"))
+    lay = dict(height=360, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
+               legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+               yaxis=dict(title="%" if pct_sel else "배·회", ticksuffix="%" if pct_sel else ""))
+    if pct_sel and mul_sel:
+        lay["yaxis2"] = dict(title="배·회 (점선)", overlaying="y", side="right", showgrid=False)
+    fig.update_layout(**lay)
+    fig.update_xaxes(type="category")
+    st.plotly_chart(fig, use_container_width=True)
+    tbl = rt.loc[sel].copy()
+    tbl.columns = cols
+    tbl = tbl.apply(lambda row: [("-" if pd.isna(v) else (f"{v:.1f}%" if RATIOS[row.name][0] == "%" else f"{v:.2f}"))
+                                 for v in row], axis=1, result_type="expand")
+    tbl.columns = cols
+    st.dataframe(tbl, use_container_width=True)
+    st.caption("SEC 10-K 연간 수치로 계산. ROE·ROA·총자산회전율은 전년 말과 올해 말의 평균 잔액 기준, 성장률은 전년 대비. "
+               "PER·PBR·PSR은 회계연도 말 주가 × 희석 주식 수(액면분할 보정)로 시가총액을 구해 계산했습니다. "
+               "이자비용·배당금 등 회사가 해당 항목을 공시하지 않은 해는 빈칸입니다.")
 
 
 @st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner="한국어로 번역하는 중...")
@@ -479,7 +607,7 @@ def render_research() -> None:
     items = [(k, v) for k, v in items if v is not None]
     if sec is not None or items:
         if sec is not None:
-            fs = sec.copy()
+            fs = sec.loc[[r for r in SEC_SHOW if r in sec.index]].copy()
         else:
             fs = pd.DataFrame({k: pd.to_numeric(v, errors="coerce") for k, v in items}).T
             fs = fs.dropna(axis=1, how="all")
@@ -515,6 +643,13 @@ def render_research() -> None:
             st.plotly_chart(fig, use_container_width=True)
     else:
         st.caption("재무제표를 불러오지 못했습니다 (ETF이거나 Yahoo 응답 지연).")
+
+    # ---- 5-1. 재무비율 그래프 (직접 선택)
+    st.markdown("##### 재무비율 그래프 (직접 선택)")
+    if sec is not None:
+        _ratio_chart(sec, R, ticker)
+    else:
+        st.caption("SEC 10개년 재무제표가 있는 미국 기업만 지원합니다.")
 
     # ---- 5-2. 주가 vs 이익 성장률·순이익률
     st.markdown("##### 주가 · 이익 성장률 · 순이익률")
