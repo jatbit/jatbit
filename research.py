@@ -63,6 +63,30 @@ def load_research(ticker: str) -> dict:
     return out
 
 
+@st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner="한국어로 번역하는 중...")
+def translate_ko(text: str):
+    """Google 번역(키 없는 공개 엔드포인트)으로 한국어 번역. 실패하면 None."""
+    import json
+    import urllib.parse
+    import urllib.request
+
+    if not text or not text.strip():
+        return None
+    url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ko&dt=t"
+    for i in range(3):
+        try:
+            data = urllib.parse.urlencode({"q": text}).encode("utf-8")
+            req = urllib.request.Request(url, data=data, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                j = json.loads(resp.read().decode("utf-8"))
+            out = "".join(seg[0] for seg in j[0] if seg and seg[0])
+            if out.strip():
+                return out
+        except Exception:  # noqa: BLE001
+            time.sleep(1.0 + i)
+    return None
+
+
 # ----------------------------------------------------------------------
 # 표시 도우미
 # ----------------------------------------------------------------------
@@ -159,9 +183,21 @@ def render_research() -> None:
                         f"직원 {int(info['fullTimeEmployees']):,}명" if _num(info.get("fullTimeEmployees")) else None,
                         info.get("exchange")] if x]
     st.caption(" · ".join(map(str, meta)) + (f" · [홈페이지]({info['website']})" if info.get("website") else ""))
-    if info.get("longBusinessSummary"):
-        with st.expander("사업 설명 (영문 원문)"):
-            st.write(info["longBusinessSummary"].replace("$", "\\$"))
+    ko = st.toggle("한국어 번역 (Google 자동 번역)", value=True, key="rs_ko")
+    summary = info.get("longBusinessSummary")
+    if summary:
+        tr = translate_ko(summary) if ko else None
+        with st.expander("사업 설명", expanded=True):
+            if tr:
+                st.write(tr.replace("$", "\\$"))
+                st.caption("자동 번역이라 고유명사·전문용어가 어색할 수 있습니다.")
+            elif ko:
+                st.caption("번역에 실패해 영문 원문을 보여줍니다.")
+            if not tr:
+                st.write(summary.replace("$", "\\$"))
+        if tr:
+            with st.expander("사업 설명 (영문 원문)"):
+                st.write(summary.replace("$", "\\$"))
     st.button("이 종목을 '옵션 조회' 탭에 설정", key="rs_to_opt", on_click=_send_to_options, args=(ticker,))
 
     # ---- 2. 주가·밸류에이션
@@ -313,11 +349,19 @@ def render_research() -> None:
             rows.append((title, url, prov, str(when)[:10] if when else ""))
     if rows:
         st.markdown("##### 최근 뉴스")
+        kos = None
+        if ko:
+            joined = translate_ko("\n".join(r[0].replace("\n", " ") for r in rows))
+            kos = joined.split("\n") if joined else None
+            if kos is not None and len(kos) != len(rows):
+                kos = None
         lines = []
-        for title, url, prov, when in rows:
-            t = html.escape(title)
+        for i, (title, url, prov, when) in enumerate(rows):
+            main = kos[i].strip() if kos and kos[i].strip() else title
+            t = html.escape(main)
             link = f'<a href="{html.escape(url, quote=True)}" target="_blank">{t}</a>' if url else t
-            lines.append(f'<div style="margin:0 0 8px">{link}<br><span style="font-size:0.8rem;opacity:.65">'
+            orig = f'<br><span style="font-size:0.8rem;opacity:.55">{html.escape(title)}</span>' if main != title else ""
+            lines.append(f'<div style="margin:0 0 10px">{link}{orig}<br><span style="font-size:0.8rem;opacity:.65">'
                          f'{html.escape(prov or "")} · {when}</span></div>')
         st.markdown("".join(lines).replace("$", "&#36;"), unsafe_allow_html=True)
     st.caption("출처: Yahoo Finance. 지연·누락이 있을 수 있으며 투자 판단의 참고 자료로만 사용하세요.")
