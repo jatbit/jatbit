@@ -15,7 +15,7 @@ import streamlit as st
 
 import bsm
 from options import (MULT, TYPE_KO, _row_for, build_chain, is_us_ticker, load_chain_raw, load_expiries,
-                     load_underlying, load_us_rate_3m, years_to_expiry)
+                     load_underlying, load_us_rate_3m, mgrid, years_to_expiry)
 
 def _usd(x) -> str:
     x = float(x)
@@ -263,17 +263,15 @@ def render_capm_opt() -> None:
     V = tot["value"]
     port_beta = tot["dbeta"] / V if V > 0 else float("nan")
     exp_dollar = V * rf + tot["dbeta"] * mrp
-    g = st.columns(4)
-    g[0].metric("순 포지션 가치", f"{_usd(V)}")
-    g[1].metric("포트폴리오 베타", f"{port_beta:.2f}" if np.isfinite(port_beta) else "정의 안 됨",
-                help="달러 베타 ÷ 순 포지션 가치. 순가치가 0 이하(옵션 순매도)면 정의되지 않습니다.")
-    g[2].metric("달러 베타", f"{_usd(tot['dbeta'])}", help="S&P 500이 1% 오르면 약 이 금액의 1%만큼 손익이 납니다.")
-    g[3].metric("CAPM 기대수익률(연)", f"{exp_dollar / V:.1%}" if V > 0 else "-", help=f"기대 손익 연 {_usd(exp_dollar)}")
-    g = st.columns(4)
-    g[0].metric("달러 델타", f"{_usd(tot['dd'])}")
-    g[1].metric("달러 감마 (1% 변동)", f"{_usd(tot['gamma_d'])}", help="기초자산이 1% 움직일 때 달러 델타가 변하는 양")
-    g[2].metric("베가 (변동성 1%p)", f"{_usd(tot['vega'])}")
-    g[3].metric("세타 (1일)", f"{_usd(tot['theta'])}")
+    mgrid([("순 포지션 가치", _usd(V)),
+           ("포트폴리오 베타", f"{port_beta:.2f}" if np.isfinite(port_beta) else "정의 안 됨",
+            "달러 베타 ÷ 순 포지션 가치. 순가치가 0 이하(옵션 순매도)면 정의되지 않습니다."),
+           ("달러 베타", _usd(tot["dbeta"]), "S&P 500이 1% 오르면 약 이 금액의 1%만큼 손익이 납니다."),
+           ("CAPM 기대수익률(연)", f"{exp_dollar / V:.1%}" if V > 0 else "-", f"기대 손익 연 {_usd(exp_dollar)}"),
+           ("달러 델타", _usd(tot["dd"])),
+           ("달러 감마(1% 변동)", _usd(tot["gamma_d"]), "기초자산이 1% 움직일 때 달러 델타가 변하는 양"),
+           ("베가(변동성 1%p)", _usd(tot["vega"])),
+           ("세타(1일)", _usd(tot["theta"]))])
 
     # ---- 위험·확률
     nearest = min([lg["T"] for u in book.values() for lg in u["legs"]], default=30 / 365) * 365
@@ -295,21 +293,14 @@ def render_capm_opt() -> None:
     sig_dd = float(np.sqrt(max(dd_vec @ cov_d @ dd_vec, 0.0)))
 
     st.subheader("위험 수치 (1일)")
-    g = st.columns(4)
-    g[0].metric("VaR 95%", f"{_usd(v95)}")
-    g[1].metric("ES 95%", f"{_usd(e95)}")
-    g[2].metric("VaR 99%", f"{_usd(v99)}")
-    g[3].metric("ES 99%", f"{_usd(e99)}")
+    mgrid([("VaR 95%", _usd(v95)), ("ES 95%", _usd(e95)), ("VaR 99%", _usd(v99)), ("ES 99%", _usd(e99))])
     st.caption(f"몬테카를로 {n_sims:,}회, 최근 1년 수익률 공분산으로 종목 간 상관 반영, 옵션은 전체 재평가(감마 효과 포함). "
                f"참고: 델타-정규 VaR 95% = {_usd(1.645 * sig_dd)}, 99% = {_usd(2.326 * sig_dd)} (델타만 반영).")
 
     if h_days > 0:
         st.subheader(f"{h_days:g}일 뒤 손익 분포 (CAPM 기대수익률을 추세로 사용)")
-        g = st.columns(4)
-        g[0].metric("기대 손익", f"{_usd(pnlh.mean())}")
-        g[1].metric("이익 확률", f"{(pnlh > 0).mean():.1%}")
-        g[2].metric("하위 5% 손익", f"{_usd(np.quantile(pnlh, 0.05))}")
-        g[3].metric("상위 5% 손익", f"{_usd(np.quantile(pnlh, 0.95))}")
+        mgrid([("기대 손익", _usd(pnlh.mean())), ("이익 확률", f"{(pnlh > 0).mean():.1%}"),
+               ("하위 5% 손익", _usd(np.quantile(pnlh, 0.05))), ("상위 5% 손익", _usd(np.quantile(pnlh, 0.95)))])
         hist = go.Figure(go.Histogram(x=pnlh, nbinsx=80, marker_color=COLORS["horizon"], opacity=0.85,
                                       hovertemplate="손익 %{x:$,.0f}<br>%{y}회<extra></extra>"))
         hist.add_vline(x=0, line_dash="dot", line_color="#888")
