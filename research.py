@@ -61,8 +61,97 @@ def load_research(ticker: str) -> dict:
     out["news"] = _safe(lambda: list(t.news), [])
     out["qincome"] = _safe(lambda: t.quarterly_income_stmt, pd.DataFrame())
     out["eps_est"] = _safe(lambda: t.earnings_estimate, pd.DataFrame())
-    out["hist"] = _safe(lambda: t.history(period="5y")["Close"].dropna(), pd.Series(dtype=float))
+    out["hist"] = _safe(lambda: t.history(period="10y")["Close"].dropna(), pd.Series(dtype=float))
     return out
+
+
+# ----------------------------------------------------------------------
+# SEC EDGAR (미국 공시) 10개년 재무제표 — 키 없이 무료, Yahoo는 4~5년치만 주므로 이것을 우선 사용
+# ----------------------------------------------------------------------
+SEC_UA = "jatbit-stock-app/1.0 (educational Streamlit app; https://jatbit-jatbit-app-qni3e3.streamlit.app)"
+SEC_ITEMS = [  # (표시 이름, us-gaap 태그 우선순위, 단위, 기간형 여부)
+    ("매출", ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet",
+             "RevenueFromContractWithCustomerIncludingAssessedTax", "SalesRevenueGoodsNet"], "USD", True),
+    ("매출총이익", ["GrossProfit"], "USD", True),
+    ("영업이익", ["OperatingIncomeLoss"], "USD", True),
+    ("순이익", ["NetIncomeLoss", "ProfitLoss", "NetIncomeLossAvailableToCommonStockholdersBasic"], "USD", True),
+    ("희석 EPS", ["EarningsPerShareDiluted", "EarningsPerShareBasicAndDiluted", "EarningsPerShareBasic"], "USD/shares", True),
+    ("영업현금흐름", ["NetCashProvidedByUsedInOperatingActivities",
+                  "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"], "USD", True),
+    ("설비투자", ["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets"], "USD", True),
+    ("총자산", ["Assets"], "USD", False),
+    ("총부채", ["Liabilities"], "USD", False),
+    ("자기자본", ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"], "USD", False),
+]
+
+
+def _sec_json(url: str):
+    import json
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={"User-Agent": SEC_UA, "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def _sec_cik_map() -> dict:
+    data = _try(lambda: _sec_json("https://www.sec.gov/files/company_tickers.json"), tries=3)
+    return {str(v["ticker"]).upper(): int(v["cik_str"]) for v in data.values()}
+
+
+def _sec_series(facts: dict, tags: list, unit: str, duration: bool) -> pd.Series:
+    """10-K에 실린 연간 값. 회계연도 말 날짜별로, 앞 순위 태그를 우선·같은 태그는 가장 최근 제출값(정정 반영)."""
+    gaap = facts.get("facts", {}).get("us-gaap", {})
+    out = {}
+    for tag in tags:
+        arr = gaap.get(tag, {}).get("units", {}).get(unit, [])
+        for e in arr:
+            if e.get("form") not in ("10-K", "10-K/A", "10-KT"):
+                continue
+            end, start = e.get("end"), e.get("start")
+            if duration:
+                if not start:
+                    continue
+                days = (pd.Timestamp(end) - pd.Timestamp(start)).days
+                if not 340 <= days <= 380:
+                    continue
+            elif start:
+                continue
+            prev = out.get(end)
+            if prev is None or (prev[0] == tag and e.get("filed", "") > prev[2]):
+                out[end] = (tag, e.get("val"), e.get("filed", ""))
+    if not out:
+        return pd.Series(dtype=float)
+    return pd.Series({pd.Timestamp(k): float(v[1]) for k, v in out.items()}).sort_index()
+
+
+@st.cache_data(ttl=24 * 60 * 60, show_spinner="SEC 공시에서 10개년 재무제표를 불러오는 중...")
+def load_sec_financials(ticker: str, years: int = 10) -> pd.DataFrame:
+    cik = _sec_cik_map().get(ticker.upper()) or _sec_cik_map().get(ticker.upper().replace(".", "-"))
+    if not cik:
+        raise RuntimeError("SEC에 등록된 미국 공시 기업이 아닙니다")
+    facts = _try(lambda: _sec_json(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"), tries=3)
+    rows = {name: _sec_series(facts, tags, unit, dur) for name, tags, unit, dur in SEC_ITEMS}
+    base = rows["매출"] if len(rows["매출"]) else rows["순이익"]
+    if len(base) == 0:
+        raise RuntimeError("연간 재무 데이터(us-gaap)가 없습니다")
+    # 회계연도 말 = 손익계산서 기간 끝 날짜. 며칠 차이 나는 재무상태표 날짜는 가까운 연도 말에 맞춘다.
+    ends = sorted(base.index)[-years:]
+    df = pd.DataFrame(index=[r[0] for r in SEC_ITEMS], columns=ends, dtype=float)
+    for name, ser in rows.items():
+        for d in ends:
+            if d in ser.index:
+                df.loc[name, d] = ser[d]
+            elif len(ser):
+                near = ser.index[abs((ser.index - d).days) <= 10]
+                if len(near):
+                    df.loc[name, d] = ser[near[-1]]
+    if df.loc["설비투자"].notna().any():
+        df.loc["잉여현금흐름"] = df.loc["영업현금흐름"] - df.loc["설비투자"].fillna(0)
+    df = df.drop(index="설비투자")
+    order = ["매출", "매출총이익", "영업이익", "순이익", "희석 EPS", "영업현금흐름", "잉여현금흐름", "총자산", "총부채", "자기자본"]
+    return df.loc[[o for o in order if o in df.index]].dropna(how="all")
 
 
 @st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner="한국어로 번역하는 중...")
@@ -296,8 +385,19 @@ def render_research() -> None:
         st.plotly_chart(fig, use_container_width=True)
 
     # ---- 5. 연간 재무제표
-    st.markdown("##### 연간 재무제표 (최근 4개 회계연도)")
     inc, bal, cf = R["income"], R["balance"], R["cashflow"]
+    sec, sec_err = None, "데이터 부족"
+    try:
+        sec = load_sec_financials(ticker)
+        if sec.shape[1] < 2:
+            sec = None
+    except Exception as e:  # noqa: BLE001
+        sec_err = str(e)
+    if sec is not None:
+        st.markdown(f"##### 연간 재무제표 (최근 {sec.shape[1]}개 회계연도 · SEC 공시)")
+    else:
+        st.markdown("##### 연간 재무제표 (최근 4개 회계연도 · Yahoo)")
+        st.caption(f"SEC 10개년 데이터를 쓰지 못해 Yahoo 데이터로 대신합니다 ({sec_err}).")
     items = [
         ("매출", _row(inc, "Total Revenue", "Operating Revenue")),
         ("매출총이익", _row(inc, "Gross Profit")),
@@ -312,10 +412,13 @@ def render_research() -> None:
         ("자기자본", _row(bal, "Stockholders Equity", "Common Stock Equity")),
     ]
     items = [(k, v) for k, v in items if v is not None]
-    if items:
-        fs = pd.DataFrame({k: pd.to_numeric(v, errors="coerce") for k, v in items}).T
-        fs = fs.dropna(axis=1, how="all")
-        fs = fs[sorted(fs.columns)[-4:]]
+    if sec is not None or items:
+        if sec is not None:
+            fs = sec.copy()
+        else:
+            fs = pd.DataFrame({k: pd.to_numeric(v, errors="coerce") for k, v in items}).T
+            fs = fs.dropna(axis=1, how="all")
+            fs = fs[sorted(fs.columns)[-4:]]
         fs.columns = [pd.Timestamp(c).strftime("%Y-%m") for c in fs.columns]
         show = fs.copy().astype(object)
         for k in show.index:
@@ -327,6 +430,9 @@ def render_research() -> None:
                 if k in fs.index:
                     show.loc[lab] = [pct(a / b) if b else "-" for a, b in zip(fs.loc[k], rev)]
         st.dataframe(show, use_container_width=True)
+        if sec is not None:
+            st.caption("출처: SEC EDGAR XBRL(10-K). 회사가 공시한 원 수치이며, 회계기준 변경·정정 공시가 있으면 가장 최근 제출값을 씁니다. "
+                       "잉여현금흐름 = 영업현금흐름 − 유형자산 취득(설비투자). 표가 넓으면 옆으로 밀어서 보세요.")
         if "매출" in fs.index:
             fig = go.Figure()
             fig.add_trace(go.Bar(x=fs.columns, y=fs.loc["매출"], name="매출", marker_color="#4C9BE8",
@@ -348,9 +454,12 @@ def render_research() -> None:
     # ---- 5-2. 주가 vs 이익 성장률·순이익률
     st.markdown("##### 주가 · 이익 성장률 · 순이익률")
     freq = st.radio("기준", ["연간", "분기"], horizontal=True, key="rs_freq")
-    srcdf = inc if freq == "연간" else R.get("qincome")
-    ni = _row(srcdf, "Net Income", "Net Income Common Stockholders")
-    rv = _row(srcdf, "Total Revenue", "Operating Revenue")
+    if freq == "연간" and sec is not None and {"순이익", "매출"} <= set(sec.index):
+        ni, rv = sec.loc["순이익"], sec.loc["매출"]
+    else:
+        srcdf = inc if freq == "연간" else R.get("qincome")
+        ni = _row(srcdf, "Net Income", "Net Income Common Stockholders")
+        rv = _row(srcdf, "Total Revenue", "Operating Revenue")
     if ni is None or rv is None:
         st.caption("이익 데이터를 불러오지 못했습니다.")
     else:
@@ -386,7 +495,7 @@ def render_research() -> None:
                           legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
         st.plotly_chart(fig, use_container_width=True)
         st.caption(f"점은 각 {'회계연도' if freq == '연간' else '분기'} 말 기준(오른쪽 축, %), 선은 일별 주가(왼쪽 축). "
-                   "성장률 = (이번 순이익 − 비교 시점 순이익) ÷ |비교 시점 순이익|. Yahoo는 연간 약 4년·분기 약 5분기만 제공합니다.")
+                   "성장률 = (이번 순이익 − 비교 시점 순이익) ÷ |비교 시점 순이익|. 연간은 SEC 공시(최대 10년), 분기는 Yahoo(약 5분기) 기준입니다.")
 
     # ---- 6. 일정
     cal = R["calendar"] or {}
