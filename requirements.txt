@@ -2,3 +2,4 @@ streamlit
 finance-datareader
 plotly
 pandas
+yfinance
