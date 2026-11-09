@@ -235,52 +235,146 @@ def compute_ratios(sec: pd.DataFrame, hist: pd.Series, splits) -> pd.DataFrame:
     return out.replace([np.inf, -np.inf], np.nan)
 
 
-def _ratio_chart(sec: pd.DataFrame, R: dict, ticker: str) -> None:
-    rt = compute_ratios(sec, R.get("hist"), R.get("splits"))
-    avail = [k for k in RATIOS if k in rt.index and rt.loc[k].notna().sum() >= 2]
-    if not avail:
-        st.caption("재무비율을 계산할 데이터가 부족합니다.")
-        return
-    groups = {}
-    for k in avail:
-        groups.setdefault(RATIOS[k][1], []).append(k)
-    default = [k for k in ("영업이익률", "ROE", "부채비율") if k in avail] or avail[:2]
-    sel = st.multiselect("그래프에 넣을 재무비율 (여러 개 선택 가능)", avail, default=default, key=f"rs_ratios_{ticker}",
+DAILY = {  # 이름: 단위
+    "주가": "$", "12M 트레일링 PER": "배", "12M 선행 PER (사후 실현 EPS)": "배",
+    "현재 12M 선행 PER (컨센서스)": "배", "트레일링 PER 평균 ±1σ 밴드": "배",
+}
+
+
+def _combo_chart(sec, R: dict, ticker: str, px, n_eps) -> None:
+    """연간 재무비율(SEC)과 일별 주가·PER 지표를 골라서 한 그래프에 겹쳐 그린다."""
+    rt = compute_ratios(sec, R.get("hist"), R.get("splits")) if sec is not None else None
+    avail = [k for k in RATIOS if rt is not None and k in rt.index and rt.loc[k].notna().sum() >= 2]
+    per = per_series(R.get("hist"), R.get("edates"))
+    hist = R.get("hist")
+    d_avail = ["주가"] if isinstance(hist, pd.Series) and len(hist) else []
+    if per is not None:
+        d_avail += ["12M 트레일링 PER", "12M 선행 PER (사후 실현 EPS)", "트레일링 PER 평균 ±1σ 밴드"]
+    if px and n_eps and n_eps > 0:
+        d_avail.append("현재 12M 선행 PER (컨센서스)")
+
+    c1, c2 = st.columns(2)
+    sel = c1.multiselect("① 재무비율 (연간 · SEC 10년)", avail,
+                         default=[k for k in ("순이익률", "순이익 성장률") if k in avail], key=f"rs_ratios_{ticker}",
                          format_func=lambda k: f"{k} ({RATIOS[k][1]}, {RATIOS[k][0]})")
-    st.caption(" · ".join(f"{g}: {', '.join(v)}" for g, v in groups.items()))
-    if not sel:
-        st.info("재무비율을 하나 이상 고르세요.")
+    dsel = c2.multiselect("② 주가 · PER 지표 (일별 · 선행)", d_avail,
+                          default=[k for k in ("주가",) if k in d_avail], key=f"rs_daily_{ticker}")
+    if avail:
+        groups = {}
+        for k in avail:
+            groups.setdefault(RATIOS[k][1], []).append(k)
+        st.caption("① " + " · ".join(f"{g}: {', '.join(v)}" for g, v in groups.items()))
+    elif sec is None:
+        st.caption("① 재무비율은 SEC 10개년 재무제표가 있는 미국 기업만 지원합니다.")
+    if not sel and not dsel:
+        st.info("①이나 ②에서 그릴 항목을 하나 이상 고르세요.")
         return
-    palette = ["#4C9BE8", "#F2A93B", "#E5534B", "#5BB56E", "#9B6FD6", "#2BB3B1", "#D97AB0", "#8C8C8C"]
-    cols = [pd.Timestamp(c).strftime("%Y-%m") for c in rt.columns]
-    pct_sel = [k for k in sel if RATIOS[k][0] == "%"]
-    mul_sel = [k for k in sel if RATIOS[k][0] != "%"]
+
+    # 단위별 축: % → 왼쪽(y), 배·회 → 오른쪽(y2), 주가 → 오른쪽 바깥(y3)
+    units = []
+    for k in sel:
+        units.append("%" if RATIOS[k][0] == "%" else "x")
+    for k in dsel:
+        units.append("$" if DAILY[k] == "$" else "x")
+    order = [u for u in ("%", "x", "$") if u in units]
+    axis_of = {u: ("y" if i == 0 else f"y{i + 1}") for i, u in enumerate(order)}
+    title_of = {"%": "%", "x": "배·회", "$": "주가($)"}
+
+    # 일별 지표 시작일을 재무비율 기간에 맞춘다
+    start = None
+    if rt is not None and sel:
+        start = pd.Timestamp(rt.columns[0]) - pd.DateOffset(months=6)
+    palette = ["#4C9BE8", "#F2A93B", "#E5534B", "#5BB56E", "#9B6FD6", "#2BB3B1", "#D97AB0", "#8C8C8C", "#C9A227", "#3D7DCA"]
     fig = go.Figure()
-    for i, k in enumerate(sel):
+    ci = 0
+    for k in sel:
         unit = RATIOS[k][0]
-        on_y2 = bool(pct_sel) and unit != "%"
-        fig.add_trace(go.Scatter(x=cols, y=rt.loc[k].values, name=f"{k} ({unit})", mode="lines+markers",
-                                 yaxis="y2" if on_y2 else "y", line=dict(color=palette[i % len(palette)], width=2,
-                                                                        dash="dot" if on_y2 else "solid"),
-                                 marker=dict(size=7), connectgaps=False,
-                                 hovertemplate="%{x} " + k + (" %{y:.1f}%" if unit == "%" else " %{y:.2f}" + unit) + "<extra></extra>"))
-    lay = dict(height=360, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
+        ax = axis_of["%" if unit == "%" else "x"]
+        fig.add_trace(go.Scatter(x=list(rt.columns), y=rt.loc[k].values, name=f"{k} ({unit})", mode="lines+markers", yaxis=ax,
+                                 line=dict(color=palette[ci % len(palette)], width=2), marker=dict(size=8),
+                                 hovertemplate="%{x|%Y-%m} " + k + (" %{y:.1f}%" if unit == "%" else " %{y:.2f}" + unit) + "<extra></extra>"))
+        ci += 1
+
+    def _clip(sr):
+        sr = sr.copy()
+        sr.index = pd.to_datetime(sr.index)
+        if sr.index.tz is not None:
+            sr.index = sr.index.tz_localize(None)
+        return sr[sr.index >= start] if start is not None else sr
+
+    trail = fwd_r = None
+    if per is not None:
+        trail, fwd_r, _e = per
+        trail, fwd_r = _clip(trail), _clip(fwd_r)
+    for k in dsel:
+        ax = axis_of["$" if DAILY[k] == "$" else "x"]
+        color = palette[ci % len(palette)]
+        if k == "주가":
+            h = _clip(hist)
+            fig.add_trace(go.Scatter(x=h.index, y=h.values, name="주가", mode="lines", yaxis=ax, line=dict(color=color, width=1.4),
+                                     hovertemplate="%{x|%Y-%m-%d} 주가 %{y:,.2f}<extra></extra>"))
+        elif k == "12M 트레일링 PER":
+            fig.add_trace(go.Scatter(x=trail.index, y=trail.values, name=k, mode="lines", yaxis=ax, line=dict(color=color, width=1.4),
+                                     hovertemplate="%{x|%Y-%m-%d} 트레일링 PER %{y:.1f}배<extra></extra>"))
+        elif k == "12M 선행 PER (사후 실현 EPS)":
+            fig.add_trace(go.Scatter(x=fwd_r.index, y=fwd_r.values, name=k, mode="lines", yaxis=ax,
+                                     line=dict(color=color, width=1.4, dash="dash"),
+                                     hovertemplate="%{x|%Y-%m-%d} 선행 PER(사후) %{y:.1f}배<extra></extra>"))
+        elif k == "트레일링 PER 평균 ±1σ 밴드":
+            tv = trail.dropna()
+            if len(tv):
+                m, sd = float(tv.mean()), float(tv.std())
+                x0, x1 = tv.index[0], tv.index[-1]
+                for yv, nm, dash in ((m + sd, f"평균+1σ {m + sd:.1f}배", "dot"), (m, f"PER 평균 {m:.1f}배", "dash"),
+                                     (m - sd, f"평균−1σ {m - sd:.1f}배", "dot")):
+                    fig.add_trace(go.Scatter(x=[x0, x1], y=[yv, yv], name=nm, mode="lines", yaxis=ax,
+                                             line=dict(color="#888", width=1, dash=dash), hoverinfo="skip"))
+        elif k == "현재 12M 선행 PER (컨센서스)":
+            now = pd.Timestamp(hist.index[-1]).tz_localize(None) if getattr(hist.index, "tz", None) is not None else pd.Timestamp(hist.index[-1])
+            fig.add_trace(go.Scatter(x=[now], y=[px / n_eps], name=f"현재 12M 선행 PER {px / n_eps:.1f}배", mode="markers", yaxis=ax,
+                                     marker=dict(size=14, symbol="star", color="#E5534B"),
+                                     hovertemplate=f"현재 12M 선행(NTM) PER {px / n_eps:.1f}배<extra></extra>"))
+        ci += 1
+
+    multi = len(order)
+    lay = dict(height=420, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-               yaxis=dict(title="%" if pct_sel else "배·회", ticksuffix="%" if pct_sel else ""))
-    if pct_sel and mul_sel:
-        lay["yaxis2"] = dict(title="배·회 (점선)", overlaying="y", side="right", showgrid=False)
+               xaxis=dict(domain=[0, 0.86] if multi == 3 else [0, 1]))
+    for i, u in enumerate(order):
+        key = "yaxis" if i == 0 else f"yaxis{i + 1}"
+        spec = dict(title=title_of[u], ticksuffix="%" if u == "%" else "", showgrid=(i == 0))
+        if i == 1:
+            spec.update(overlaying="y", side="right", anchor="x")
+        elif i == 2:
+            spec.update(overlaying="y", side="right", anchor="free", position=1.0)
+        if u == "x" and dsel and any(k in dsel for k in ("12M 트레일링 PER", "12M 선행 PER (사후 실현 EPS)")) and trail is not None:
+            vals = np.concatenate([trail.dropna().values, fwd_r.dropna().values] +
+                                  [rt.loc[k].dropna().values for k in sel if RATIOS[k][0] != "%"])
+            if len(vals):
+                spec["range"] = [0, float(np.nanpercentile(vals, 98)) * 1.2]
+        lay[key] = spec
     fig.update_layout(**lay)
-    fig.update_xaxes(type="category")
     st.plotly_chart(fig, use_container_width=True)
-    tbl = rt.loc[sel].copy()
-    tbl.columns = cols
-    tbl = tbl.apply(lambda row: [("-" if pd.isna(v) else (f"{v:.1f}%" if RATIOS[row.name][0] == "%" else f"{v:.2f}"))
-                                 for v in row], axis=1, result_type="expand")
-    tbl.columns = cols
-    st.dataframe(tbl, use_container_width=True)
-    st.caption("SEC 10-K 연간 수치로 계산. ROE·ROA·총자산회전율은 전년 말과 올해 말의 평균 잔액 기준, 성장률은 전년 대비. "
-               "PER·PBR·PSR은 회계연도 말 주가 × 희석 주식 수(액면분할 보정)로 시가총액을 구해 계산했습니다. "
-               "이자비용·배당금 등 회사가 해당 항목을 공시하지 않은 해는 빈칸입니다.")
+    axes_txt = ", ".join(f"{title_of[u]} → {'왼쪽' if i == 0 else ('오른쪽' if i == 1 else '오른쪽 바깥')} 축" for i, u in enumerate(order))
+    st.caption(f"축: {axes_txt}. 재무비율은 회계연도 말 시점의 점(SEC 10-K), 주가·PER은 일별 선입니다.")
+
+    if sel:
+        tbl = rt.loc[sel].copy()
+        cols = [pd.Timestamp(c).strftime("%Y-%m") for c in rt.columns]
+        tbl = tbl.apply(lambda row: [("-" if pd.isna(v) else (f"{v:.1f}%" if RATIOS[row.name][0] == "%" else f"{v:.2f}"))
+                                     for v in row], axis=1, result_type="expand")
+        tbl.columns = cols
+        st.dataframe(tbl, use_container_width=True)
+    notes = ["재무비율: ROE·ROA·총자산회전율은 전년 말과 올해 말의 평균 잔액 기준, 성장률은 전년 대비, "
+             "PER·PBR·PSR은 회계연도 말 주가 × 희석 주식 수(액면분할 보정)로 계산. 회사가 공시하지 않은 항목은 빈칸입니다."]
+    if any(k in dsel for k in ("12M 트레일링 PER", "12M 선행 PER (사후 실현 EPS)", "트레일링 PER 평균 ±1σ 밴드")):
+        notes.append("12M 트레일링 PER = 주가 ÷ 그날까지 발표된 최근 4개 분기 EPS 합. 과거의 선행 PER 컨센서스는 무료로 받을 수 없어, "
+                     "'선행 PER (사후 실현 EPS)'는 그 뒤 실제로 발표된 4개 분기 EPS로 계산한 값입니다(최근 1년은 계산 불가). "
+                     "분기 EPS는 Yahoo의 발표 EPS(액면분할 반영)라 공시 순이익 기준 EPS와 다를 수 있습니다.")
+    if "현재 12M 선행 PER (컨센서스)" in dsel:
+        notes.append("별 표시는 오늘의 애널리스트 컨센서스로 계산한 12M 선행(NTM) PER입니다.")
+    st.caption(" ".join(notes))
+
 
 
 @st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner="한국어로 번역하는 중...")
@@ -401,43 +495,6 @@ def per_series(hist: pd.Series, edates: pd.DataFrame):
     trail = pd.Series(np.where(t_eps > 0, h.values / t_eps, np.nan), index=h.index)
     fwd_r = pd.Series(np.where(f_eps > 0, h.values / f_eps, np.nan), index=h.index)
     return trail, fwd_r, e
-
-
-def _per_chart(R: dict, px, n_eps) -> None:
-    out = per_series(R.get("hist"), R.get("edates"))
-    if out is None:
-        st.caption("분기 실적(발표 EPS) 이력을 불러오지 못해 PER 추이를 그릴 수 없습니다.")
-        return
-    trail, fwd_r, e = out
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=trail.index, y=trail.values, name="12M 트레일링 PER", mode="lines",
-                             line=dict(color="#4C9BE8", width=1.6), hovertemplate="%{x|%Y-%m-%d} 트레일링 %{y:.1f}배<extra></extra>"))
-    if fwd_r.notna().any():
-        fig.add_trace(go.Scatter(x=fwd_r.index, y=fwd_r.values, name="12M 선행 PER (사후 실현 EPS)", mode="lines",
-                                 line=dict(color="#F2A93B", width=1.6, dash="dash"),
-                                 hovertemplate="%{x|%Y-%m-%d} 선행(사후) %{y:.1f}배<extra></extra>"))
-    avg = float(trail.dropna().mean()) if trail.notna().any() else None
-    if avg:
-        sd = float(trail.dropna().std())
-        fig.add_hline(y=avg, line_dash="dot", line_color="#888", annotation_text=f"평균 {avg:.1f}배", annotation_position="top left")
-        fig.add_hrect(y0=avg - sd, y1=avg + sd, fillcolor="#888", opacity=0.08, line_width=0)
-    if px and n_eps and n_eps > 0:
-        now = trail.index[-1] if len(trail) else pd.Timestamp.now()
-        fig.add_trace(go.Scatter(x=[now], y=[px / n_eps], name="현재 12M 선행 PER (컨센서스)", mode="markers",
-                                 marker=dict(size=13, symbol="star", color="#E5534B"),
-                                 hovertemplate=f"현재 12M 선행(NTM) {px / n_eps:.1f}배<extra></extra>"))
-    ymax = np.nanpercentile(np.concatenate([trail.dropna().values, fwd_r.dropna().values]), 98) if trail.notna().any() else None
-    fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
-                      yaxis=dict(title="PER(배)", range=[0, ymax * 1.15] if ymax else None),
-                      legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-    st.plotly_chart(fig, use_container_width=True)
-    last_t = trail.dropna().iloc[-1] if trail.notna().any() else None
-    st.caption(
-        f"트레일링 PER = 주가 ÷ 그날까지 발표된 최근 4개 분기 EPS 합 (현재 {last_t:.1f}배" + (f", {len(e)}개 분기 실적 기준)" if last_t else ")") +
-        ". 과거의 선행 PER 컨센서스는 무료로 받을 수 없어, 점선은 '그 뒤 실제로 발표된 4개 분기 EPS'로 계산한 사후 값입니다(최근 1년은 아직 계산 불가). "
-        "별 표시는 오늘의 애널리스트 컨센서스 기준 12M 선행 PER입니다. 회색 띠는 트레일링 PER 평균 ±1표준편차. "
-        "EPS는 Yahoo의 분기 발표 EPS(대개 일회성 항목을 뺀 조정 EPS, 액면분할 반영)라 공시 순이익 기준 EPS와 다를 수 있습니다."
-        if last_t else "트레일링 PER을 계산할 수 없습니다 (최근 4분기 EPS 합이 0 이하).")
 
 
 def _set_research(tk):
@@ -644,62 +701,10 @@ def render_research() -> None:
     else:
         st.caption("재무제표를 불러오지 못했습니다 (ETF이거나 Yahoo 응답 지연).")
 
-    # ---- 5-1. 재무비율 그래프 (직접 선택)
-    st.markdown("##### 재무비율 그래프 (직접 선택)")
-    if sec is not None:
-        _ratio_chart(sec, R, ticker)
-    else:
-        st.caption("SEC 10개년 재무제표가 있는 미국 기업만 지원합니다.")
+    # ---- 5-1. 재무비율·주가·PER 그래프 (직접 선택)
+    st.markdown("##### 재무비율 · 주가 · PER 그래프 (직접 선택해서 겹쳐 보기)")
+    _combo_chart(sec, R, ticker, px, n_eps)
 
-    # ---- 5-2. 주가 vs 이익 성장률·순이익률
-    st.markdown("##### 주가 · 이익 성장률 · 순이익률")
-    freq = st.radio("기준", ["연간", "분기"], horizontal=True, key="rs_freq")
-    if freq == "연간" and sec is not None and {"순이익", "매출"} <= set(sec.index):
-        ni, rv = sec.loc["순이익"], sec.loc["매출"]
-    else:
-        srcdf = inc if freq == "연간" else R.get("qincome")
-        ni = _row(srcdf, "Net Income", "Net Income Common Stockholders")
-        rv = _row(srcdf, "Total Revenue", "Operating Revenue")
-    if ni is None or rv is None:
-        st.caption("이익 데이터를 불러오지 못했습니다.")
-    else:
-        d = pd.DataFrame({"ni": pd.to_numeric(ni, errors="coerce"), "rv": pd.to_numeric(rv, errors="coerce")})
-        d.index = pd.to_datetime(d.index)
-        d = d.dropna(how="all").sort_index()
-        d["margin"] = d["ni"] / d["rv"] * 100
-        lag = 1 if freq == "연간" else 4
-        g_lab = "순이익 성장률(전년 대비)"
-        if freq == "분기" and d["ni"].shift(4).notna().sum() < 2:
-            lag, g_lab = 1, "순이익 성장률(전분기 대비)"
-        prev = d["ni"].shift(lag)
-        d["growth"] = (d["ni"] - prev) / prev.abs() * 100
-        hist = R.get("hist")
-        fig = go.Figure()
-        if isinstance(hist, pd.Series) and len(hist):
-            h = hist.copy()
-            h.index = pd.to_datetime(h.index).tz_localize(None) if getattr(h.index, "tz", None) is not None else pd.to_datetime(h.index)
-            start = d.index.min() - (pd.DateOffset(years=1) if freq == "연간" else pd.DateOffset(months=3))
-            h = h[h.index >= start]
-            fig.add_trace(go.Scatter(x=h.index, y=h.values, name="주가", mode="lines", line=dict(color="#4C9BE8", width=1.6),
-                                     hovertemplate="%{x|%Y-%m-%d} 주가 %{y:,.2f}<extra></extra>"))
-        fig.add_trace(go.Scatter(x=d.index, y=d["growth"], name=g_lab, mode="lines+markers", yaxis="y2",
-                                 line=dict(color="#F2A93B", width=2), marker=dict(size=8),
-                                 hovertemplate="%{x|%Y-%m} " + g_lab + " %{y:.1f}%<extra></extra>"))
-        fig.add_trace(go.Scatter(x=d.index, y=d["margin"], name="순이익률", mode="lines+markers", yaxis="y2",
-                                 line=dict(color="#E5534B", width=2, dash="dot"), marker=dict(size=8, symbol="square"),
-                                 hovertemplate="%{x|%Y-%m} 순이익률 %{y:.1f}%<extra></extra>"))
-        fig.add_shape(type="line", xref="paper", x0=0, x1=1, yref="y2", y0=0, y1=0, line=dict(color="#888", width=1, dash="dot"))
-        fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
-                          yaxis=dict(title=f"주가({cur or '현지 통화'})"),
-                          yaxis2=dict(title="%", overlaying="y", side="right", showgrid=False, ticksuffix="%"),
-                          legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption(f"점은 각 {'회계연도' if freq == '연간' else '분기'} 말 기준(오른쪽 축, %), 선은 일별 주가(왼쪽 축). "
-                   "성장률 = (이번 순이익 − 비교 시점 순이익) ÷ |비교 시점 순이익|. 연간은 SEC 공시(최대 10년), 분기는 Yahoo(약 5분기) 기준입니다.")
-
-    # ---- 5-3. 12M PER 추이
-    st.markdown("##### 12M PER 추이")
-    _per_chart(R, px, n_eps)
 
     # ---- 6. 일정
     cal = R["calendar"] or {}
