@@ -173,10 +173,8 @@ def market_params(ticker: str, key: str) -> dict | None:
     r_default = rr[0] if rr else 0.04
     q_default = u["div12"] / u["spot"] if u["spot"] > 0 else 0.0
 
-    m = st.columns(5)
-    m[0].metric("기초자산 가격", f"{u['spot']:,.2f}", help=f"기준: {u['asof']}")
-    for col, (k, v) in zip(m[1:], hv.items()):
-        col.metric(f"역사적 변동성 {k}", f"{v * 100:.1f}%" if v == v else "-")
+    mgrid([("기초자산 가격", f"{u['spot']:,.2f}", f"기준: {u['asof']}")] +
+          [(f"HV {k}", f"{v * 100:.1f}%" if v == v else "-", f"역사적 변동성 {k}") for k, v in hv.items()], cols=5)
 
     c1, c2, c3 = st.columns(3)
     r_pct = c1.number_input("무위험금리 r (%)", value=round(r_default * 100, 3), step=0.05, format="%.3f",
@@ -338,6 +336,19 @@ def _is_dark() -> bool:
     return (st.get_option("theme.base") or "dark") != "light"
 
 
+def mgrid(items, cols: int = 4) -> None:
+    """지표를 가로 격자로 나열 (휴대폰에서도 세로로 길게 쌓이지 않게). items: (라벨, 값[, 설명])"""
+    cells = ""
+    for it in items:
+        lab, val = it[0], it[1]
+        tip = html.escape(it[2], quote=True) if len(it) > 2 and it[2] else ""
+        cells += (f'<div style="min-width:0" title="{tip}"><div style="font-size:0.78rem;opacity:.7">{html.escape(lab)}</div>'
+                  f'<div style="font-size:1.12rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{html.escape(val)}</div></div>')
+    cells = cells.replace("$", "&#36;")  # 마크다운 수식($...$)으로 해석되지 않게
+    st.markdown(f'<div style="display:grid;grid-template-columns:repeat({cols},minmax(0,1fr));gap:6px 12px;margin:2px 0 12px">{cells}</div>',
+                unsafe_allow_html=True)
+
+
 # ======================================================================
 # 1) 옵션 체인 화면
 # ======================================================================
@@ -368,9 +379,12 @@ def _add_position(ticker, expiry):
 def render_chain() -> None:
     pf = _pf_us_tickers()
     presets = list(dict.fromkeys(pf + OPT_PRESETS))[:10]
-    cols = st.columns(len(presets))
-    for c, tk in zip(cols, presets):
-        c.button(tk, key=f"opt_preset_{tk}", use_container_width=True, on_click=_set_ticker, args=(tk,))
+    if hasattr(st, "pills"):
+        st.pills("빠른 선택", presets, key="opt_pill", on_change=lambda: _set_ticker(st.session_state.get("opt_pill")) if st.session_state.get("opt_pill") else None)
+    else:
+        cols = st.columns(len(presets))
+        for c, tk in zip(cols, presets):
+            c.button(tk, key=f"opt_preset_{tk}", use_container_width=True, on_click=_set_ticker, args=(tk,))
     if pf:
         st.caption("앞쪽 버튼은 '포트폴리오 최적화' 탭에 들어 있는 미국 종목입니다.")
     raw_t = st.text_input("미국 티커 (예: AAPL, TSLA, SPY)", key="opt_ticker", placeholder="AAPL")
@@ -397,7 +411,8 @@ def render_chain() -> None:
 
     c1, c2, c3 = st.columns([2, 1.4, 2.6])
     today = pd.Timestamp.now().normalize()
-    expiry = c1.selectbox("만기일", exps, key=f"opt_expiry_{ticker}",
+    first_i = next((i for i, e in enumerate(exps) if (pd.Timestamp(e) - today).days >= 7), 0)
+    expiry = c1.selectbox("만기일", exps, index=first_i, key=f"opt_expiry_{ticker}",
                           format_func=lambda x: f"{x} (D-{(pd.Timestamp(x) - today).days})")
     basis = c2.radio("그릭스 기준 변동성", ["IV", "HV"], horizontal=True, key="opt_greek_basis",
                      format_func=lambda x: "내재(IV)" if x == "IV" else "역사적(HV)")
@@ -490,7 +505,7 @@ def _load_from_pf(amount_krw: float, fx: float) -> None:
 def _pick_option(label: str, ticker: str, exps: list, key: str, default_kind: str, default_mny: float):
     """헷지 수단으로 쓸 옵션 1개 선택 → (만기, 콜여부, 행사가)."""
     today = pd.Timestamp.now().normalize()
-    good = [e for e in exps if (pd.Timestamp(e) - today).days >= 14] or exps
+    good = [e for e in exps if (pd.Timestamp(e) - today).days >= 30] or exps
     c1, c2, c3 = st.columns([1.6, 0.9, 1.3])
     exp = c1.selectbox(f"{label} 만기", exps, index=exps.index(good[0]), key=f"{key}_exp",
                        format_func=lambda x: f"{x} (D-{(pd.Timestamp(x) - today).days})")
@@ -646,7 +661,7 @@ def _hedge_one(code: str, info: dict, method: str, rounding: bool):
             tot[k] += g[k]
         rows.append({"구분": "옵션", "내용": label, "단가($)": float(row["mkt"]), "델타(주)": g["delta"], "감마": g["gamma"],
                      "베가($/1%p)": g["vega"], "세타($/일)": g["theta"]})
-    rows.append({"구분": "합계", "내용": "헷지 전", "단가($)": None, "델타(주)": tot["delta"], "감마": tot["gamma"],
+    rows.append({"구분": "합계", "내용": "헷지 전", "단가($)": float("nan"), "델타(주)": tot["delta"], "감마": tot["gamma"],
                  "베가($/1%p)": tot["vega"], "세타($/일)": tot["theta"]})
     st.dataframe(pd.DataFrame(rows).round(4), use_container_width=True, hide_index=True)
     st.caption(f"기초자산 {S:,.2f}달러 · 달러 델타 {tot['delta'] * S:,.0f}$ · 1% 변동 시 델타 변화 {tot['gamma'] * S * 0.01:,.2f}주")
