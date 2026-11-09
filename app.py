@@ -22,6 +22,7 @@ import streamlit as st
 from plotly.subplots import make_subplots
 from rates import add_rates, rate_controls
 from options import render_options  # 옵션 탭 (options.py, capm_opt.py, bsm.py)
+from research import render_research  # 기업 리서치 탭
 
 LINE_COLOR = "#2B6CB0"
 UP_COLOR = "#D64545"      # 국내 관행: 상승 = 빨강
@@ -1182,7 +1183,7 @@ except Exception as e:  # noqa: BLE001
     st.error(f"종목 목록을 불러오지 못했습니다: {e}")
     st.stop()
 
-tab_single, tab_compare, tab_pf, tab_opt = st.tabs(["주가 조회", "수익률 비교", "포트폴리오 최적화", "옵션 조회"])
+tab_single, tab_compare, tab_pf, tab_opt, tab_rs = st.tabs(["주가 조회", "수익률 비교", "포트폴리오 최적화", "옵션 조회", "기업 리서치"])
 with tab_single:
     render_single(LISTING)
 with tab_compare:
@@ -1191,5 +1192,7 @@ with tab_pf:
     render_portfolio(LISTING)
 with tab_opt:
     render_options()
+with tab_rs:
+    render_research()
 
 st.caption("일봉 기준 데이터이며 실시간 시세가 아닙니다. 장중에는 지연되거나 당일 값이 반영되지 않을 수 있습니다.")
