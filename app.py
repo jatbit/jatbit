@@ -21,7 +21,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 from rates import add_rates, rate_controls
-from options import render_options
+from options import render_options  # 옵션 탭 (options.py, capm_opt.py, bsm.py)
 
 LINE_COLOR = "#2B6CB0"
 UP_COLOR = "#D64545"      # 국내 관행: 상승 = 빨강
