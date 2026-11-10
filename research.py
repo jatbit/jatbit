@@ -90,6 +90,14 @@ SEC_ITEMS = [  # (표시 이름, us-gaap 태그 우선순위, 단위, 기간형 
     ("이자비용", ["InterestExpense", "InterestExpenseNonoperating", "InterestExpenseDebt"], "USD", True),
     ("희석주식수", ["WeightedAverageNumberOfDilutedSharesOutstanding"], "shares", True),
     ("배당금", ["PaymentsOfDividends", "PaymentsOfDividendsCommonStock"], "USD", True),
+    # 신용위험(credit.py) 계산용
+    ("이익잉여금", ["RetainedEarningsAccumulatedDeficit"], "USD", False),
+    ("단기차입금", ["DebtCurrent", "LongTermDebtCurrent", "ShortTermBorrowings"], "USD", False),
+    ("장기차입금", ["LongTermDebtNoncurrent", "LongTermDebtAndCapitalLeaseObligations", "LongTermDebt"], "USD", False),
+    ("현금성자산", ["CashAndCashEquivalentsAtCarryingValue",
+               "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"], "USD", False),
+    ("감가상각비", ["DepreciationDepletionAndAmortization", "DepreciationAndAmortization",
+               "DepreciationAmortizationAndAccretionNet", "Depreciation"], "USD", True),
 ]
 SEC_SHOW = ["매출", "매출총이익", "영업이익", "순이익", "희석 EPS", "영업현금흐름", "잉여현금흐름", "총자산", "총부채", "자기자본"]
 
@@ -557,6 +565,26 @@ def render_research() -> None:
                 st.write(summary.replace("$", "\\$"))
     st.button("이 종목을 '옵션 조회' 탭에 설정", key="rs_to_opt", on_click=_send_to_options, args=(ticker,))
 
+    tab_main, tab_dcf, tab_cr, tab_ins = st.tabs(["개요·재무", "DCF 가치평가", "신용위험·회사채", "내부자 거래·지분 구조"])
+    _sec = None
+    try:
+        _sec = load_sec_financials(ticker)
+    except Exception:  # noqa: BLE001
+        _sec = None
+    with tab_dcf:
+        from dcf import render_dcf
+        render_dcf(ticker, R, _sec)
+    with tab_cr:
+        from credit import render_credit
+        render_credit(ticker, R, _sec)
+    with tab_ins:
+        from insider import render_insider
+        render_insider(ticker, R)
+    with tab_main:
+        _render_main(ticker, R, info, cur, ko)
+
+
+def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool) -> None:
     # ---- 2. 주가·밸류에이션
     px = _num(info.get("currentPrice")) or _num(info.get("regularMarketPrice"))
     lo52, hi52 = _num(info.get("fiftyTwoWeekLow")), _num(info.get("fiftyTwoWeekHigh"))

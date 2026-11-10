@@ -756,9 +756,13 @@ def render_options() -> None:
                "조회는 느릴 수 있으며, 실패하면 자동으로 여러 번 다시 시도합니다.")
     from capm_opt import render_capm_opt
 
-    t1, t2, t3 = st.tabs(["옵션 체인", "델타·감마 헷지", "옵션 포함 CAPM·손익"])
+    from optvol import render_vol
+
+    t1, t4, t2, t3 = st.tabs(["옵션 체인", "변동성·수급 분석", "델타·감마 헷지", "옵션 포함 CAPM·손익"])
     with t1:
         render_chain()
+    with t4:
+        render_vol()
     with t2:
         render_hedge()
     with t3:

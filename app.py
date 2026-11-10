@@ -22,7 +22,9 @@ import streamlit as st
 from plotly.subplots import make_subplots
 from rates import add_rates, rate_controls
 from options import render_options  # 옵션 탭 (options.py, capm_opt.py, bsm.py)
-from research import render_research  # 기업 리서치 탭
+from research import render_research  # 기업 리서치 탭 (dcf.py, insider.py, credit.py)
+from backtest import render_backtest  # 백테스트 탭
+from bonds import render_bonds  # 채권 탭
 
 LINE_COLOR = "#2B6CB0"
 UP_COLOR = "#D64545"      # 국내 관행: 상승 = 빨강
@@ -1080,6 +1082,8 @@ def render_portfolio(listing: pd.DataFrame) -> None:
     st.session_state["pf_opt_result"] = {
         "items": [{"code": it["code"], "name": it["name"], "domestic": bool(it["domestic"])} for it in items],
         "weights": [float(x) for x in res["max_sharpe"]],
+        "weight_sets": {k: [float(x) for x in w] for k, w in ports.items()},
+        "start": f"{P.index[0]:%Y-%m-%d}",
         "prices": {nm: float(P[nm].iloc[-1]) for nm in names},
         "asof": f"{P.index[-1]:%Y-%m-%d}",
     }
@@ -1183,15 +1187,20 @@ except Exception as e:  # noqa: BLE001
     st.error(f"종목 목록을 불러오지 못했습니다: {e}")
     st.stop()
 
-tab_single, tab_compare, tab_pf, tab_opt, tab_rs = st.tabs(["주가 조회", "수익률 비교", "포트폴리오 최적화", "옵션 조회", "기업 리서치"])
+tab_single, tab_compare, tab_pf, tab_bt, tab_opt, tab_bd, tab_rs = st.tabs(
+    ["주가 조회", "수익률 비교", "포트폴리오 최적화", "백테스트", "옵션 조회", "채권", "기업 리서치"])
 with tab_single:
     render_single(LISTING)
 with tab_compare:
     render_compare(LISTING)
 with tab_pf:
     render_portfolio(LISTING)
+with tab_bt:
+    render_backtest(load_prices, find_candidates, LISTING, risk_free_for)
 with tab_opt:
     render_options()
+with tab_bd:
+    render_bonds()
 with tab_rs:
     render_research()
 
