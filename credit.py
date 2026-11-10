@@ -193,27 +193,8 @@ def load_credit_market(years: int = 3) -> pd.DataFrame:
 
     start = (datetime.now() - timedelta(days=365 * years + 10)).strftime("%Y-%m-%d")
     ids = [s for pair in ICE.values() for s in pair] + list(OTHER)
-    frames = {}
-    for chunk in (ids[:7], ids[7:14], ids[14:]):
-        for _ in range(3):
-            try:
-                df = _fred_csv(chunk, start)
-                for c in df.columns:
-                    frames[c] = df[c]
-                break
-            except Exception:  # noqa: BLE001
-                pass
-    missing = [i for i in ids if i not in frames]
-    for i in missing:  # 묶음 요청이 실패하면 하나씩
-        for _ in range(2):
-            try:
-                frames[i] = _fred_csv([i], start).iloc[:, 0]
-                break
-            except Exception:  # noqa: BLE001
-                pass
-    if not frames:
-        raise RuntimeError("FRED에서 회사채 금리를 받지 못했습니다")
-    return pd.DataFrame(frames).sort_index() / 100
+    frames = _fred_csv(ids, start)  # 시리즈별 병렬 조회, 실패한 시리즈는 빠짐
+    return frames / 100
 
 
 def _row(df: pd.DataFrame, keys) -> pd.Series | None:

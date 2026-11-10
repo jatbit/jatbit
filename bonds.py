@@ -79,37 +79,46 @@ def ytm_from_price(clean: float, coupon: float, T: float, freq: int = 2, face: f
 # ======================================================================
 # 데이터
 # ======================================================================
+def _fred_one(sid: str) -> pd.Series:
+    """FRED 시리즈 하나 (앱의 다른 곳과 같은 방식: id만 넣은 CSV). 실패하면 두 번 더 시도."""
+    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}"
+    err = None
+    for i in range(3):
+        try:
+            with urllib.request.urlopen(url, timeout=12) as resp:
+                raw = resp.read().decode("utf-8")
+            df = pd.read_csv(io.StringIO(raw), na_values=["."])
+            s = pd.Series(pd.to_numeric(df.iloc[:, 1], errors="coerce").values, index=pd.to_datetime(df.iloc[:, 0]), name=sid)
+            return s.dropna()
+        except Exception as e:  # noqa: BLE001
+            err = e
+            time.sleep(0.5 * (i + 1))
+    raise RuntimeError(f"{sid}: {err}")
+
+
 def _fred_csv(ids: list, start: str) -> pd.DataFrame:
-    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={','.join(ids)}&cosd={start}"
-    with urllib.request.urlopen(url, timeout=20) as resp:
-        raw = resp.read().decode("utf-8")
-    df = pd.read_csv(io.StringIO(raw), na_values=["."])
-    df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0])
-    return df.set_index(df.columns[0]).astype(float)
+    """여러 시리즈를 동시에(병렬) 받아 start 이후만 남긴다. 받지 못한 시리즈는 빠진다."""
+    import concurrent.futures as cf
+
+    out = {}
+    with cf.ThreadPoolExecutor(max_workers=min(8, len(ids))) as ex:
+        futs = {ex.submit(_fred_one, i): i for i in ids}
+        for f in cf.as_completed(futs):
+            try:
+                out[futs[f]] = f.result()
+            except Exception:  # noqa: BLE001
+                pass
+    if not out:
+        raise RuntimeError("FRED에서 데이터를 받지 못했습니다")
+    df = pd.DataFrame(out).sort_index()
+    return df[df.index >= pd.Timestamp(start)]
 
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner="미국 국채 금리를 불러오는 중 (FRED)...")
 def load_treasury(years: int = 10) -> pd.DataFrame:
     start = (datetime.now() - timedelta(days=365 * years + 30)).strftime("%Y-%m-%d")
-    ids = list(TENORS)
-    for _ in range(3):
-        try:
-            df = _fred_csv(ids, start)
-            if set(ids) <= set(df.columns):
-                return df[ids] / 100
-        except Exception:  # noqa: BLE001
-            time.sleep(1.0)
-    frames = {}
-    for i in ids:  # 한 번에 안 되면 하나씩
-        for _ in range(3):
-            try:
-                frames[i] = _fred_csv([i], start).iloc[:, 0]
-                break
-            except Exception:  # noqa: BLE001
-                time.sleep(1.0)
-    if not frames:
-        raise RuntimeError("FRED에서 국채 금리를 받지 못했습니다")
-    return pd.DataFrame(frames) / 100
+    df = _fred_csv(list(TENORS), start)
+    return df[[c for c in TENORS if c in df.columns]] / 100
 
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner="채권 ETF 가격을 불러오는 중...")
