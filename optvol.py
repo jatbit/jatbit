@@ -48,7 +48,9 @@ def max_pain(d: pd.DataFrame):
         pp = (p["openInterest"] * np.maximum(p["strike"] - k, 0)).sum()
         pain.append((pc + pp) * MULT)
     pain = np.array(pain)
-    return float(ks[int(np.argmin(pain))]) if len(ks) else float("nan"), ks, pain
+    if not len(ks) or (c["openInterest"].sum() + p["openInterest"].sum()) <= 0:  # Yahoo가 미결제약정을 0으로 줄 때가 있음
+        return float("nan"), ks, pain
+    return float(ks[int(np.argmin(pain))]), ks, pain
 
 
 def expiry_stats(d: pd.DataFrame, S: float, T: float) -> dict:
@@ -71,7 +73,7 @@ def expiry_stats(d: pd.DataFrame, S: float, T: float) -> dict:
     return {"T": T, "atm_iv": atm, "p25": p25, "c25": c25, "rr25": p25 - c25 if np.isfinite(p25) and np.isfinite(c25) else float("nan"),
             "straddle": straddle, "move_pct": straddle / S if S else float("nan"),
             "move_iv": atm * math.sqrt(T) if np.isfinite(atm) else float("nan"),
-            "max_pain": mp, "pc_vol": pv / cv if cv else float("nan"), "pc_oi": po / co if co else float("nan"),
+            "max_pain": mp, "pc_vol": pv / cv if cv else float("nan"), "pc_oi": po / co if co and po else float("nan"),
             "call_vol": cv, "put_vol": pv, "call_oi": co, "put_oi": po}
 
 
@@ -145,7 +147,9 @@ def render_vol() -> None:
     hv_rank = (hv_now - hv_y.min()) / (hv_y.max() - hv_y.min()) if len(hv_y) and hv_y.max() > hv_y.min() else float("nan")
     hv_pct = float((hv_y < hv_now).mean()) if len(hv_y) else float("nan")
     near = ST[ST["days"] >= 7].iloc[0] if (ST["days"] >= 7).any() else ST.iloc[0]
-    tot_cv, tot_pv, tot_co, tot_po = ST["call_vol"].sum(), ST["put_vol"].sum(), ST["call_oi"].sum(), ST["put_oi"].sum()
+    tot_cv, tot_pv = ST["call_vol"].sum(), ST["put_vol"].sum()
+    oi_ok = (ST["call_oi"] > 0) & (ST["put_oi"] > 0)  # 콜·풋 미결제약정이 모두 있는 만기만 합산
+    tot_co, tot_po = ST.loc[oi_ok, "call_oi"].sum(), ST.loc[oi_ok, "put_oi"].sum()
     st.markdown(f"##### {ticker} 요약 · 기초자산 {S:,.2f}")
     mgrid([("ATM IV (가까운 만기)", f"{near['atm_iv'] * 100:.1f}%" if np.isfinite(near["atm_iv"]) else "-", f"{near.name} 만기 기준"),
            ("HV 20일", f"{hv_now * 100:.1f}%"),
@@ -157,8 +161,10 @@ def render_vol() -> None:
            ("기대 변동폭", f"±{near['straddle']:,.2f} (±{near['move_pct'] * 100:.1f}%)" if np.isfinite(near["straddle"]) else "-",
             f"{near.name} 만기까지 ATM 스트래들 가격 기준"),
            ("풋/콜 거래량 비율", f"{tot_pv / tot_cv:.2f}" if tot_cv else "-", "불러온 전체 만기 합계"),
-           ("풋/콜 미결제 비율", f"{tot_po / tot_co:.2f}" if tot_co else "-"),
-           ("맥스페인 (가까운 만기)", f"{near['max_pain']:,.2f}", "만기 때 옵션 매수자 전체 손실이 가장 커지는(매도자 이익이 최대인) 가격"),
+           ("풋/콜 미결제 비율", f"{tot_po / tot_co:.2f}" if tot_co else "-", f"미결제약정이 있는 {int(oi_ok.sum())}개 만기 합계"),
+           ("맥스페인 (가까운 만기)", f"{near['max_pain']:,.2f}" if np.isfinite(near["max_pain"]) else "-",
+            "만기 때 옵션 매수자 전체 손실이 가장 커지는(매도자 이익이 최대인) 가격" if np.isfinite(near["max_pain"])
+            else "Yahoo가 이 만기의 미결제약정을 0으로 제공해 계산할 수 없음"),
            ("HV 백분위 (1년)", f"{hv_pct * 100:.0f}%" if np.isfinite(hv_pct) else "-")], cols=5)
 
     sub = st.tabs(["기간구조·스큐", "스마일", "변동성 곡면", "미결제약정·맥스페인", "감마 노출(GEX)", "만기별 표"])
@@ -213,13 +219,17 @@ def render_vol() -> None:
         e2 = st.selectbox("만기", list(ST.index), key="ov_oi_exp", format_func=lambda e: f"{e} (D-{int(ST.loc[e, 'days'])})")
         d = chains[e2]
         mp, ks, pain = max_pain(d)
+        if not np.isfinite(mp):
+            st.info("Yahoo가 이 만기의 미결제약정을 0으로 제공하고 있어(장중·신규 만기에 자주 발생) 맥스페인과 미결제약정 분포를 계산할 수 없습니다. "
+                    "다른 만기를 고르거나 다음 거래일에 다시 보세요.")
         c = d[d["is_call"]].groupby("strike")["openInterest"].sum()
         p = d[~d["is_call"]].groupby("strike")["openInterest"].sum()
         rng = (S * 0.7, S * 1.3)
         f = go.Figure()
         f.add_trace(go.Bar(x=c.index, y=c.values, name="콜 미결제약정", marker_color="#5BB56E"))
         f.add_trace(go.Bar(x=p.index, y=-p.values, name="풋 미결제약정(아래)", marker_color="#E5534B"))
-        f.add_vline(x=mp, line_color="#9B6FD6", line_dash="dash", annotation_text=f"맥스페인 {mp:,.2f}")
+        if np.isfinite(mp):
+            f.add_vline(x=mp, line_color="#9B6FD6", line_dash="dash", annotation_text=f"맥스페인 {mp:,.2f}")
         f.add_vline(x=S, line_color="#888", line_dash="dot", annotation_text="현재가", annotation_position="bottom right")
         f.update_layout(barmode="relative", height=330, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
                         xaxis=dict(title="행사가", range=list(rng)), yaxis=dict(title="계약 수"),
@@ -227,7 +237,8 @@ def render_vol() -> None:
         st.plotly_chart(f, use_container_width=True)
         f2 = go.Figure(go.Scatter(x=ks, y=pain / 1e6, mode="lines", line=dict(color="#9B6FD6"),
                                   hovertemplate="만기가 %{x:,.2f}일 때 옵션 매수자 총가치 %{y:,.1f}백만$<extra></extra>"))
-        f2.add_vline(x=mp, line_color="#9B6FD6", line_dash="dash")
+        if np.isfinite(mp):
+            f2.add_vline(x=mp, line_color="#9B6FD6", line_dash="dash")
         f2.update_layout(height=220, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
                          xaxis=dict(title="만기 시 주가", range=list(rng)), yaxis=dict(title="옵션 내재가치 합(백만$)"))
         st.plotly_chart(f2, use_container_width=True)
@@ -243,6 +254,8 @@ def render_vol() -> None:
         else:
             g = gex_by_strike(chains[e3], S)
         g = g[(g.index > S * 0.7) & (g.index < S * 1.3)]
+        if not (g != 0).any():
+            st.info("선택한 만기의 미결제약정이 Yahoo에서 0으로 와서 감마 노출을 계산할 수 없습니다. '불러온 전체 만기 합계'나 다른 만기를 고르세요.")
         tot = float(g.sum())
         flip = None
         cum = g.sort_index().cumsum()
@@ -267,9 +280,13 @@ def render_vol() -> None:
                   "call_vol", "put_vol", "call_oi", "put_oi"]].copy()
         tbl.columns = ["잔존일", "ATM IV", "25Δ 풋 IV", "25Δ 콜 IV", "25Δ 스큐", "스트래들($)", "기대 변동폭(%)", "IV 기준 1σ(%)",
                        "맥스페인", "풋/콜 거래량", "풋/콜 미결제", "콜 거래량", "풋 거래량", "콜 미결제", "풋 미결제"]
-        st.dataframe(tbl.style.format({"ATM IV": "{:.1%}", "25Δ 풋 IV": "{:.1%}", "25Δ 콜 IV": "{:.1%}", "25Δ 스큐": "{:+.1%}",
-                                       "스트래들($)": "{:,.2f}", "기대 변동폭(%)": "{:.1%}", "IV 기준 1σ(%)": "{:.1%}",
-                                       "맥스페인": "{:,.2f}", "풋/콜 거래량": "{:.2f}", "풋/콜 미결제": "{:.2f}",
-                                       "콜 거래량": "{:,.0f}", "풋 거래량": "{:,.0f}", "콜 미결제": "{:,.0f}", "풋 미결제": "{:,.0f}"},
-                                      na_rep="-"), use_container_width=True)
-        st.caption("기대 변동폭 = ATM 스트래들 가격 ÷ 현재가(시장이 예상하는 만기까지의 움직임 크기). IV 기준 1σ = ATM IV × √잔존기간.")
+        fmt = {"잔존일": "{:.0f}", "ATM IV": "{:.1%}", "25Δ 풋 IV": "{:.1%}", "25Δ 콜 IV": "{:.1%}", "25Δ 스큐": "{:+.1%}",
+               "스트래들($)": "{:,.2f}", "기대 변동폭(%)": "{:.1%}", "IV 기준 1σ(%)": "{:.1%}", "맥스페인": "{:,.2f}",
+               "풋/콜 거래량": "{:.2f}", "풋/콜 미결제": "{:.2f}", "콜 거래량": "{:,.0f}", "풋 거래량": "{:,.0f}",
+               "콜 미결제": "{:,.0f}", "풋 미결제": "{:,.0f}"}
+        show = tbl.copy().astype(object)
+        for c_, f_ in fmt.items():
+            show[c_] = [f_.format(v) if v is not None and np.isfinite(v) else "-" for v in tbl[c_].astype(float)]
+        st.dataframe(show, use_container_width=True)
+        st.caption("기대 변동폭 = ATM 스트래들 가격 ÷ 현재가(시장이 예상하는 만기까지의 움직임 크기). IV 기준 1σ = ATM IV × √잔존기간. "
+                   "Yahoo는 일부 만기의 미결제약정을 0으로 줄 때가 있어, 그런 만기는 맥스페인·풋/콜 미결제가 '-'로 표시됩니다.")
