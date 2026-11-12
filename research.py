@@ -247,6 +247,11 @@ DAILY = {  # 이름: 단위
     "주가": "$", "12M 트레일링 PER": "배", "12M 선행 PER (사후 실현 EPS)": "배",
     "현재 12M 선행 PER (컨센서스)": "배", "트레일링 PER 평균 ±1σ 밴드": "배",
 }
+try:  # 일별 밸류에이션 배수 (valuation.py, SEC 분기 공시 기준)
+    from valuation import VAL as _VAL
+    DAILY.update({k: v[0] for k, v in _VAL.items()})
+except Exception:  # noqa: BLE001
+    _VAL = {}
 
 
 def _combo_chart(sec, R: dict, ticker: str, px, n_eps) -> None:
@@ -260,13 +265,28 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps) -> None:
         d_avail += ["12M 트레일링 PER", "12M 선행 PER (사후 실현 EPS)", "트레일링 PER 평균 ±1σ 밴드"]
     if px and n_eps and n_eps > 0:
         d_avail.append("현재 12M 선행 PER (컨센서스)")
+    dv, dv_err = None, None
+    if isinstance(hist, pd.Series) and len(hist) and _VAL:
+        try:
+            from valuation import daily_valuation, load_quarterly
+            dv = daily_valuation(load_quarterly(ticker), hist, R.get("splits"))
+            d_avail += [k for k in _VAL if k in dv and dv[k].notna().sum() > 20]
+        except Exception as e:  # noqa: BLE001
+            dv, dv_err = None, str(e)
 
     c1, c2 = st.columns(2)
     sel = c1.multiselect("① 재무비율 (연간 · SEC 10년)", avail,
                          default=[k for k in ("순이익률", "순이익 성장률") if k in avail], key=f"rs_ratios_{ticker}",
                          format_func=lambda k: f"{k} ({RATIOS[k][1]}, {RATIOS[k][0]})")
-    dsel = c2.multiselect("② 주가 · PER 지표 (일별 · 선행)", d_avail,
-                          default=[k for k in ("주가",) if k in d_avail], key=f"rs_daily_{ticker}")
+    dsel = c2.multiselect("② 주가 · 밸류에이션 배수 (일별)", d_avail,
+                          default=[k for k in ("주가",) if k in d_avail], key=f"rs_daily_{ticker}",
+                          format_func=lambda k: f"{k} ({DAILY[k]})" if k in _VAL else k)
+    if dv is not None:
+        st.caption("② 일별 배수: SEC 분기 공시(10-Q·10-K)의 최근 12개월 실적·분기 말 재무상태표를 '공시 제출일'부터 반영하고, "
+                   "매일 종가 × 주식 수(액면분할 보정)로 시가총액을 계산합니다. 적자·음수 분모인 날은 비워 둡니다.")
+    elif dv_err:
+        st.caption(f"② 일별 밸류에이션 배수는 SEC 분기 공시가 있는 미국 기업만 지원합니다 ({dv_err}).")
+    mean_lines = st.checkbox("② 일별 배수에 기간 평균선 표시", value=False, key=f"rs_daily_mean_{ticker}") if dv is not None else False
     if avail:
         groups = {}
         for k in avail:
@@ -283,7 +303,7 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps) -> None:
     for k in sel:
         units.append("%" if RATIOS[k][0] == "%" else "x")
     for k in dsel:
-        units.append("$" if DAILY[k] == "$" else "x")
+        units.append({"$": "$", "%": "%"}.get(DAILY[k], "x"))
     order = [u for u in ("%", "x", "$") if u in units]
     axis_of = {u: ("y" if i == 0 else f"y{i + 1}") for i, u in enumerate(order)}
     title_of = {"%": "%", "x": "배·회", "$": "주가($)"}
@@ -314,10 +334,22 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps) -> None:
     if per is not None:
         trail, fwd_r, _e = per
         trail, fwd_r = _clip(trail), _clip(fwd_r)
+    x_vals = []
     for k in dsel:
-        ax = axis_of["$" if DAILY[k] == "$" else "x"]
+        ax = axis_of[{"$": "$", "%": "%"}.get(DAILY[k], "x")]
         color = palette[ci % len(palette)]
-        if k == "주가":
+        if k in _VAL and dv is not None:
+            sr = _clip(dv[k]).dropna()
+            unit = DAILY[k]
+            fig.add_trace(go.Scatter(x=sr.index, y=sr.values, name=f"{k} (일별)", mode="lines", yaxis=ax, line=dict(color=color, width=1.3),
+                                     hovertemplate="%{x|%Y-%m-%d} " + k + (" %{y:.2f}%" if unit == "%" else " %{y:.2f}배") + "<extra></extra>"))
+            if unit != "%":
+                x_vals.append(sr.values)
+            if mean_lines and len(sr):
+                m = float(sr.mean())
+                fig.add_trace(go.Scatter(x=[sr.index[0], sr.index[-1]], y=[m, m], name=f"{k} 평균 {m:.2f}", mode="lines", yaxis=ax,
+                                         line=dict(color=color, width=1, dash="dash"), hoverinfo="skip"))
+        elif k == "주가":
             h = _clip(hist)
             fig.add_trace(go.Scatter(x=h.index, y=h.values, name="주가", mode="lines", yaxis=ax, line=dict(color=color, width=1.4),
                                      hovertemplate="%{x|%Y-%m-%d} 주가 %{y:,.2f}<extra></extra>"))
@@ -355,16 +387,38 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps) -> None:
             spec.update(overlaying="y", side="right", anchor="x")
         elif i == 2:
             spec.update(overlaying="y", side="right", anchor="free", position=1.0)
-        if u == "x" and dsel and any(k in dsel for k in ("12M 트레일링 PER", "12M 선행 PER (사후 실현 EPS)")) and trail is not None:
-            vals = np.concatenate([trail.dropna().values, fwd_r.dropna().values] +
-                                  [rt.loc[k].dropna().values for k in sel if RATIOS[k][0] != "%"])
+        if u == "x" and dsel and (x_vals or (any(k in dsel for k in ("12M 트레일링 PER", "12M 선행 PER (사후 실현 EPS)")) and trail is not None)):
+            parts = list(x_vals)
+            if trail is not None and any(k in dsel for k in ("12M 트레일링 PER", "12M 선행 PER (사후 실현 EPS)")):
+                parts += [trail.dropna().values, fwd_r.dropna().values]
+            parts += [rt.loc[k].dropna().values for k in sel if RATIOS[k][0] != "%"]
+            vals = np.concatenate(parts) if parts else np.array([])
             if len(vals):
-                spec["range"] = [0, float(np.nanpercentile(vals, 98)) * 1.2]
+                spec["range"] = [0, float(np.nanpercentile(vals, 98)) * 1.2]  # 일시적인 극단값(적자 직후 등) 때문에 축이 늘어나지 않게
         lay[key] = spec
     fig.update_layout(**lay)
     st.plotly_chart(fig, use_container_width=True)
     axes_txt = ", ".join(f"{title_of[u]} → {'왼쪽' if i == 0 else ('오른쪽' if i == 1 else '오른쪽 바깥')} 축" for i, u in enumerate(order))
-    st.caption(f"축: {axes_txt}. 재무비율은 회계연도 말 시점의 점(SEC 10-K), 주가·PER은 일별 선입니다.")
+    st.caption(f"축: {axes_txt}. 재무비율은 회계연도 말 시점의 점(SEC 10-K), 주가·PER·밸류에이션 배수는 일별 선입니다.")
+
+    if dv is not None:
+        from valuation import summary_table
+        keys = [k for k in _VAL if k in dv and dv[k].notna().sum() > 20]
+        tb = summary_table(dv, keys)
+        if len(tb):
+            with st.expander("일별 밸류에이션 요약 — 지금이 과거보다 비싼가?", expanded=bool(set(dsel) & set(_VAL))):
+                show = tb.copy().astype(object)
+                for i, r in tb.iterrows():
+                    unit = DAILY[r["지표"]]
+                    for c in ("현재", "1년 평균", "3년 평균", "5년 평균", "10년 평균", "최저", "최고"):
+                        v = r[c]
+                        show.at[i, c] = "-" if pd.isna(v) else (f"{v:.2f}%" if unit == "%" else f"{v:.2f}배")
+                    show.at[i, "현재 백분위"] = f"{r['현재 백분위']:.0f}%"
+                st.dataframe(show, use_container_width=True, hide_index=True)
+                mc = dv["시가총액"].dropna()
+                st.caption((f"현재 시가총액(공시 주식 수 기준) {mc.iloc[-1] / 1e9:,.1f}십억 달러. " if len(mc) else "")
+                           + "현재 백분위 = 조회 기간 중 지금보다 낮았던 날의 비율. 배수는 높을수록(수익률은 낮을수록) 과거 대비 비싸다는 뜻입니다. "
+                           + "평균은 그 기간 전체 데이터가 있을 때만 표시합니다.")
 
     if sel:
         tbl = rt.loc[sel].copy()
