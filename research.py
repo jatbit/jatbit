@@ -291,7 +291,7 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps) -> None:
         return k if k == "주가" else f"{k} · 일별"
 
     chosen = st.multiselect("그래프에 그릴 항목 (주가·밸류에이션은 일별, 나머지 재무비율은 연간)", options,
-                            default=[k for k in ("순이익률", "순이익 성장률", "주가") if k in options], key=f"rs_combo_{ticker}",
+                            default=[k for k in ("주가",) if k in options], key=f"rs_combo_{ticker}",
                             format_func=_label)
     sel = [k for k in chosen if k in a_avail]
     dsel = [k for k in chosen if k in d_avail]
