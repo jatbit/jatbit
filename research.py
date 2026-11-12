@@ -274,28 +274,45 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps) -> None:
         except Exception as e:  # noqa: BLE001
             dv, dv_err = None, str(e)
 
-    c1, c2 = st.columns(2)
-    sel = c1.multiselect("① 재무비율 (연간 · SEC 10년)", avail,
-                         default=[k for k in ("순이익률", "순이익 성장률") if k in avail], key=f"rs_ratios_{ticker}",
-                         format_func=lambda k: f"{k} ({RATIOS[k][1]}, {RATIOS[k][0]})")
-    dsel = c2.multiselect("② 주가 · 밸류에이션 배수 (일별)", d_avail,
-                          default=[k for k in ("주가",) if k in d_avail], key=f"rs_daily_{ticker}",
-                          format_func=lambda k: f"{k} ({DAILY[k]})" if k in _VAL else k)
+    # 일별로 계산되는 지표가 있으면 같은 이름의 연간 밸류에이션 비율(PER·PBR·PSR)은 빼고, 시가총액 기준 PER은
+    # EPS 기준 12M 트레일링 PER과 겹치므로 EPS 기준이 있을 때는 뺀다.
+    if per is not None and "PER (시가총액 ÷ 순이익 TTM)" in d_avail:
+        d_avail.remove("PER (시가총액 ÷ 순이익 TTM)")
+    daily_names = set(d_avail) | ({"PER"} if per is not None else set())
+    a_avail = [k for k in avail if k not in daily_names]
+    val_daily = [k for k in d_avail if k != "주가"]
+    options = (["주가"] if "주가" in d_avail else []) + val_daily + a_avail
+
+    def _label(k):
+        if k in a_avail:
+            return f"{k} · 연간 ({RATIOS[k][1]}, {RATIOS[k][0]})"
+        if k in _VAL:
+            return f"{k} · 일별 ({DAILY[k]})"
+        return k if k == "주가" else f"{k} · 일별"
+
+    chosen = st.multiselect("그래프에 그릴 항목 (주가·밸류에이션은 일별, 나머지 재무비율은 연간)", options,
+                            default=[k for k in ("순이익률", "순이익 성장률", "주가") if k in options], key=f"rs_combo_{ticker}",
+                            format_func=_label)
+    sel = [k for k in chosen if k in a_avail]
+    dsel = [k for k in chosen if k in d_avail]
+    groups = {}
+    for k in a_avail:
+        groups.setdefault(RATIOS[k][1], []).append(k)
+    cap = ["일별: 주가, " + ", ".join(val_daily)] if val_daily else []
+    cap += [f"연간 {g}: {', '.join(v)}" for g, v in groups.items()]
+    if cap:
+        st.caption(" · ".join(cap))
     if dv is not None:
-        st.caption("② 일별 배수: SEC 분기 공시(10-Q·10-K)의 최근 12개월 실적·분기 말 재무상태표를 '공시 제출일'부터 반영하고, "
-                   "매일 종가 × 주식 수(액면분할 보정)로 시가총액을 계산합니다. 적자·음수 분모인 날은 비워 둡니다.")
+        st.caption("일별 밸류에이션: SEC 분기 공시(10-Q·10-K)의 최근 12개월 실적·분기 말 재무상태표를 '공시 제출일'부터 반영하고, "
+                   "매일 종가 × 주식 수(액면분할 보정)로 시가총액을 계산합니다. 적자·음수 분모인 날은 비워 둡니다. "
+                   "연간 재무비율은 SEC 10-K 회계연도 말 값입니다.")
     elif dv_err:
-        st.caption(f"② 일별 밸류에이션 배수는 SEC 분기 공시가 있는 미국 기업만 지원합니다 ({dv_err}).")
-    mean_lines = st.checkbox("② 일별 배수에 기간 평균선 표시", value=False, key=f"rs_daily_mean_{ticker}") if dv is not None else False
-    if avail:
-        groups = {}
-        for k in avail:
-            groups.setdefault(RATIOS[k][1], []).append(k)
-        st.caption("① " + " · ".join(f"{g}: {', '.join(v)}" for g, v in groups.items()))
+        st.caption(f"일별 밸류에이션 배수는 SEC 분기 공시가 있는 미국 기업만 지원합니다 ({dv_err}). PBR·PSR은 연간 값으로 보여줍니다.")
     elif sec is None:
-        st.caption("① 재무비율은 SEC 10개년 재무제표가 있는 미국 기업만 지원합니다.")
+        st.caption("연간 재무비율은 SEC 10개년 재무제표가 있는 미국 기업만 지원합니다.")
+    mean_lines = st.checkbox("일별 지표에 기간 평균선 표시", value=False, key=f"rs_daily_mean_{ticker}") if dv is not None else False
     if not sel and not dsel:
-        st.info("①이나 ②에서 그릴 항목을 하나 이상 고르세요.")
+        st.info("그릴 항목을 하나 이상 고르세요.")
         return
 
     # 단위별 축: % → 왼쪽(y), 배·회 → 오른쪽(y2), 주가 → 오른쪽 바깥(y3)
@@ -786,7 +803,7 @@ def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool) -> None:
         st.caption("재무제표를 불러오지 못했습니다 (ETF이거나 Yahoo 응답 지연).")
 
     # ---- 5-1. 재무비율·주가·PER 그래프 (직접 선택)
-    st.markdown("##### 재무비율 · 주가 · PER 그래프 (직접 선택해서 겹쳐 보기)")
+    st.markdown("##### 재무비율 · 주가 · 밸류에이션 그래프 (직접 선택해서 겹쳐 보기)")
     _combo_chart(sec, R, ticker, px, n_eps)
 
 
