@@ -153,7 +153,10 @@ def _asof(df: pd.DataFrame, days: pd.DatetimeIndex) -> pd.Series:
         return pd.Series(np.nan, index=days)
     s = df.sort_values("filed").reset_index().rename(columns={"index": "end"})
     s = s.drop_duplicates("filed", keep="last")
-    left = pd.DataFrame({"d": days})
+    # 날짜 정밀도(초·마이크로초·나노초)가 섞이면 merge_asof가 실패하므로 모두 나노초로 맞춤
+    s["filed"] = pd.to_datetime(s["filed"]).astype("datetime64[ns]")
+    s["end"] = pd.to_datetime(s["end"]).astype("datetime64[ns]")
+    left = pd.DataFrame({"d": pd.DatetimeIndex(days).astype("datetime64[ns]")})
     m = pd.merge_asof(left, s[["filed", "val", "end"]].rename(columns={"filed": "d"}), on="d", direction="backward")
     age = (m["d"] - m["end"]).dt.days
     v = m["val"].where(age <= STALE_DAYS)
