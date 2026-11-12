@@ -20,6 +20,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
+import autoreload  # GitHub에 올린 새 코드를 새로고침만으로 반영 (autoreload.py)
+
+autoreload.refresh()
 from rates import add_rates, rate_controls
 from options import render_options  # 옵션 탭 (options.py, capm_opt.py, bsm.py)
 from research import render_research  # 기업 리서치 탭 (dcf.py, insider.py, credit.py)
