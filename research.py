@@ -564,6 +564,8 @@ def render_research() -> None:
             with st.expander("사업 설명 (영문 원문)"):
                 st.write(summary.replace("$", "\\$"))
     st.button("이 종목을 '옵션 조회' 탭에 설정", key="rs_to_opt", on_click=_send_to_options, args=(ticker,))
+    from news import render_latest_news
+    render_latest_news(ticker, info.get("shortName") or name, R.get("news") or [], ko, translate_ko)
 
     tab_main, tab_dcf, tab_cr, tab_ins = st.tabs(["개요·재무", "DCF 가치평가", "신용위험·회사채", "내부자 거래·지분 구조"])
     _sec = None
