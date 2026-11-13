@@ -256,7 +256,7 @@ def compute_ratios(sec: pd.DataFrame, hist: pd.Series, splits) -> pd.DataFrame:
 
 DAILY = {  # 이름: 단위
     "주가": "$", "12M 트레일링 PER": "배", "12M 선행 PER (사후 실현 EPS)": "배",
-    "현재 12M 선행 PER (컨센서스)": "배", "트레일링 PER 평균 ±1σ 밴드": "배", "현재 PER": "배",
+    "현재 12M 선행 PER (컨센서스)": "배", "트레일링 PER 평균 ±1σ 밴드": "배", "PER (직전 사업연도 EPS)": "배",
 }
 try:  # 일별 밸류에이션 배수 (valuation.py, SEC 분기 공시 기준)
     from valuation import VAL as _VAL
@@ -266,14 +266,14 @@ except Exception:  # noqa: BLE001
 
 
 _PER_LABEL = {  # 목록에 보이는 이름 (안쪽 키는 그대로)
-    "12M 트레일링 PER": "PER · 일별 (그날 주가 ÷ 그때까지 발표된 1년치 EPS)",
+    "PER (직전 사업연도 EPS)": "PER · 일별 (그날 주가 ÷ 그때 이미 발표된 직전 사업연도 EPS)",
+    "12M 트레일링 PER": "12M PER · 일별 (그날 주가 ÷ 그때까지 발표된 최근 4개 분기 EPS 합)",
     "PER (시가총액 ÷ 순이익 TTM)": "PER · 일별 (그날 시가총액 ÷ 그때까지 발표된 1년치 순이익)",
     "12M 선행 PER (사후 실현 EPS)": "선행 PER · 일별 (그날 주가 ÷ 그 뒤 1년 동안 실제로 나온 EPS)",
     "트레일링 PER 평균 ±1σ 밴드": "PER 평균 ±1σ 밴드",
     "현재 12M 선행 PER (컨센서스)": "오늘 선행 PER (애널리스트 예상 EPS 기준, 점 하나)",
-    "현재 PER": "현재 PER (오늘 주가 ÷ 최근 1년 EPS, 그래프 전체에 가로선)",
 }
-_PER_TRACE = {"12M 트레일링 PER": "PER", "PER (시가총액 ÷ 순이익 TTM)": "PER", "12M 선행 PER (사후 실현 EPS)": "선행 PER(사후)"}
+_PER_TRACE = {"12M 트레일링 PER": "12M PER", "PER (시가총액 ÷ 순이익 TTM)": "PER", "12M 선행 PER (사후 실현 EPS)": "선행 PER(사후)"}
 
 
 def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") -> None:
@@ -285,14 +285,9 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
     d_avail = ["주가"] if isinstance(hist, pd.Series) and len(hist) else []
     if per is not None:
         d_avail += ["12M 트레일링 PER", "12M 선행 PER (사후 실현 EPS)", "트레일링 PER 평균 ±1σ 밴드"]
-    pe_now = None
-    if px:
-        try:
-            pe_now = _pe_pb(R.get("info") or {}, px, sec, R)[0]
-        except Exception:  # noqa: BLE001
-            pe_now = None
-    if pe_now and pe_now > 0:
-        d_avail.append("현재 PER")
+    ann = annual_per_series(hist, sec, R.get("splits"))
+    if ann is not None:
+        d_avail.insert(1 if d_avail[:1] == ["주가"] else 0, "PER (직전 사업연도 EPS)")
     if px and n_eps and n_eps > 0:
         d_avail.append("현재 12M 선행 PER (컨센서스)")
     dv, dv_err = None, None
@@ -313,7 +308,7 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
 
     # 일별로 계산되는 지표가 있으면 같은 이름의 연간 밸류에이션 비율(PER·PBR·PSR)은 빼고, 시가총액 기준 PER은
     # EPS 기준 12M 트레일링 PER과 겹치므로 EPS 기준이 있을 때는 뺀다.
-    if per is not None and "PER (시가총액 ÷ 순이익 TTM)" in d_avail:
+    if (per is not None or ann is not None) and "PER (시가총액 ÷ 순이익 TTM)" in d_avail:
         d_avail.remove("PER (시가총액 ÷ 순이익 TTM)")
     daily_names = set(d_avail) | ({"PER"} if per is not None else set())
     a_avail = [k for k in avail if k not in daily_names]
@@ -331,8 +326,7 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
 
     chosen = st.multiselect("그래프에 그릴 항목 (주가·밸류에이션은 일별, 나머지 재무비율은 연간)", options,
                             default=(["주가"] if "주가" in options else [])
-                            + [k for k in ("12M 트레일링 PER", "PER (시가총액 ÷ 순이익 TTM)") if k in options][:1]
-                            + (["현재 PER"] if "현재 PER" in options else []),
+                            + [k for k in ("PER (직전 사업연도 EPS)", "12M 트레일링 PER", "PER (시가총액 ÷ 순이익 TTM)") if k in options][:1],
                             key=f"rs_combo_{ticker}",
                             format_func=_label)
     sel = [k for k in chosen if k in a_avail]
@@ -403,8 +397,8 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
             fig.add_trace(go.Scatter(x=h.index, y=h.values, name="주가", mode="lines", yaxis=ax, line=dict(color=color, width=1.4),
                                      hovertemplate="%{x|%Y-%m-%d} 주가 %{y:,.2f}<extra></extra>"))
         elif k == "12M 트레일링 PER":
-            fig.add_trace(go.Scatter(x=trail.index, y=trail.values, name="PER", mode="lines", yaxis=ax, line=dict(color=color, width=1.4),
-                                     hovertemplate="%{x|%Y-%m-%d} PER %{y:.1f}배<extra></extra>"))
+            fig.add_trace(go.Scatter(x=trail.index, y=trail.values, name="12M PER", mode="lines", yaxis=ax, line=dict(color=color, width=1.4),
+                                     hovertemplate="%{x|%Y-%m-%d} 12M PER %{y:.1f}배<extra></extra>"))
         elif k == "12M 선행 PER (사후 실현 EPS)":
             fig.add_trace(go.Scatter(x=fwd_r.index, y=fwd_r.values, name="선행 PER(사후)", mode="lines", yaxis=ax,
                                      line=dict(color=color, width=1.4, dash="dash"),
@@ -418,18 +412,11 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
                                      (m - sd, f"평균−1σ {m - sd:.1f}배", "dot")):
                     fig.add_trace(go.Scatter(x=[x0, x1], y=[yv, yv], name=nm, mode="lines", yaxis=ax,
                                              line=dict(color="#888", width=1, dash=dash), hoverinfo="skip"))
-        elif k == "현재 PER":
-            h0 = _clip(hist)
-            now = h0.index[-1]
-            x0 = trail.dropna().index[0] if trail is not None and trail.notna().any() and "12M 트레일링 PER" in dsel else h0.index[0]
-            fig.add_trace(go.Scatter(x=[x0, now], y=[pe_now, pe_now], name=f"현재 PER {pe_now:.1f}배", mode="lines", yaxis=ax,
-                                     line=dict(color="#E5534B", width=1.5, dash="dash"),
-                                     hovertemplate=f"현재 PER {pe_now:.1f}배<extra></extra>"))
-            fig.add_trace(go.Scatter(x=[now], y=[pe_now], mode="markers+text", yaxis=ax, showlegend=False,
-                                     marker=dict(size=13, symbol="diamond", color="#E5534B"),
-                                     text=[f"현재 {pe_now:.1f}배"], textposition="top left", textfont=dict(color="#E5534B", size=12),
-                                     hovertemplate=f"현재 PER {pe_now:.1f}배<extra></extra>"))
-            x_vals.append(np.array([pe_now]))
+        elif k == "PER (직전 사업연도 EPS)":
+            sr = _clip(ann).dropna()
+            fig.add_trace(go.Scatter(x=sr.index, y=sr.values, name="PER", mode="lines", yaxis=ax, line=dict(color=color, width=1.4),
+                                     hovertemplate="%{x|%Y-%m-%d} PER %{y:.1f}배<extra></extra>"))
+            x_vals.append(sr.values)
         elif k == "현재 12M 선행 PER (컨센서스)":
             now = pd.Timestamp(hist.index[-1]).tz_localize(None) if getattr(hist.index, "tz", None) is not None else pd.Timestamp(hist.index[-1])
             fig.add_trace(go.Scatter(x=[now], y=[px / n_eps], name=f"오늘 선행 PER {px / n_eps:.1f}배", mode="markers", yaxis=ax,
@@ -585,6 +572,52 @@ def _div_yield(info: dict):
 # ----------------------------------------------------------------------
 # 화면
 # ----------------------------------------------------------------------
+def _annual_eps_points(sec, splits):
+    """연간 재무제표의 희석 EPS를 '공시된 날' 기준으로 늘어놓는다 (액면분할 반영). (공시일 → EPS)."""
+    if not isinstance(sec, pd.DataFrame) or "희석 EPS" not in sec.index:
+        return None
+    eps = pd.to_numeric(sec.loc["희석 EPS"], errors="coerce")
+    if "_filed_희석 EPS" in sec.index:
+        filed = pd.to_numeric(sec.loc["_filed_희석 EPS"], errors="coerce")
+    else:
+        filed = pd.Series([float((pd.Timestamp(c) + pd.Timedelta(days=90)).toordinal()) for c in sec.columns], index=sec.columns)
+    filed = filed.fillna(pd.Series([float((pd.Timestamp(c) + pd.Timedelta(days=90)).toordinal()) for c in sec.columns], index=sec.columns))
+    fac = _split_factor(filed, splits).reindex(sec.columns).fillna(1.0)
+    eps = eps / fac
+    pts = pd.Series(eps.values, index=[pd.Timestamp.fromordinal(int(f)) for f in filed.values]).dropna()
+    pts = pts[~pts.index.duplicated(keep="last")].sort_index()
+    return pts if len(pts) else None
+
+
+def annual_per_series(hist, sec, splits):
+    """일별 PER = 그날 주가 ÷ 그날까지 공시된 가장 최근 사업연도 EPS (적자면 비움)."""
+    pts = _annual_eps_points(sec, splits)
+    if pts is None or not isinstance(hist, pd.Series) or not len(hist):
+        return None
+    h = hist.copy()
+    h.index = pd.to_datetime(h.index)
+    if h.index.tz is not None:
+        h.index = h.index.tz_localize(None)
+    h = h[h.index >= pts.index[0]]
+    if not len(h):
+        return None
+    pos = np.searchsorted(pts.index.values, h.index.values, side="right") - 1
+    e = np.where(pos >= 0, pts.values[np.clip(pos, 0, None)], np.nan)
+    out = pd.Series(np.where(e > 0, h.values / e, np.nan), index=h.index)
+    return out if out.notna().sum() > 5 else None
+
+
+def annual_pe_now(px, sec, splits):
+    """오늘 PER (오늘 주가 ÷ 이미 공시된 직전 사업연도 EPS)."""
+    pts = _annual_eps_points(sec, splits)
+    if pts is None or not px:
+        return None
+    pts = pts[pts.index <= pd.Timestamp.today()]
+    if not len(pts) or not pts.iloc[-1] > 0:
+        return None
+    return px / float(pts.iloc[-1])
+
+
 def per_series(hist: pd.Series, edates: pd.DataFrame):
     """분기 실적(발표일·발표 EPS)으로 일별 12M PER 두 가지를 만든다.
     트레일링: 주가 ÷ 그날까지 발표된 최근 4개 분기 EPS 합.
@@ -741,8 +774,8 @@ def render_research() -> None:
     ui.quote_header(name, code or ticker, " · ".join(meta), money.price(px) if px else "-",
                     money.price(abs(chg)) if chg is not None else None, (chg / prev * 100) if chg is not None else None,
                     "Yahoo 지연 시세")
-    if not _num(info.get("trailingPE")) or not _num(info.get("priceToBook")):
-        try:  # Yahoo에 PER·PBR이 없으면 재무제표로 직접 계산 (첫 탭에서도 쓰므로 캐시됨)
+    if True:
+        try:  # PER(직전 사업연도 EPS 기준)·PBR 계산용 연간 재무제표 (첫 탭에서도 쓰므로 캐시됨)
             R["_F"] = _financials(ticker, R, domestic, code)[0]
         except Exception:  # noqa: BLE001
             pass
@@ -872,9 +905,12 @@ def _key_stats(R: dict, info: dict, cur: str, px) -> None:
     n_op = int(info["numberOfAnalystOpinions"]) if _num(info.get("numberOfAnalystOpinions")) else None
     rng = (f"{lo52:,.0f} ~ {hi52:,.0f}" if cur == "₩" else f"{lo52:,.2f} ~ {hi52:,.2f}") if lo52 and hi52 else "-"
     pe, pb = _pe_pb(info, px, R.get("_F"), R)
+    pe_a = annual_pe_now(px, R.get("_F"), R.get("splits"))
+    sub = " · ".join(x for x in ([f"12M {ratio(pe, 1)}"] if pe_a and pe else []) +
+                     ([f"선행 {ratio(info.get('forwardPE'), 1)}"] if _num(info.get("forwardPE")) else []))
     ui.cards([
         ("시가총액", big(info.get("marketCap"), cur)),
-        ("PER", ratio(pe, 1), f"선행 {ratio(info.get('forwardPE'), 1)}" if _num(info.get("forwardPE")) else ""),
+        ("PER", ratio(pe_a or pe, 1), sub),
         ("PBR", ratio(pb)),
         ("배당수익률", pct(_div_yield(info), 2)),
         ("ROE", pct(info.get("returnOnEquity")), f"영업이익률 {pct(info.get('operatingMargins'))}" if _num(info.get("operatingMargins")) is not None else ""),
@@ -905,7 +941,8 @@ def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool, F=None, s
            ("기업가치(EV)", big(info.get("enterpriseValue"), cur)),
            ("52주 범위", (f"{lo52:,.0f} ~ {hi52:,.0f}" if cur == "₩" else f"{lo52:,.2f} ~ {hi52:,.2f}") if lo52 and hi52 else "-",
             f"현재가는 52주 범위의 {pos52 * 100:.0f}% 위치" if pos52 is not None else ""),
-           ("PER", ratio(pe_now, 1)),
+           ("PER", ratio(annual_pe_now(px, F, R.get("splits")) or pe_now, 1), "직전 사업연도 EPS 기준"),
+           ("12M PER", ratio(pe_now, 1), "최근 4개 분기 EPS 합 기준"),
            ("선행 PER (Yahoo)", ratio(info.get("forwardPE"), 1), f"{which} 추정치 기준" if n_info and fwd_eps else ""),
            ("12M 선행 PER (NTM)", ratio(px / n_eps, 1) if px and n_eps and n_eps > 0 else "-"),
            ("PBR", ratio(pb_now)),
