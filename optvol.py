@@ -40,7 +40,21 @@ def _interp(x, xs, ys):
     return float(np.interp(x, xs, ys))
 
 
-def max_pain(d: pd.DataFrame):
+def oi_quality(d: pd.DataFrame, S: float, band: float = 0.2, need: float = 0.5) -> bool:
+    """현재가 ±20% 행사가 중 콜·풋 모두 절반 이상에 미결제약정이 있어야 믿을 만한 자료로 본다.
+    (Yahoo는 장 마감 뒤·신규 만기에 미결제약정을 일부 행사가만 주거나 0으로 줘서, 그대로 쓰면 맥스페인·풋/콜 비율이 크게 틀어짐)"""
+    if not S or not np.isfinite(S) or "openInterest" not in d.columns:
+        return False
+    x = d[(d["strike"] >= S * (1 - band)) & (d["strike"] <= S * (1 + band))]
+    c = x[x["is_call"]]["openInterest"].fillna(0)
+    p = x[~x["is_call"]]["openInterest"].fillna(0)
+    if len(c) < 3 or len(p) < 3:
+        return False
+    return bool((c > 0).mean() >= need and (p > 0).mean() >= need)
+
+
+def max_pain(d: pd.DataFrame, S: float | None = None):
+    """S를 주면 미결제약정 자료가 부실하거나 결과가 현재가와 너무 동떨어질 때 NaN을 돌려준다."""
     c = d[d["is_call"]][["strike", "openInterest"]].fillna(0)
     p = d[~d["is_call"]][["strike", "openInterest"]].fillna(0)
     ks = np.sort(d["strike"].unique())
@@ -52,7 +66,10 @@ def max_pain(d: pd.DataFrame):
     pain = np.array(pain)
     if not len(ks) or (c["openInterest"].sum() + p["openInterest"].sum()) <= 0:  # Yahoo가 미결제약정을 0으로 줄 때가 있음
         return float("nan"), ks, pain
-    return float(ks[int(np.argmin(pain))]), ks, pain
+    mp = float(ks[int(np.argmin(pain))])
+    if S is not None and (not oi_quality(d, S) or not (0.6 * S <= mp <= 1.4 * S)):
+        return float("nan"), ks, pain
+    return mp, ks, pain
 
 
 def expiry_stats(d: pd.DataFrame, S: float, T: float) -> dict:
@@ -69,14 +86,17 @@ def expiry_stats(d: pd.DataFrame, S: float, T: float) -> dict:
     cs = calls[calls["strike"] == k_atm]["mkt"]
     ps = puts[puts["strike"] == k_atm]["mkt"]
     straddle = float(cs.iloc[0] + ps.iloc[0]) if len(cs) and len(ps) else float("nan")
-    mp, _, _ = max_pain(d)
+    ok = oi_quality(d, S)
+    mp = max_pain(d, S)[0] if ok else float("nan")
     cv, pv = calls["volume"].fillna(0).sum(), puts["volume"].fillna(0).sum()
     co, po = calls["openInterest"].fillna(0).sum(), puts["openInterest"].fillna(0).sum()
+    if not ok:
+        co = po = 0.0
     return {"T": T, "atm_iv": atm, "p25": p25, "c25": c25, "rr25": p25 - c25 if np.isfinite(p25) and np.isfinite(c25) else float("nan"),
             "straddle": straddle, "move_pct": straddle / S if S else float("nan"),
             "move_iv": atm * math.sqrt(T) if np.isfinite(atm) else float("nan"),
             "max_pain": mp, "pc_vol": pv / cv if cv else float("nan"), "pc_oi": po / co if co and po else float("nan"),
-            "call_vol": cv, "put_vol": pv, "call_oi": co, "put_oi": po}
+            "call_vol": cv, "put_vol": pv, "call_oi": co, "put_oi": po, "oi_ok": ok}
 
 
 def gex_by_strike(d: pd.DataFrame, S: float) -> pd.Series:
@@ -170,8 +190,10 @@ def render_vol() -> None:
     hv_pct = float((hv_y < hv_now).mean()) if len(hv_y) else float("nan")
     near = ST[ST["days"] >= 7].iloc[0] if (ST["days"] >= 7).any() else ST.iloc[0]
     tot_cv, tot_pv = ST["call_vol"].sum(), ST["put_vol"].sum()
-    oi_ok = (ST["call_oi"] > 0) & (ST["put_oi"] > 0)  # 콜·풋 미결제약정이 모두 있는 만기만 합산
+    oi_ok = ST["oi_ok"].astype(bool)  # 미결제약정 자료가 온전한 만기만 합산
     tot_co, tot_po = ST.loc[oi_ok, "call_oi"].sum(), ST.loc[oi_ok, "put_oi"].sum()
+    mp_rows = ST[oi_ok & np.isfinite(ST["max_pain"].astype(float))]
+    mp_row = mp_rows[mp_rows["days"] >= 1].iloc[0] if (mp_rows["days"] >= 1).any() else None
     st.markdown(f"##### {ticker} 요약 · 기초자산 {S:,.2f}")
     mgrid([("ATM IV (가까운 만기)", f"{near['atm_iv'] * 100:.1f}%" if np.isfinite(near["atm_iv"]) else "-", f"{near.name} 만기 기준"),
            ("HV 20일", f"{hv_now * 100:.1f}%"),
@@ -183,10 +205,12 @@ def render_vol() -> None:
            ("기대 변동폭", f"±{near['straddle']:,.2f} (±{near['move_pct'] * 100:.1f}%)" if np.isfinite(near["straddle"]) else "-",
             f"{near.name} 만기까지 ATM 스트래들 가격 기준"),
            ("풋/콜 거래량 비율", f"{tot_pv / tot_cv:.2f}" if tot_cv else "-", "불러온 전체 만기 합계"),
-           ("풋/콜 미결제 비율", f"{tot_po / tot_co:.2f}" if tot_co else "-", f"미결제약정이 있는 {int(oi_ok.sum())}개 만기 합계"),
-           ("맥스페인 (가까운 만기)", f"{near['max_pain']:,.2f}" if np.isfinite(near["max_pain"]) else "-",
-            "만기 때 옵션 매수자 전체 손실이 가장 커지는(매도자 이익이 최대인) 가격" if np.isfinite(near["max_pain"])
-            else "Yahoo가 이 만기의 미결제약정을 0으로 제공해 계산할 수 없음"),
+           ("풋/콜 미결제 비율", f"{tot_po / tot_co:.2f}" if tot_co and tot_po else "-",
+            f"미결제약정 자료가 온전한 {int(oi_ok.sum())}개 만기 합계" if tot_co and tot_po
+            else "Yahoo가 지금 미결제약정을 일부만 주고 있어 계산하지 않음 (보통 미국 장중에 정상)"),
+           ("맥스페인 (가까운 만기)", f"{mp_row['max_pain']:,.2f}" if mp_row is not None else "-",
+            f"{mp_row.name} 만기 기준 · 만기 때 옵션 매수자 전체 손실이 가장 커지는 가격" if mp_row is not None
+            else "Yahoo가 지금 미결제약정을 일부만 주고 있어 계산하지 않음 (보통 미국 장중에 정상)"),
            ("HV 백분위 (1년)", f"{hv_pct * 100:.0f}%" if np.isfinite(hv_pct) else "-")], cols=5)
 
     sub = ui.lazy_tabs(["기간구조·스큐", "스마일", "변동성 곡면", "미결제약정·맥스페인", "감마 노출(GEX)", "만기별 표", "변동성 모형 보정"], key="ov_tabs")
@@ -244,9 +268,9 @@ def render_vol() -> None:
         with sub[3][0]:
             e2 = st.selectbox("만기", list(ST.index), key="ov_oi_exp", format_func=lambda e: f"{e} (D-{int(ST.loc[e, 'days'])})")
             d = chains[e2]
-            mp, ks, pain = max_pain(d)
+            mp, ks, pain = max_pain(d, S)
             if not np.isfinite(mp):
-                st.info("Yahoo가 이 만기의 미결제약정을 0으로 제공하고 있어(장중·신규 만기에 자주 발생) 맥스페인과 미결제약정 분포를 계산할 수 없습니다. "
+                st.info("Yahoo가 이 만기의 미결제약정을 일부 행사가만 주거나 0으로 주고 있어(장 마감 뒤·신규 만기에 자주 발생) 맥스페인과 미결제약정 분포를 믿을 수 없습니다. "
                         "다른 만기를 고르거나 다음 거래일에 다시 보세요.")
             c = d[d["is_call"]].groupby("strike")["openInterest"].sum()
             p = d[~d["is_call"]].groupby("strike")["openInterest"].sum()
@@ -276,31 +300,33 @@ def render_vol() -> None:
     if sub[4][1]:
         with sub[4][0]:
             e3 = st.selectbox("만기 범위", ["불러온 전체 만기 합계"] + list(ST.index), key="ov_gex_exp")
+            good = [e for e in ST.index if bool(ST.loc[e, "oi_ok"])]
             if e3.startswith("불러온"):
-                g = pd.concat([gex_by_strike(chains[e], S) for e in ST.index]).groupby(level=0).sum()
+                g = pd.concat([gex_by_strike(chains[e], S) for e in good]).groupby(level=0).sum() if good else pd.Series(dtype=float)
             else:
-                g = gex_by_strike(chains[e3], S)
+                g = gex_by_strike(chains[e3], S) if e3 in good else pd.Series(dtype=float)
             g = g[(g.index > S * 0.7) & (g.index < S * 1.3)]
             if not (g != 0).any():
-                st.info("선택한 만기의 미결제약정이 Yahoo에서 0으로 와서 감마 노출을 계산할 수 없습니다. '불러온 전체 만기 합계'나 다른 만기를 고르세요.")
-            tot = float(g.sum())
-            flip = None
-            cum = g.sort_index().cumsum()
-            sgn = np.sign(cum.values)
-            for i in range(1, len(sgn)):
-                if sgn[i] != sgn[i - 1] and sgn[i] != 0:
-                    flip = cum.index[i]
-                    break
-            f = go.Figure(go.Bar(x=g.index, y=g.values / 1e6, marker_color=np.where(g.values >= 0, "#5BB56E", "#E5534B"),
-                                 hovertemplate="행사가 %{x:,.2f}<br>GEX %{y:,.2f}백만$ /1%<extra></extra>"))
-            f.add_vline(x=S, line_color="#888", line_dash="dot", annotation_text="현재가")
-            f.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
-                            xaxis=dict(title="행사가"), yaxis=dict(title="감마 노출(백만$, 1% 변동당)"))
-            st.plotly_chart(f, use_container_width=True)
-            mgrid([("총 GEX (1% 변동당)", f"{tot / 1e6:,.1f}백만$"),
-                   ("해석", "딜러 순매수 감마 → 변동 완화" if tot > 0 else "딜러 순매도 감마 → 변동 증폭"),
-                   ("누적 GEX 부호 전환 행사가", f"{flip:,.2f}" if flip is not None else "-")], cols=3)
-            st.caption("딜러 포지션은 공개되지 않아 업계 통상 가정(고객이 콜 매수·풋 매수)으로 추정한 값입니다.")
+                st.info("Yahoo가 지금 이 범위의 미결제약정을 일부만 주거나 0으로 주고 있어 감마 노출을 믿을 수 없습니다 (보통 미국 장중에 정상). 다른 만기를 골라 보세요.")
+            else:
+                tot = float(g.sum())
+                flip = None
+                cum = g.sort_index().cumsum()
+                sgn = np.sign(cum.values)
+                for i in range(1, len(sgn)):
+                    if sgn[i] != sgn[i - 1] and sgn[i] != 0:
+                        flip = cum.index[i]
+                        break
+                f = go.Figure(go.Bar(x=g.index, y=g.values / 1e6, marker_color=np.where(g.values >= 0, "#5BB56E", "#E5534B"),
+                                     hovertemplate="행사가 %{x:,.2f}<br>GEX %{y:,.2f}백만$ /1%<extra></extra>"))
+                f.add_vline(x=S, line_color="#888", line_dash="dot", annotation_text="현재가")
+                f.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
+                                xaxis=dict(title="행사가"), yaxis=dict(title="감마 노출(백만$, 1% 변동당)"))
+                st.plotly_chart(f, use_container_width=True)
+                mgrid([("총 GEX (1% 변동당)", f"{tot / 1e6:,.1f}백만$"),
+                       ("해석", "딜러 순매수 감마 → 변동 완화" if tot > 0 else "딜러 순매도 감마 → 변동 증폭"),
+                       ("누적 GEX 부호 전환 행사가", f"{flip:,.2f}" if flip is not None else "-")], cols=3)
+                st.caption("딜러 포지션은 공개되지 않아 업계 통상 가정(고객이 콜 매수·풋 매수)으로 추정한 값입니다.")
     if sub[5][1]:
         with sub[5][0]:
             tbl = ST[["days", "atm_iv", "p25", "c25", "rr25", "straddle", "move_pct", "move_iv", "max_pain", "pc_vol", "pc_oi",
@@ -316,7 +342,7 @@ def render_vol() -> None:
                 show[c_] = [f_.format(v) if v is not None and np.isfinite(v) else "-" for v in tbl[c_].astype(float)]
             from glossary import col_help
             st.dataframe(show, use_container_width=True, column_config=col_help(show.columns))
-            st.caption("Yahoo가 미결제약정을 0으로 준 만기는 맥스페인·풋/콜 미결제가 '-'로 표시됩니다.")
+            st.caption("Yahoo가 미결제약정을 일부만 주거나 0으로 준 만기는 맥스페인·풋/콜 미결제가 '-'로 표시됩니다.")
 
 
 # ----------------------------------------------------------------------
