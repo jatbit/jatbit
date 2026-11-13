@@ -1,4 +1,4 @@
-"""시장 개요 (첫 화면): 주요 지수·환율·금리·원자재·가상자산 시세와 국내 시장 상승·하락 종목, 시가총액·거래대금 상위 종목.
+"""시장 개요 (첫 화면): 주요 지수·환율·금리·원자재·가상자산 시세, 국내·미국 시장 상승·하락 종목과 시장 지도, 시가총액·거래대금 상위 종목.
 
 증권사 MTS/WTS 첫 화면처럼 자주 보는 숫자를 한눈에 보여주고, 기간별 수익률 같은 세부는 '더보기'로 접어 둔다.
 """
@@ -140,38 +140,92 @@ def _movers_table(df: pd.DataFrame, title: str) -> str:
             f'<th style="text-align:right;padding:3px 6px;font-weight:500">거래대금</th></tr></thead><tbody>{rows}</tbody></table>')
 
 
-@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
 def _sector_map() -> pd.DataFrame:
-    """종목코드 → 업종 (KRX 업종 분류)."""
-    import kr
+    """종목코드 → 섹터·업종 (WICS, 실패하면 KRX 업종을 WICS 이름으로 변환). 스크리너도 함께 씀."""
+    import sectors
 
-    d = kr.load_krx()
-    d = d[["Code", "Sector"]].copy()
-    d["Sector"] = (d["Sector"].fillna("기타").astype(str).str.replace(" 제조업", "", regex=False)
-                   .str.replace(" 및 ", "·", regex=False).str.slice(0, 18))
-    return d
+    return sectors.kr_sector_map()[0]
 
 
-def _heatmap(snap: pd.DataFrame) -> None:
-    """Finviz식 시장 지도: 업종별로 묶고, 칸 크기 = 시가총액, 색 = 오늘 등락률 (상승 빨강, 하락 파랑)."""
+def _treemap(m: pd.DataFrame, title: str, sub: str, money_fmt, height: int = 560) -> None:
+    """Finviz식 시장 지도: 섹터 → 업종 → 종목. 칸 크기 = 시가총액, 색 = 오늘 등락률 (상승 빨강, 하락 파랑).
+    m: Key(고유), Name, Sector, Industry, Marcap, ChangesRatio, Close."""
     import plotly.graph_objects as go
 
-    need = {"Code", "Name", "Marcap", "ChangesRatio"}
-    if not need.issubset(snap.columns):
+    m = m.dropna(subset=["Marcap", "ChangesRatio"])
+    m = m[m["Marcap"] > 0].copy()
+    if m.empty:
+        st.info("시장 지도를 그릴 시세가 없습니다.")
         return
-    ui.section("국내 시장 지도", "칸 크기 = 시가총액 · 색 = 오늘 등락률 · 업종을 누르면 확대")
+    m["Sector"] = m["Sector"].fillna("분류 없음").astype(str)
+    m["Industry"] = m["Industry"].fillna(m["Sector"]).astype(str)
+    m["_w"] = m["ChangesRatio"] * m["Marcap"]
+    gs = m.groupby("Sector").agg(Marcap=("Marcap", "sum"), W=("_w", "sum"))
+    gi = m.groupby(["Sector", "Industry"]).agg(Marcap=("Marcap", "sum"), W=("_w", "sum"))
+    gs["Chg"], gi["Chg"] = gs["W"] / gs["Marcap"], gi["W"] / gi["Marcap"]
+    tot = float(m["Marcap"].sum())
+    ids = ["root"] + [f"s:{k}" for k in gs.index] + [f"i:{a}|{b}" for a, b in gi.index] + [f"c:{c}" for c in m["Key"]]
+    labels = ["전체"] + list(gs.index) + [b for _a, b in gi.index] + list(m["Name"].astype(str))
+    parents = ([""] + ["root"] * len(gs) + [f"s:{a}" for a, _b in gi.index]
+               + [f"i:{a}|{b}" for a, b in zip(m["Sector"], m["Industry"])])
+    values = [tot] + list(gs["Marcap"]) + list(gi["Marcap"]) + list(m["Marcap"])
+    chg = [float(np.average(m["ChangesRatio"], weights=m["Marcap"]))] + list(gs["Chg"]) + list(gi["Chg"]) + list(m["ChangesRatio"])
+    full = m["FullName"].astype(str) + " · " if "FullName" in m.columns else ""
+    px_txt = [""] * (1 + len(gs) + len(gi)) + list(full + pd.Series([f"현재가 {money_fmt(x, 'px')}" for x in m["Close"]], index=m.index))
+    cap_txt = [money_fmt(v, "cap") for v in values]
+    fig = go.Figure(go.Treemap(
+        ids=ids, labels=labels, parents=parents, values=values, branchvalues="total",
+        customdata=[[float(c), t, p] for c, t, p in zip(chg, cap_txt, px_txt)],
+        texttemplate="<b>%{label}</b><br>%{customdata[0]:+.2f}%",
+        hovertemplate="<b>%{label}</b><br>등락률 %{customdata[0]:+.2f}%<br>시가총액 %{customdata[1]}<br>%{customdata[2]}<extra></extra>",
+        marker=dict(colors=[float(x) for x in np.clip(chg, -3, 3)], cmin=-3, cmax=3, showscale=False,
+                    colorscale=[[0, "#1E5BC6"], [0.35, "#4F7CC9"], [0.5, "#4A4F5A"], [0.65, "#CF5A5D"], [1, "#C8232C"]],
+                    line=dict(width=1, color="rgba(0,0,0,0.35)")),
+        tiling=dict(pad=1), pathbar=dict(visible=True), maxdepth=4, textfont=dict(color="white"),
+    ))
+    fig.update_layout(height=height, margin=dict(l=0, r=0, t=24, b=0))
+    st.plotly_chart(fig, use_container_width=True)
+    if sub:
+        st.caption(sub)
+
+
+def _krw(v, kind):
+    if v is None or v != v:
+        return "-"
+    return f"{v:,.0f}원" if kind == "px" else (f"{v / 1e12:,.1f}조원" if v >= 1e12 else f"{v / 1e8:,.0f}억원")
+
+
+def _usd(v, kind):
+    if v is None or v != v:
+        return "-"
+    if kind == "px":
+        return f"${v:,.2f}"
+    return f"${v / 1e12:,.2f}T" if v >= 1e12 else f"${v / 1e9:,.1f}B"
+
+
+def _map_controls(prefix: str, markets: list | None, sizes: list, default_n: int):
     try:
         c1, c2 = st.columns([2, 1], vertical_alignment="bottom")
     except TypeError:
         c1, c2 = st.columns([2, 1])
     seg = getattr(st, "segmented_control", None) or getattr(st, "pills", None)
-    mk, n = "전체", 200
+    mk, n = (markets[0] if markets else None), default_n
     if seg:
-        with c1:
-            mk = seg("시장", ["전체", "KOSPI", "KOSDAQ"], default="전체", key="mk_map_mk", label_visibility="collapsed") or "전체"
+        if markets:
+            with c1:
+                mk = seg("시장", markets, default=markets[0], key=f"{prefix}_mk", label_visibility="collapsed") or markets[0]
         with c2:
-            n = seg("종목 수", [100, 200, 400], default=200, key="mk_map_n", label_visibility="collapsed",
-                    format_func=lambda x: f"상위 {x}") or 200
+            n = seg("종목 수", sizes, default=default_n, key=f"{prefix}_n", label_visibility="collapsed",
+                    format_func=lambda x: f"상위 {x}") or default_n
+    return mk, int(n)
+
+
+def _heatmap(snap: pd.DataFrame) -> None:
+    need = {"Code", "Name", "Marcap", "ChangesRatio"}
+    if not need.issubset(snap.columns):
+        return
+    ui.section("국내 시장 지도", "섹터 → 업종 → 종목 · 칸 크기 = 시가총액 · 색 = 오늘 등락률 · 칸을 누르면 확대")
+    mk, n = _map_controls("mk_map", ["전체", "KOSPI", "KOSDAQ"], [100, 200, 400], 200)
     m = snap.dropna(subset=["Marcap", "ChangesRatio"]).copy()
     if mk != "전체" and "Market" in m.columns:
         m = m[m["Market"].astype(str).str.upper().str.startswith(mk)]
@@ -180,34 +234,85 @@ def _heatmap(snap: pd.DataFrame) -> None:
     m = m.nlargest(int(n), "Marcap")
     if m.empty:
         return
+    import sectors
+
     try:
-        m = m.merge(_sector_map(), on="Code", how="left")
-    except Exception:  # noqa: BLE001
-        m["Sector"] = "기타"
-    m["Sector"] = m["Sector"].fillna("기타")
-    m["_w"] = m["ChangesRatio"] * m["Marcap"]
-    g = m.groupby("Sector").agg(Marcap=("Marcap", "sum"), W=("_w", "sum"))
-    g["Chg"] = g["W"] / g["Marcap"]
-    ids = ["root"] + [f"s:{k}" for k in g.index] + [f"c:{c}" for c in m["Code"]]
-    labels = ["전체"] + list(g.index) + list(m["Name"])
-    parents = [""] + ["root"] * len(g) + [f"s:{s_}" for s_ in m["Sector"]]
-    values = [float(g["Marcap"].sum())] + list(g["Marcap"]) + list(m["Marcap"])
-    tot_chg = float(np.average(m["ChangesRatio"], weights=m["Marcap"]))
-    chg = [tot_chg] + list(g["Chg"]) + list(m["ChangesRatio"])
-    px_txt = [f"현재가 {x:,.0f}원" for x in m["Close"]] if "Close" in m.columns else [""] * len(m)
-    price = [""] * (1 + len(g)) + px_txt
-    fig = go.Figure(go.Treemap(
-        ids=ids, labels=labels, parents=parents, values=values, branchvalues="total",
-        customdata=[[float(c), float(v) / 1e12, t] for c, v, t in zip(chg, values, price)],
-        texttemplate="<b>%{label}</b><br>%{customdata[0]:+.2f}%",
-        hovertemplate="<b>%{label}</b><br>등락률 %{customdata[0]:+.2f}%<br>시가총액 %{customdata[1]:,.1f}조원<br>%{customdata[2]}<extra></extra>",
-        marker=dict(colors=[float(x) for x in np.clip(chg, -5, 5)], cmin=-5, cmax=5, showscale=False,
-                    colorscale=[[0, "#1E5BC6"], [0.4, "#5B86D6"], [0.5, "#4A4F5A"], [0.6, "#D9686A"], [1, "#C8232C"]],
-                    line=dict(width=1, color="rgba(0,0,0,0.35)")),
-        tiling=dict(pad=1), pathbar=dict(visible=True), maxdepth=3, textfont=dict(color="white"),
-    ))
-    fig.update_layout(height=520, margin=dict(l=0, r=0, t=24, b=0))
-    st.plotly_chart(fig, use_container_width=True)
+        smap, src = sectors.kr_sector_map()
+        m = m.merge(smap, on="Code", how="left")
+    except Exception as e:  # noqa: BLE001
+        m["Sector"], m["Industry"], src = "분류 없음", "분류 없음", f"업종 분류를 받지 못함 ({e})"
+    m["Key"] = m["Code"]
+    _treemap(m, "국내 시장 지도", f"분류: {src}", _krw)
+
+
+def _us_movers_table(df: pd.DataFrame, title: str) -> str:
+    rows = ""
+    for r in df.itertuples():
+        pct = float(r.ChangesRatio) if r.ChangesRatio == r.ChangesRatio else 0.0
+        cls = "up" if pct > 0 else ("down" if pct < 0 else "flat")
+        amt = f"${r.Amount / 1e9:,.1f}B" if r.Amount == r.Amount else "-"
+        rows += (f'<tr><td style="padding:4px 6px;max-width:11rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+                 f'<b>{html.escape(str(r.Symbol))}</b> <span style="opacity:.65">{html.escape(str(r.Name))}</span></td>'
+                 f'<td style="padding:4px 6px;text-align:right">{r.Close:,.2f}</td>'
+                 f'<td class="{cls}" style="padding:4px 6px;text-align:right;font-weight:600">{pct:+.2f}%</td>'
+                 f'<td style="padding:4px 6px;text-align:right;opacity:.7">{amt}</td></tr>')
+    return (f'<div class="sec-t" style="margin-top:4px">{html.escape(title)}</div>'
+            '<table style="border-collapse:collapse;width:100%;font-size:0.8rem;font-variant-numeric:tabular-nums">'
+            '<thead><tr style="opacity:.6;border-bottom:1px solid rgba(128,128,128,.3)"><th style="text-align:left;padding:3px 6px;font-weight:500">종목</th>'
+            '<th style="text-align:right;padding:3px 6px;font-weight:500">현재가($)</th><th style="text-align:right;padding:3px 6px;font-weight:500">등락률</th>'
+            f'<th style="text-align:right;padding:3px 6px;font-weight:500">거래대금</th></tr></thead><tbody>{rows}</tbody></table>').replace("$", "&#36;")
+
+
+def _us_market() -> None:
+    """미국 주식시장: 국내와 같은 구성 (상승·하락 종목 수, 거래대금, 시장 지도, 시가총액·거래대금 상위, 상승·하락률 상위)."""
+    import sectors
+
+    try:
+        with st.spinner("미국 시세를 불러오는 중..."):
+            sp, allq, src = sectors.us_snapshot()
+    except Exception as e:  # noqa: BLE001
+        st.caption(f"미국 종목 시세를 불러오지 못했습니다: {e}")
+        return
+    sp = sp.dropna(subset=["ChangesRatio"])
+    if sp.empty:
+        st.caption("미국 종목 시세가 비어 있습니다.")
+        return
+    ui.section("미국 주식시장", "S&P 500 구성 종목 (장중엔 15분 지연 · 정규장 기준)")
+    items = []
+    up, dn = int((sp["ChangesRatio"] > 0).sum()), int((sp["ChangesRatio"] < 0).sum())
+    items += [("S&P 500 상승 / 하락", f"{up:,} / {dn:,}", f"보합 {int((sp['ChangesRatio'] == 0).sum()):,}", up - dn),
+              ("S&P 500 거래대금", f"${sp['Amount'].sum() / 1e9:,.0f}B" if sp["Amount"].notna().any() else "-")]
+    if allq is not None and len(allq):
+        a = allq.dropna(subset=["ChangesRatio"])
+        a = a[(a["Marcap"] > 0) | a["Marcap"].isna()]
+        u2, d2 = int((a["ChangesRatio"] > 0).sum()), int((a["ChangesRatio"] < 0).sum())
+        items += [("미국 상장 전체 상승 / 하락", f"{u2:,} / {d2:,}", "나스닥·NYSE·AMEX", u2 - d2),
+                  ("미국 상장 전체 거래대금", f"${a['Amount'].sum() / 1e9:,.0f}B")]
+    ui.cards(items, cols=4)
+
+    ui.section("미국 시장 지도 (S&P 500)", "섹터 → 업종(GICS) → 종목 · 칸 크기 = 시가총액 · 색 = 오늘 등락률 · 칸을 누르면 확대")
+    _mk, n = _map_controls("us_map", None, [100, 250, 500], 250)
+    m = sp.dropna(subset=["Marcap"]).nlargest(n, "Marcap").copy()
+    m["Key"], m["Sector"] = m["Symbol"], m["SectorKo"]
+    m["FullName"], m["Name"] = m["Name"], m["Symbol"]
+    _treemap(m, "미국 시장 지도", f"분류: GICS 섹터·세부 업종 · 시세: {src}", _usd)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(_us_movers_table(sp.nlargest(10, "Marcap"), "시가총액 상위"), unsafe_allow_html=True)
+    with c2:
+        st.markdown(_us_movers_table(sp.nlargest(10, "Amount"), "거래대금 상위"), unsafe_allow_html=True)
+    exp, op = ui.more("상승률 · 하락률 상위 더보기 (S&P 500)", key="us_more_movers")
+    if op:
+        with exp:
+            c3, c4 = st.columns(2)
+            c3.markdown(_us_movers_table(sp.nlargest(10, "ChangesRatio"), "상승률 상위"), unsafe_allow_html=True)
+            c4.markdown(_us_movers_table(sp.nsmallest(10, "ChangesRatio"), "하락률 상위"), unsafe_allow_html=True)
+            g = sp.assign(_w=sp["ChangesRatio"] * sp["Marcap"]).groupby("SectorKo").agg(M=("Marcap", "sum"), W=("_w", "sum"), N=("Symbol", "count"))
+            g["등락률(시총가중)"] = (g["W"] / g["M"]).map(lambda x: f"{x:+.2f}%")
+            g["시가총액"] = g["M"].map(lambda v: _usd(v, "cap"))
+            st.dataframe(g.sort_values("M", ascending=False)[["등락률(시총가중)", "시가총액", "N"]].rename(columns={"N": "종목 수"})
+                         .rename_axis("섹터"), use_container_width=True)
 
 
 def _with_ctx(fn):
@@ -287,6 +392,9 @@ def render_market() -> None:
                 c3.markdown(_movers_table(liquid.nlargest(10, "ChangesRatio"), "상승률 상위"), unsafe_allow_html=True)
                 c4.markdown(_movers_table(liquid.nsmallest(10, "ChangesRatio"), "하락률 상위"), unsafe_allow_html=True)
 
+    # ---- 미국 시장 상황
+    _us_market()
+
     # ---- 기간별 수익률 (더보기)
     exp, op = ui.more("기간별 등락률 더보기 (1주 · 1개월 · 3개월 · 연초 이후 · 1년)", key="mk_more_ret")
     if op:
@@ -312,4 +420,4 @@ def render_market() -> None:
             st.caption("금리는 bp(0.01%p) 변화, 나머지는 % 등락률입니다.")
     if errs:
         st.caption("일부 데이터를 불러오지 못했습니다: " + " · ".join(errs))
-    st.caption("출처: Yahoo Finance · KRX(FinanceDataReader). 투자 판단의 참고 자료로만 사용하세요.")
+    st.caption("출처: Yahoo Finance · KRX(FinanceDataReader) · WICS(와이즈인덱스) · 나스닥 · S&P 500(GICS). 투자 판단의 참고 자료로만 사용하세요.")
