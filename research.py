@@ -257,6 +257,7 @@ def compute_ratios(sec: pd.DataFrame, hist: pd.Series, splits) -> pd.DataFrame:
 DAILY = {  # 이름: 단위
     "주가": "$", "12M 트레일링 PER": "배", "12M 선행 PER (사후 실현 EPS)": "배",
     "현재 12M 선행 PER (컨센서스)": "배", "트레일링 PER 평균 ±1σ 밴드": "배",
+    "현재 PER (최근 12개월 EPS)": "배",
 }
 try:  # 일별 밸류에이션 배수 (valuation.py, SEC 분기 공시 기준)
     from valuation import VAL as _VAL
@@ -274,6 +275,16 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
     d_avail = ["주가"] if isinstance(hist, pd.Series) and len(hist) else []
     if per is not None:
         d_avail += ["12M 트레일링 PER", "12M 선행 PER (사후 실현 EPS)", "트레일링 PER 평균 ±1σ 밴드"]
+    # 현재 PER(트레일링): 분기 EPS로 만든 일별 트레일링 PER의 마지막 값, 없으면 Yahoo trailingPE
+    cur_pe, cur_pe_src = None, ""
+    if per is not None and per[0].notna().any():
+        cur_pe, cur_pe_src = float(per[0].dropna().iloc[-1]), "최근 4개 분기 발표 EPS 합"
+    else:
+        _tpe = _num((R.get("info") or {}).get("trailingPE"))
+        if _tpe and _tpe > 0:
+            cur_pe, cur_pe_src = float(_tpe), "Yahoo 최근 12개월 EPS"
+    if cur_pe:
+        d_avail.append("현재 PER (최근 12개월 EPS)")
     if px and n_eps and n_eps > 0:
         d_avail.append("현재 12M 선행 PER (컨센서스)")
     dv, dv_err = None, None
@@ -306,6 +317,8 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
             return f"{k} · 연간 ({RATIOS[k][1]}, {RATIOS[k][0]})"
         if k in _VAL:
             return f"{k} · 일별 ({DAILY[k]})"
+        if k.startswith("현재 "):
+            return f"{k} · 오늘 값 (점)"
         return k if k == "주가" else f"{k} · 일별"
 
     chosen = st.multiselect("그래프에 그릴 항목 (주가·밸류에이션은 일별, 나머지 재무비율은 연간)", options,
@@ -394,6 +407,12 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
                                      (m - sd, f"평균−1σ {m - sd:.1f}배", "dot")):
                     fig.add_trace(go.Scatter(x=[x0, x1], y=[yv, yv], name=nm, mode="lines", yaxis=ax,
                                              line=dict(color="#888", width=1, dash=dash), hoverinfo="skip"))
+        elif k == "현재 PER (최근 12개월 EPS)":
+            now = pd.Timestamp(hist.index[-1]).tz_localize(None) if getattr(hist.index, "tz", None) is not None else pd.Timestamp(hist.index[-1])
+            fig.add_trace(go.Scatter(x=[now], y=[cur_pe], name=f"현재 PER {cur_pe:.1f}배", mode="markers", yaxis=ax,
+                                     marker=dict(size=14, symbol="diamond", color="#4C9BE8"),
+                                     hovertemplate=f"현재 PER(트레일링) {cur_pe:.1f}배 · {cur_pe_src}<extra></extra>"))
+            x_vals.append(np.array([cur_pe]))
         elif k == "현재 12M 선행 PER (컨센서스)":
             now = pd.Timestamp(hist.index[-1]).tz_localize(None) if getattr(hist.index, "tz", None) is not None else pd.Timestamp(hist.index[-1])
             fig.add_trace(go.Scatter(x=[now], y=[px / n_eps], name=f"현재 12M 선행 PER {px / n_eps:.1f}배", mode="markers", yaxis=ax,
