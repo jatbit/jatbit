@@ -1,6 +1,6 @@
 """주가 차트 · 시장 분석 앱.
 
-상단 메뉴: 시장(첫 화면) · 주가 조회 · 기업 리서치 · 수익률 비교 · 포트폴리오 · 백테스트 · 옵션 · 채권.
+상단 메뉴: 시장(첫 화면) · 주가 조회 · 기업 리서치 · 스크리너 · 수익률 비교 · 포트폴리오 · 백테스트 · 옵션 · 채권.
 열린 페이지와 열린 탭만 계산해서 빠르게 보여주고, 자주 보는 지표를 먼저, 세부 지표는 '더보기'에 접어 둔다.
 수익률 비교와 포트폴리오의 종목·기간 입력은 서로 동기화된다.
 
@@ -595,6 +595,70 @@ def show_stats(df: pd.DataFrame, rf: float, rf_label: str, bench: tuple = None) 
 # ======================================================================
 # 탭 1: 주가 조회
 # ======================================================================
+IND_OPTS = ["이동평균선", "볼린저밴드", "RSI", "MACD"]
+IND_DEFAULTS = {"single_ma_n": "5, 20, 60, 120", "single_bb_n": 20, "single_bb_k": 2.0, "single_rsi_n": 14, "single_rsi_hi": 70,
+                "single_rsi_lo": 30, "single_macd_f": 12, "single_macd_s": 26, "single_macd_g": 9}
+
+
+def _clean_ind_state() -> None:
+    """예전 버전의 지표 이름(괄호 안 숫자 포함)이 남아 있으면 새 이름으로 바꾼다."""
+    v = st.session_state.get("single_ind")
+    if isinstance(v, (list, tuple)):
+        st.session_state["single_ind"] = [o for o in IND_OPTS if any(str(x).startswith(o) for x in v)]
+
+
+def _reset_ind() -> None:
+    for k, v in IND_DEFAULTS.items():
+        st.session_state[k] = v
+
+
+def _ind_settings(inds: list) -> dict:
+    """선택한 보조지표의 기간·기준값 입력칸 (기본값이 채워져 있고, 지우고 원하는 값을 넣으면 됨)."""
+    import ta
+
+    P = {}
+    if not inds:
+        return P
+    st.markdown("**보조지표 설정**")
+    if IND_OPTS[0] in inds:
+        txt = st.text_input("이동평균 기간 (일, 쉼표로 구분)", value=IND_DEFAULTS["single_ma_n"], key="single_ma_n",
+                            help="예: 5, 20, 60, 120. 2~400일, 최대 8개")
+        P["ma"] = ta.parse_periods(txt)
+    if IND_OPTS[1] in inds:
+        a, b = st.columns(2)
+        P["bb_n"] = int(a.number_input("볼린저 기간", 2, 400, IND_DEFAULTS["single_bb_n"], step=1, key="single_bb_n"))
+        P["bb_k"] = float(b.number_input("표준편차 배수", 0.5, 5.0, IND_DEFAULTS["single_bb_k"], step=0.5, key="single_bb_k"))
+    if IND_OPTS[2] in inds:
+        a, b, c = st.columns(3)
+        P["rsi_n"] = int(a.number_input("RSI 기간", 2, 200, IND_DEFAULTS["single_rsi_n"], step=1, key="single_rsi_n"))
+        P["rsi_hi"] = int(b.number_input("과매수", 50, 100, IND_DEFAULTS["single_rsi_hi"], step=5, key="single_rsi_hi"))
+        P["rsi_lo"] = int(c.number_input("과매도", 0, 50, IND_DEFAULTS["single_rsi_lo"], step=5, key="single_rsi_lo"))
+    if IND_OPTS[3] in inds:
+        a, b, c = st.columns(3)
+        P["macd_f"] = int(a.number_input("MACD 단기", 2, 200, IND_DEFAULTS["single_macd_f"], step=1, key="single_macd_f"))
+        P["macd_s"] = int(b.number_input("MACD 장기", 3, 400, IND_DEFAULTS["single_macd_s"], step=1, key="single_macd_s"))
+        P["macd_g"] = int(c.number_input("시그널", 2, 100, IND_DEFAULTS["single_macd_g"], step=1, key="single_macd_g"))
+        if P["macd_f"] >= P["macd_s"]:
+            st.caption("단기 기간이 장기 기간보다 짧아야 합니다. 두 값을 바꿔서 계산합니다.")
+            P["macd_f"], P["macd_s"] = min(P["macd_f"], P["macd_s"]), max(P["macd_f"], P["macd_s"]) + (P["macd_f"] == P["macd_s"])
+    st.button("기본값으로 되돌리기", key="single_ind_reset", on_click=_reset_ind)
+    return P
+
+
+def _indicator_base(code: str, start_d, end_d, weekly: bool, longest: int = 120):
+    """보조지표 계산용 종가: 앞쪽 계산 구간(가장 긴 기간)이 비지 않게 조회 시작일보다 넉넉히 앞에서부터."""
+    back = int(longest * (7 if weekly else 1.5)) + 60  # 거래일 → 달력일 여유
+    try:
+        ext = load_prices(code, (pd.Timestamp(start_d) - pd.Timedelta(days=back)).date().isoformat(),
+                          end_d.isoformat())
+    except Exception:  # noqa: BLE001
+        return None
+    if ext is None or ext.empty:
+        return None
+    c = ext["Close"].dropna()
+    return c.resample("W-FRI").last().dropna() if weekly else c
+
+
 def render_single(listing: pd.DataFrame) -> None:
     c1, c2 = _row([5, 1])
     query = c1.text_input(
@@ -605,6 +669,9 @@ def render_single(listing: pd.DataFrame) -> None:
         with ui.popover("차트 설정", icon=":material/tune:"):
             chart_type = st.radio("차트 종류", ["선", "캔들"], horizontal=True, key="single_type")
             basis = st.radio("표시 기준", ["주가", "수익률"], horizontal=True, key="single_basis")
+            _clean_ind_state()
+            inds = st.multiselect("보조지표", IND_OPTS, key="single_ind", placeholder="이동평균선, 볼린저밴드, RSI, MACD")
+            IP = _ind_settings(inds)
             rate_sel = rate_controls("single")
     period = period_input("single_period")
 
@@ -697,7 +764,23 @@ def render_single(listing: pd.DataFrame) -> None:
             if _c in plot_df.columns:
                 plot_df[_c] = (plot_df[_c] / base0 - 1) * 100
 
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.03)
+    import ta
+
+    want_ma = IND_OPTS[0] in inds
+    want_bb = IND_OPTS[1] in inds
+    want_rsi = IND_OPTS[2] in inds
+    want_macd = IND_OPTS[3] in inds
+    longest = max([*IP.get("ma", [0]), IP.get("bb_n", 0), IP.get("rsi_n", 0) * 3, IP.get("macd_s", 0) * 3 + IP.get("macd_g", 0), 20])
+    base_c = _indicator_base(chosen["code"], start_d, end_d, weekly, longest) if inds else None
+    x0 = plot_df.index[0]
+
+    def _disp(sr):  # 가격 단위 → 화면 단위(수익률 모드면 %)
+        sr = sr[sr.index >= x0].reindex(plot_df.index)
+        return (sr / base0 - 1) * 100 if pct_mode else sr
+
+    n_rows = 2 + int(want_rsi and base_c is not None) + int(want_macd and base_c is not None)
+    heights = {2: [0.75, 0.25], 3: [0.62, 0.17, 0.21], 4: [0.54, 0.14, 0.16, 0.16]}[n_rows]
+    fig = make_subplots(rows=n_rows, cols=1, shared_xaxes=True, row_heights=heights, vertical_spacing=0.03)
     if chart_type == "캔들":
         fig.add_trace(
             go.Candlestick(
@@ -720,6 +803,45 @@ def render_single(listing: pd.DataFrame) -> None:
             ),
             row=1, col=1,
         )
+    if base_c is not None:
+        if want_ma:
+            unit = "주" if weekly else "일"
+            for i_ma, n in enumerate(IP["ma"]):
+                fig.add_trace(go.Scatter(x=plot_df.index, y=_disp(ta.sma(base_c, n)), mode="lines", name=f"{n}{unit}선",
+                                         line=dict(color=ta.ma_color(n, i_ma), width=1.1),
+                                         hovertemplate=f"{n}{unit}선 %{{y:,.2f}}<extra></extra>"), row=1, col=1)
+        if want_bb:
+            mid, upb, lob = ta.bollinger(base_c, IP["bb_n"], IP["bb_k"])
+            fig.add_trace(go.Scatter(x=plot_df.index, y=_disp(upb), mode="lines", name="볼린저 상단",
+                                     line=dict(color="#A0AEC0", width=1, dash="dot"), hovertemplate="상단 %{y:,.2f}<extra></extra>"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=plot_df.index, y=_disp(lob), mode="lines", name="볼린저 하단", fill="tonexty",
+                                     fillcolor="rgba(160,174,192,0.10)", line=dict(color="#A0AEC0", width=1, dash="dot"),
+                                     hovertemplate="하단 %{y:,.2f}<extra></extra>"), row=1, col=1)
+            if not want_ma:
+                fig.add_trace(go.Scatter(x=plot_df.index, y=_disp(mid), mode="lines", name=f"볼린저 중심({IP['bb_n']})",
+                                         line=dict(color=ta.MA_COLORS[20], width=1), hovertemplate="중심 %{y:,.2f}<extra></extra>"), row=1, col=1)
+        r_i = 3
+        if want_rsi:
+            rv = ta.rsi(base_c, IP["rsi_n"])
+            rv = rv[rv.index >= x0].reindex(plot_df.index)
+            fig.add_trace(go.Scatter(x=plot_df.index, y=rv, mode="lines", name="RSI", line=dict(color="#6B46C1", width=1.3),
+                                     hovertemplate="RSI %{y:.1f}<extra></extra>"), row=r_i, col=1)
+            for lv, col in ((IP["rsi_hi"], UP_COLOR), (IP["rsi_lo"], DOWN_COLOR)):
+                fig.add_hline(y=lv, row=r_i, col=1, line_width=1, line_dash="dot", line_color=col)
+            fig.update_yaxes(title_text=f"RSI({IP['rsi_n']})", range=[0, 100], tickvals=sorted({IP["rsi_lo"], 50, IP["rsi_hi"]}), row=r_i, col=1)
+            r_i += 1
+        if want_macd:
+            ml, sg, hist = (x[x.index >= x0].reindex(plot_df.index) for x in ta.macd(base_c, IP["macd_f"], IP["macd_s"], IP["macd_g"]))
+            fig.add_trace(go.Bar(x=plot_df.index, y=hist, name="MACD 히스토그램",
+                                 marker_color=np.where(hist.fillna(0) >= 0, UP_COLOR, DOWN_COLOR), opacity=0.5,
+                                 hovertemplate="히스토그램 %{y:,.2f}<extra></extra>"), row=r_i, col=1)
+            fig.add_trace(go.Scatter(x=plot_df.index, y=ml, mode="lines", name="MACD", line=dict(color="#2B6CB0", width=1.3),
+                                     hovertemplate="MACD %{y:,.2f}<extra></extra>"), row=r_i, col=1)
+            fig.add_trace(go.Scatter(x=plot_df.index, y=sg, mode="lines", name="시그널", line=dict(color="#DD6B20", width=1.1),
+                                     hovertemplate="시그널 %{y:,.2f}<extra></extra>"), row=r_i, col=1)
+            fig.update_yaxes(title_text=f"MACD({IP['macd_f']},{IP['macd_s']},{IP['macd_g']})", row=r_i, col=1)
+    elif inds:
+        st.caption("보조지표 계산에 필요한 과거 시세를 불러오지 못했습니다.")
     if "Volume" in plot_df.columns:
         fig.add_trace(
             go.Bar(x=plot_df.index, y=plot_df["Volume"], marker_color=VOLUME_COLOR, name="거래량",
@@ -730,13 +852,14 @@ def render_single(listing: pd.DataFrame) -> None:
     box_gap = 0.3 if n_bars <= 60 else 0.45 if n_bars <= 150 else 0.6
     fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])], rangeslider_visible=False)
     if rate_sel:
-        add_rates(fig, rate_sel, start_d, end_d, 3, domain=list(fig.layout.yaxis.domain))
+        add_rates(fig, rate_sel, start_d, end_d, n_rows + 1, domain=list(fig.layout.yaxis.domain))
     fig.update_yaxes(title_text="수익률(%)" if pct_mode else "가격", row=1, col=1, tickformat=",.1f" if pct_mode else ",", ticksuffix="%" if pct_mode else "")
     if pct_mode:
         fig.add_hline(y=0, row=1, col=1, line_width=1, line_dash="dot", line_color="#718096")
     fig.update_yaxes(title_text="거래량", row=2, col=1, tickformat=",")
     fig.update_layout(
-        height=560, showlegend=False, hovermode="x unified",
+        height=560 + 130 * (n_rows - 2), showlegend=bool(base_c is not None and (want_ma or want_bb)), hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0, font=dict(size=10)),
         margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
         boxgap=box_gap, bargap=0.3 if n_bars <= 150 else 0.4,
     )
@@ -1225,6 +1348,12 @@ def page_single():
     render_single(LISTING)
 
 
+def page_screener():
+    from screener import render_screener
+
+    render_screener()
+
+
 def page_compare():
     render_compare(LISTING)
 
@@ -1261,6 +1390,7 @@ PAGES = [
     (page_market, "시장", ":material/monitoring:", "market"),
     (page_single, "주가 조회", ":material/candlestick_chart:", "chart"),
     (page_research, "기업 리서치", ":material/business_center:", "research"),
+    (page_screener, "스크리너", ":material/filter_list:", "screener"),
     (page_compare, "수익률 비교", ":material/compare_arrows:", "compare"),
     (page_portfolio, "포트폴리오", ":material/pie_chart:", "portfolio"),
     (page_backtest, "백테스트", ":material/history:", "backtest"),
@@ -1273,6 +1403,7 @@ def _run_pages() -> None:
     """열린 페이지 하나만 실행한다 (예전엔 7개 탭을 매번 모두 계산해서 느렸음)."""
     if hasattr(st, "navigation") and hasattr(st, "Page"):
         pages = [st.Page(fn, title=t, icon=ic, url_path=u, default=(i == 0)) for i, (fn, t, ic, u) in enumerate(PAGES)]
+        ui.PAGE_OBJS = {u: pg for (_, _, _, u), pg in zip(PAGES, pages)}  # 스크리너에서 다른 페이지로 넘어갈 때 씀
         try:
             nav = st.navigation(pages, position="top")
         except TypeError:
