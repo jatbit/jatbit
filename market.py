@@ -41,9 +41,18 @@ def load_quotes() -> pd.DataFrame:
 def load_kr3y() -> pd.Series:
     import FinanceDataReader as fdr
 
-    start = (pd.Timestamp.today() - pd.Timedelta(days=380)).strftime("%Y-%m-%d")
-    d = fdr.DataReader("KR3YT=RR", start)
-    return d["Close"].dropna()
+    start = pd.Timestamp.today() - pd.Timedelta(days=380)
+    end = pd.Timestamp.today()
+    try:
+        s = fdr.DataReader("KR3YT=RR", start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))["Close"].dropna()
+        if len(s) >= 2:
+            return s
+    except Exception:  # noqa: BLE001
+        pass
+    from rates import _load_kr3y_range  # 한국은행 ECOS (최근 3개월만: 요청 수를 줄임)
+
+    rows = _load_kr3y_range((end - pd.Timedelta(days=100)).strftime("%Y%m%d"), end.strftime("%Y%m%d"))
+    return pd.Series({pd.to_datetime(t, format="%Y%m%d"): v for t, v in rows}).sort_index()
 
 
 @st.cache_data(ttl=300, show_spinner=False)

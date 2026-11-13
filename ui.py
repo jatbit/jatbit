@@ -96,8 +96,9 @@ def _keepable(k, v) -> bool:
     return isinstance(v, (str, int, float, date, list, tuple))
 
 
-def keep_state() -> None:
-    """실행을 시작할 때: 지난 실행에서 기억한 입력값 중 사라진 것을 되살린다."""
+def keep_state(page: str | None = None) -> None:
+    """실행을 시작할 때: 지난 실행에서 기억한 입력값 중 사라진 것을 되살린다.
+    page가 바뀌었으면(다른 메뉴에서 돌아왔으면) 남아 있는 입력값도 다시 저장해 입력창에 값이 그대로 보이게 한다."""
     try:  # 되살린 값과 위젯 기본값이 겹칠 때 뜨는 노란 경고를 끈다 (값은 되살린 쪽이 쓰임)
         from streamlit.elements.lib import policies
 
@@ -105,10 +106,16 @@ def keep_state() -> None:
     except Exception:  # noqa: BLE001
         pass
     snap = st.session_state.get("_ui_snap") or {}
+    moved = page is not None and st.session_state.get("_ui_page") != page
+    if page is not None:
+        st.session_state["_ui_page"] = page
     for k, v in snap.items():
-        if k not in st.session_state:
+        if k not in st.session_state or moved:
+            cur = st.session_state[k] if k in st.session_state else v
+            if not _keepable(k, cur):
+                continue
             try:
-                st.session_state[k] = v
+                st.session_state[k] = cur
             except Exception:  # noqa: BLE001
                 pass
 

@@ -42,7 +42,6 @@ st.set_page_config(page_title="주가 차트", page_icon="📈", layout="wide")
 import ui  # 화면 공통 요소 (ui.py)
 
 ui.apply_theme()
-ui.keep_state()  # 다른 페이지에 갔다 와도 입력값 유지
 
 
 @st.cache_data(ttl=60 * 60 * 24, show_spinner="종목 목록을 불러오는 중...")
@@ -1278,9 +1277,11 @@ def _run_pages() -> None:
             nav = st.navigation(pages, position="top")
         except TypeError:
             nav = st.navigation(pages)
+        ui.keep_state(getattr(nav, "url_path", None) or getattr(nav, "title", None))  # 다른 페이지에 갔다 와도 입력값 유지
         nav.run()
         return
     labels = [t for _, t, _, _ in PAGES]  # 아주 오래된 Streamlit
+    ui.keep_state()
     pick = st.radio("메뉴", labels, horizontal=True, key="nav_fallback", label_visibility="collapsed")
     PAGES[labels.index(pick)][0]()
 
