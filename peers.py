@@ -1,5 +1,7 @@
 """동종업계 비교 (기업 리서치 탭)
-- 미국: Yahoo 산업 분류(yfinance Industry)의 대표 기업, 국내: KRX 같은 업종 시가총액 상위 기업
+- 1순위: 증권사 리포트·업종 분석에서 실제로 같이 묶어 보는 경쟁사 그룹 (아래 PEER_GROUPS_KR / PEER_GROUPS_US)
+- 2순위: 국내는 WICS 같은 업종, 미국은 S&P 500 GICS 같은 세부 업종에서 시가총액이 비슷한 기업
+- 3순위: Yahoo 산업 분류 대표 기업
 - 밸류에이션·수익성·성장·재무 지표를 한 표로 비교하고, 업계 안에서 이 회사가 몇 등(백분위)인지 보여준다.
 """
 from concurrent.futures import ThreadPoolExecutor
@@ -30,6 +32,75 @@ METRICS = {
 GOOD_LOW_SKIP_NEG = {"PER", "선행 PER", "PBR", "PSR", "EV/EBITDA"}  # 음수(적자)는 순위에서 뺌
 
 
+# 시장에서 함께 비교하는 경쟁사 그룹 (증권사 산업 리포트·업종 분석 기준, 2026년). 종목코드 기준.
+PEER_GROUPS_KR = {
+    "방산": ["012450", "064350", "079550", "047810", "272210", "103140"],
+    "조선": ["009540", "329180", "042660", "010140", "443060"],
+    "조선 엔진·기자재": ["082740", "071970", "017960", "033500", "077970"],
+    "전력기기·전선": ["267260", "298040", "010120", "062040", "103590", "033100", "006260", "001440"],
+    "원전": ["034020", "052690", "051600", "083650", "032820", "015760"],
+    "2차전지 셀": ["373220", "006400", "096770"],
+    "2차전지 소재": ["247540", "086520", "003670", "066970", "348370", "005070", "450080"],
+    "메모리 반도체": ["005930", "000660"],
+    "반도체 장비·부품": ["042700", "036930", "240810", "039030", "403870", "058470", "095340", "089030", "319660", "357780"],
+    "인터넷 플랫폼": ["035420", "035720", "377300", "323410"],
+    "게임": ["259960", "251270", "036570", "263750", "462870", "293490", "225570"],
+    "엔터테인먼트": ["352820", "035900", "041510", "122870"],
+    "화장품": ["278470", "090430", "051900", "192820", "161890", "257720", "483650", "241710"],
+    "바이오·제약": ["207940", "068270", "196170", "000100", "128940", "141080", "028300", "326030"],
+    "자동차": ["005380", "000270", "012330", "204320", "011210", "018880"],
+    "은행": ["105560", "055550", "086790", "316140", "024110", "138930", "175330"],
+    "증권": ["006800", "071050", "005940", "016360", "039490", "138040"],
+    "보험": ["032830", "000810", "005830", "088350", "001450"],
+    "통신": ["017670", "030200", "032640"],
+    "정유": ["096770", "010950", "078930", "267250"],
+    "철강·비철": ["005490", "004020", "010130", "001230", "460860"],
+    "화학": ["051910", "011170", "009830", "011780", "011790"],
+    "건설": ["000720", "028050", "006360", "047040", "375500", "294870"],
+    "항공": ["003490", "089590", "272450", "091810"],
+    "해운": ["011200", "028670", "005880"],
+    "유통": ["139480", "023530", "004170", "069960", "282330", "007070"],
+    "음식료": ["003230", "271560", "004370", "097950", "007310", "280360"],
+    "지주회사": ["034730", "003550", "028260", "000880", "001040", "000150"],
+}
+PEER_GROUPS_US = {
+    "AI·GPU 반도체": ["NVDA", "AMD", "AVGO", "INTC", "QCOM", "MRVL", "ARM", "TSM"],
+    "메모리·스토리지": ["MU", "WDC", "STX", "SNDK"],
+    "반도체 장비": ["AMAT", "LRCX", "KLAC", "ASML", "TER"],
+    "클라우드·기업용 소프트웨어": ["ORCL", "CRM", "NOW", "ADBE", "SAP", "INTU", "WDAY", "SNOW"],
+    "데이터·AI 소프트웨어": ["PLTR", "SNOW", "DDOG", "MDB", "AI"],
+    "사이버보안": ["CRWD", "PANW", "FTNT", "ZS", "NET", "OKTA"],
+    "인터넷 광고·SNS": ["GOOGL", "META", "PINS", "SNAP", "RDDT"],
+    "이커머스": ["AMZN", "SHOP", "MELI", "PDD", "BABA", "EBAY"],
+    "전기차·자동차": ["TSLA", "GM", "F", "RIVN", "TM", "STLA"],
+    "스트리밍·미디어": ["NFLX", "DIS", "WBD", "SPOT", "ROKU"],
+    "결제·카드": ["V", "MA", "PYPL", "AXP", "FI", "XYZ"],
+    "대형 은행·IB": ["JPM", "BAC", "WFC", "C", "GS", "MS"],
+    "가상자산·증권 플랫폼": ["COIN", "HOOD", "MSTR", "SCHW", "IBKR"],
+    "제약": ["LLY", "NVO", "JNJ", "MRK", "PFE", "ABBV", "BMY", "AZN"],
+    "의료기기": ["ABT", "MDT", "SYK", "BSX", "ISRG", "EW"],
+    "건강보험": ["UNH", "ELV", "CI", "CVS", "HUM"],
+    "대형 유통": ["WMT", "COST", "TGT", "BJ", "DG"],
+    "주택용품 유통": ["HD", "LOW"],
+    "외식": ["MCD", "SBUX", "CMG", "YUM", "QSR", "DRI"],
+    "음료": ["KO", "PEP", "KDP", "MNST"],
+    "석유 메이저": ["XOM", "CVX", "COP", "SHEL", "BP", "OXY"],
+    "방산·항공우주": ["LMT", "RTX", "NOC", "GD", "LHX", "BA"],
+    "전력·AI 인프라": ["GEV", "VRT", "ETN", "PWR", "CEG", "VST"],
+    "항공사": ["DAL", "UAL", "AAL", "LUV"],
+    "통신": ["T", "VZ", "TMUS"],
+    "빅테크": ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA"],
+}
+
+
+def _curated(key: str, groups: dict):
+    """그 종목이 들어 있는 첫 그룹 (그룹 이름, 종목 목록)."""
+    for name, members in groups.items():
+        if key in members:
+            return name, members
+    return None, []
+
+
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def _info(sym: str) -> dict:
     for _ in range(3):
@@ -55,17 +126,82 @@ def us_peers(industry_key: str, n: int = 10) -> list:
     return []
 
 
-def kr_peers(code: str, listing: pd.DataFrame, n: int = 10) -> list:
-    me = listing[listing["Code"] == code]
-    if me.empty:
+def _near_size(df: pd.DataFrame, key_col: str, me: str, cap_col: str, n: int) -> list:
+    """같은 업종 안에서 업계 대표(시가총액 상위 2개) + 시가총액이 비슷한 기업."""
+    d = df.dropna(subset=[cap_col])
+    d = d[d[cap_col] > 0]
+    if d.empty:
         return []
-    ind = me["Industry"].iloc[0] if "Industry" in me and pd.notna(me["Industry"].iloc[0]) else None
-    if not ind:
-        return []
-    same = listing[(listing["Industry"] == ind)].sort_values("Marcap", ascending=False)
+    top = list(d.nlargest(2, cap_col)[key_col])
+    mine = d.loc[d[key_col] == me, cap_col]
+    if len(mine):
+        lc = np.log(float(mine.iloc[0]))
+        near = d.assign(_dist=(np.log(d[cap_col]) - lc).abs()).nsmallest(n + 1, "_dist")[key_col].tolist()
+    else:
+        near = list(d.nlargest(n, cap_col)[key_col])
+    return list(dict.fromkeys(top + near))[:n + 1]
+
+
+def kr_peers(code: str, listing: pd.DataFrame, n: int = 9):
+    """(야후 심볼 목록, 설명)."""
     from kr import yahoo_symbol
 
-    return [yahoo_symbol(r.Code, r.Market) for r in same.head(n + 1).itertuples()]
+    mk = dict(zip(listing["Code"], listing["Market"]))
+    sym = lambda c: yahoo_symbol(c, mk.get(c, "KOSPI"))  # noqa: E731
+    name, members = _curated(code, PEER_GROUPS_KR)
+    if members:
+        ok = [c for c in members if c in mk]
+        return [sym(c) for c in ok], f"시장에서 함께 비교하는 '{name}' 대표 기업 (증권사 업종 리포트 기준)"
+    try:
+        import sectors
+
+        m, _day = sectors.wics_map()
+        row = m[m["Code"] == code]
+        if len(row):
+            ind = row["Industry"].iloc[0]
+            same = m[m["Industry"] == ind]
+            codes = _near_size(same, "Code", code, "Mcap", n)
+            return [sym(c) for c in codes if c in mk], f"WICS 업종 '{ind}'에서 업계 대표와 시가총액이 비슷한 기업"
+    except Exception:  # noqa: BLE001
+        pass
+    me = listing[listing["Code"] == code]
+    if me.empty or "Industry" not in listing:
+        return [], ""
+    ind = me["Industry"].iloc[0]
+    if not isinstance(ind, str) or not ind or "기업부" in ind:
+        return [], ""
+    same = listing[listing["Industry"] == ind]
+    codes = _near_size(same, "Code", code, "Marcap", n)
+    return [sym(c) for c in codes], f"KRX 업종 '{ind}'에서 시가총액이 비슷한 기업"
+
+
+def us_peer_list(ticker: str, info: dict, n: int = 9):
+    """(심볼 목록, 설명)."""
+    t = ticker.upper().replace("-", ".")
+    name, members = _curated(t, {k: [x.replace("-", ".") for x in v] for k, v in PEER_GROUPS_US.items()})
+    if members:
+        return [x.replace(".", "-") for x in members], f"시장에서 함께 비교하는 '{name}' 대표 기업 (증권사 업종 리포트 기준)"
+    try:
+        import sectors
+
+        sp = sectors.sp500_list()
+        row = sp[sp["key"] == t]
+        if len(row):
+            ind = row["Industry"].iloc[0]
+            same = sp[sp["Industry"] == ind].copy()
+            if len(same) >= 3:
+                try:
+                    q = sectors.nasdaq_snapshot()
+                    same = same.merge(q[["key", "Marcap"]], on="key", how="left")
+                except Exception:  # noqa: BLE001
+                    same["Marcap"] = 1.0
+                keys = _near_size(same.fillna({"Marcap": 1.0}), "key", t, "Marcap", n)
+                return [k.replace(".", "-") for k in keys], f"S&P 500 GICS 세부 업종 '{ind}'에서 시가총액이 비슷한 기업"
+    except Exception:  # noqa: BLE001
+        pass
+    ik = info.get("industryKey")
+    peers = us_peers(ik) if ik else []
+    return peers, (f"Yahoo 산업 분류 '{info.get('industry') or ik}' 대표 기업" if peers else "")
 
 
 def _val(info: dict, key: str, kind: str):
@@ -125,15 +261,11 @@ def render_peers(ticker: str, R: dict, domestic: bool = False, code: str | None 
         from kr import load_krx
 
         listing = load_krx()
-        peers = kr_peers(code, listing)
-        if peers:
-            ind = listing.loc[listing["Code"] == code, "Industry"]
-            st.caption(f"KRX 업종 '{ind.iloc[0] if len(ind) else '-'}' 시가총액 상위 기업")
+        peers, why = kr_peers(code, listing)
     else:
-        ik = info.get("industryKey")
-        peers = us_peers(ik) if ik else []
-        if peers:
-            st.caption(f"Yahoo 산업 분류 '{info.get('industry') or ik}' 대표 기업")
+        peers, why = us_peer_list(ticker, info)
+    if peers and why:
+        st.caption(why + " · 아래 칸에 직접 입력해 바꿀 수 있습니다")
     k = f"pe_{ticker}"
     extra = st.text_input("비교 종목 추가·변경 (쉼표로 구분, 비우면 자동)", key=k + "_x",
                           placeholder="예: MSFT, GOOGL" if not domestic else "예: 000660, 005380")
