@@ -66,8 +66,14 @@ def us_universe() -> pd.DataFrame:
     cols = [c for c in ("Symbol", "Name", "Sector", "Industry") if c in d.columns]
     d = d[cols].dropna(subset=["Symbol"]).copy()
     d["Symbol"] = d["Symbol"].astype(str).str.replace(".", "-", regex=False)  # BRK.B → BRK-B (Yahoo 표기)
+    from sectors import GICS_IND_KO, GICS_KO
+
     if "Sector" not in d.columns:
-        d["Sector"] = "기타"
+        d["Sector"] = "분류 없음"
+    d["Sector"] = d["Sector"].map(lambda x: GICS_KO.get(str(x), str(x) if x == x else "분류 없음"))
+    if "Industry" not in d.columns:
+        d["Industry"] = d["Sector"]
+    d["Industry"] = d["Industry"].map(lambda x: GICS_IND_KO.get(str(x), str(x)))
     return d.reset_index(drop=True)
 
 
@@ -150,7 +156,10 @@ def _kr_universe(top_n: int) -> pd.DataFrame:
         s = s.merge(_sector_map(), on="Code", how="left")
     except Exception:  # noqa: BLE001
         s["Sector"] = np.nan
-    s["Sector"] = s["Sector"].fillna("기타")
+    s["Sector"] = s["Sector"].fillna("분류 없음")
+    if "Industry" not in s.columns:
+        s["Industry"] = s["Sector"]
+    s["Industry"] = s["Industry"].fillna(s["Sector"])
     s = s.dropna(subset=["Marcap"]).sort_values("Marcap", ascending=False)
     s["Symbol"] = s["Code"] + np.where(s["Market"].astype(str).str.upper().str.startswith("KOSPI"), ".KS", ".KQ")
     return s.head(top_n)
@@ -203,7 +212,14 @@ def render_screener() -> None:
 
     with ui.popover("기본 조건 (시장 · 업종 · 규모)", icon=":material/filter_alt:"):
         secs = sorted(U["Sector"].dropna().astype(str).unique())
-        sec_sel = st.multiselect("업종", secs, key=f"sc_sec_{'kr' if domestic else 'us'}", placeholder="전체 업종")
+        for _k in (f"sc_sec_{'kr' if domestic else 'us'}", f"sc_ind_{'kr' if domestic else 'us'}"):  # 예전 분류 이름 정리
+            if isinstance(st.session_state.get(_k), list):
+                _ok = set(secs) if "_sec_" in _k else set(U["Industry"].dropna().astype(str)) if "Industry" in U.columns else set()
+                st.session_state[_k] = [x for x in st.session_state[_k] if x in _ok]
+        sec_sel = st.multiselect("섹터", secs, key=f"sc_sec_{'kr' if domestic else 'us'}", placeholder="전체 섹터")
+        pool = U[U["Sector"].astype(str).isin(sec_sel)] if sec_sel else U
+        inds = sorted(pool["Industry"].dropna().astype(str).unique()) if "Industry" in U.columns else []
+        ind_sel = st.multiselect("업종", inds, key=f"sc_ind_{'kr' if domestic else 'us'}", placeholder="전체 업종")
         if domestic:
             mk_sel = st.multiselect("시장 구분", ["KOSPI", "KOSDAQ"], default=["KOSPI", "KOSDAQ"], key="sc_mk")
             cap_min = st.number_input("시가총액 최소 (억원)", value=1000, step=500, min_value=0, key="sc_capmin")
@@ -238,6 +254,8 @@ def render_screener() -> None:
     D = U.copy()
     if sec_sel:
         D = D[D["Sector"].astype(str).isin(sec_sel)]
+    if ind_sel:
+        D = D[D["Industry"].astype(str).isin(ind_sel)]
     if domestic:
         if mk_sel:
             D = D[D["Market"].astype(str).str.upper().str.startswith(tuple(mk_sel))]
@@ -272,12 +290,12 @@ def render_screener() -> None:
         return
     if domestic:
         out = pd.DataFrame({
-            "종목": D["Name"], "코드": D["Code"], "업종": D["Sector"],
+            "종목": D["Name"], "코드": D["Code"], "섹터": D["Sector"], "업종": D["Industry"] if "Industry" in D.columns else D["Sector"],
             "현재가": D["Close"], "등락률(%)": D["ChangesRatio"], "시가총액(억원)": D["Marcap"] / 1e8,
             "거래대금(억원)": D["Amount"] / 1e8 if "Amount" in D.columns else np.nan,
         })
     else:
-        out = pd.DataFrame({"종목": D["Name"], "코드": D["Symbol"], "업종": D["Sector"], "현재가": D.get("last", np.nan)})
+        out = pd.DataFrame({"종목": D["Name"], "코드": D["Symbol"], "섹터": D["Sector"], "업종": D["Industry"] if "Industry" in D.columns else D["Sector"], "현재가": D.get("last", np.nan)})
     if not T.empty:
         out = out.assign(**{"1개월(%)": D["r1m"], "3개월(%)": D["r3m"], "1년(%)": D["r1y"], f"RSI({rsi_n})": D["rsi"],
                             f"{ma_s}일선 이격(%)": D["gap_s"], "52주 고점 대비(%)": D["dd52"], "거래량 배수": D["vol_ratio"],
