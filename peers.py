@@ -32,7 +32,8 @@ METRICS = {
 GOOD_LOW_SKIP_NEG = {"PER", "선행 PER", "PBR", "PSR", "EV/EBITDA"}  # 음수(적자)는 순위에서 뺌
 
 
-# 시장에서 함께 비교하는 경쟁사 그룹 (증권사 산업 리포트·업종 분석 기준, 2026년). 종목코드 기준.
+# 시장에서 함께 비교하는 경쟁사 그룹 (증권사 산업 리포트·업종 분석 기준, 2026년). 종목코드 기준
+# (숫자 6자리가 아닌 항목은 해외 종목의 야후 심볼 그대로).
 PEER_GROUPS_KR = {
     "방산": ["012450", "064350", "079550", "047810", "272210", "103140"],
     "조선": ["009540", "329180", "042660", "010140", "443060"],
@@ -41,7 +42,7 @@ PEER_GROUPS_KR = {
     "원전": ["034020", "052690", "051600", "083650", "032820", "015760"],
     "2차전지 셀": ["373220", "006400", "096770"],
     "2차전지 소재": ["247540", "086520", "003670", "066970", "348370", "005070", "450080"],
-    "메모리 반도체": ["005930", "000660"],
+    "메모리 반도체": ["005930", "000660", "MU", "SNDK", "285A.T", "WDC"],  # 국내 2사뿐이라 해외 메모리 경쟁사를 같이 본다
     "반도체 장비·부품": ["042700", "036930", "240810", "039030", "403870", "058470", "095340", "089030", "319660", "357780"],
     "인터넷 플랫폼": ["035420", "035720", "377300", "323410"],
     "게임": ["259960", "251270", "036570", "263750", "462870", "293490", "225570"],
@@ -65,7 +66,7 @@ PEER_GROUPS_KR = {
 }
 PEER_GROUPS_US = {
     "AI·GPU 반도체": ["NVDA", "AMD", "AVGO", "INTC", "QCOM", "MRVL", "ARM", "TSM"],
-    "메모리·스토리지": ["MU", "WDC", "STX", "SNDK"],
+    "메모리·스토리지": ["MU", "SNDK", "WDC", "STX", "005930.KS", "000660.KS"],
     "반도체 장비": ["AMAT", "LRCX", "KLAC", "ASML", "TER"],
     "클라우드·기업용 소프트웨어": ["ORCL", "CRM", "NOW", "ADBE", "SAP", "INTU", "WDAY", "SNOW"],
     "데이터·AI 소프트웨어": ["PLTR", "SNOW", "DDOG", "MDB", "AI"],
@@ -101,17 +102,83 @@ def _curated(key: str, groups: dict):
     return None, []
 
 
+def _pos(x):
+    try:
+        x = float(x)
+    except Exception:  # noqa: BLE001
+        return None
+    return x if np.isfinite(x) and x > 0 else None
+
+
+def _first_row(df, names):
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    for n in names:
+        if n in df.index:
+            return pd.to_numeric(df.loc[n], errors="coerce")
+    return None
+
+
+def _fill_pe_pb(tk, d: dict) -> dict:
+    """Yahoo info에 PER·PBR이 비어 있으면(국내 종목에서 흔함) 직접 계산:
+    PER = 현재가 ÷ EPS → 시가총액 ÷ 순이익(info) → 시가총액 ÷ 최근 4개 분기 순이익 합,
+    PBR = 현재가 ÷ 주당순자산 → 시가총액 ÷ 최근 분기 자기자본."""
+    px = _pos(d.get("currentPrice")) or _pos(d.get("regularMarketPrice"))
+    mcap = _pos(d.get("marketCap"))
+    if not _pos(d.get("trailingPE")):
+        eps, ni = _pos(d.get("trailingEps")), _pos(d.get("netIncomeToCommon"))
+        pe = px / eps if px and eps else (mcap / ni if mcap and ni else None)
+        if pe is None and mcap:
+            try:
+                r = _first_row(tk.quarterly_income_stmt, ["Net Income Common Stockholders", "Net Income"])
+                r = r.dropna() if r is not None else None
+                if r is not None and len(r) >= 4 and r.iloc[:4].sum() > 0:
+                    pe = mcap / float(r.iloc[:4].sum())
+            except Exception:  # noqa: BLE001
+                pass
+        d["trailingPE"] = pe
+    if not _pos(d.get("priceToBook")):
+        bv = _pos(d.get("bookValue"))
+        pb = px / bv if px and bv else None
+        if pb is None and mcap:
+            try:
+                r = _first_row(tk.quarterly_balance_sheet, ["Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest"])
+                r = r.dropna() if r is not None else None
+                if r is not None and len(r) and r.iloc[0] > 0:
+                    pb = mcap / float(r.iloc[0])
+            except Exception:  # noqa: BLE001
+                pass
+        d["priceToBook"] = pb
+    return d
+
+
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def _info(sym: str) -> dict:
     for _ in range(3):
         try:
-            d = yf.Ticker(sym).info or {}
+            tk = yf.Ticker(sym)
+            d = tk.info or {}
             if d:
-                return {k: d.get(k) for k in [v[0] for v in METRICS.values()] +
-                        ["shortName", "longName", "marketCap", "currency", "industry", "sector", "industryKey", "currentPrice", "regularMarketPrice"]}
+                d = {k: d.get(k) for k in [v[0] for v in METRICS.values()] +
+                     ["shortName", "longName", "marketCap", "currency", "industry", "sector", "industryKey", "currentPrice", "regularMarketPrice",
+                      "trailingEps", "netIncomeToCommon", "bookValue"]}
+                return _fill_pe_pb(tk, d)
         except Exception:  # noqa: BLE001
             pass
     return {}
+
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def _usd_per(ccy: str) -> float:
+    """1 단위 통화 = ? 달러 (시가총액 정렬용)."""
+    if not ccy or ccy == "USD":
+        return 1.0
+    try:
+        from dcf import load_fx
+
+        return float(load_fx(ccy, "USD") or np.nan)
+    except Exception:  # noqa: BLE001
+        return np.nan
 
 
 @st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
@@ -150,8 +217,8 @@ def kr_peers(code: str, listing: pd.DataFrame, n: int = 9):
     sym = lambda c: yahoo_symbol(c, mk.get(c, "KOSPI"))  # noqa: E731
     name, members = _curated(code, PEER_GROUPS_KR)
     if members:
-        ok = [c for c in members if c in mk]
-        return [sym(c) for c in ok], f"시장에서 함께 비교하는 '{name}' 대표 기업 (증권사 업종 리포트 기준)"
+        out = [sym(c) if c in mk else c for c in members if c in mk or not c.isdigit()]
+        return out, f"시장에서 함께 비교하는 '{name}' 대표 기업 (증권사 업종 리포트 기준)"
     try:
         import sectors
 
@@ -180,7 +247,10 @@ def us_peer_list(ticker: str, info: dict, n: int = 9):
     t = ticker.upper().replace("-", ".")
     name, members = _curated(t, {k: [x.replace("-", ".") for x in v] for k, v in PEER_GROUPS_US.items()})
     if members:
-        return [x.replace(".", "-") for x in members], f"시장에서 함께 비교하는 '{name}' 대표 기업 (증권사 업종 리포트 기준)"
+        import re
+
+        cls = lambda x: x.replace(".", "-") if re.fullmatch(r"[A-Z]+\.[A-Z]", x) else x  # noqa: E731  BRK.B → BRK-B, 005930.KS는 그대로
+        return [cls(x) for x in members], f"시장에서 함께 비교하는 '{name}' 대표 기업 (증권사 업종 리포트 기준)"
     try:
         import sectors
 
@@ -287,9 +357,20 @@ def render_peers(ticker: str, R: dict, domestic: bool = False, code: str | None 
     with st.spinner(f"{len(peers)}개 기업 지표를 불러오는 중..."):
         with ThreadPoolExecutor(max_workers=6) as ex:
             infos = dict(zip(peers, ex.map(_info, peers)))
-    infos = {p: d for p, d in infos.items() if d}
+    infos = {p: dict(d) for p, d in infos.items() if d}
     if ticker not in infos:
-        infos[ticker] = info
+        infos[ticker] = dict(info)
+    try:  # 이 회사의 PER·PBR은 리서치 화면 위쪽 카드와 같은 값(같은 계산)으로 맞춘다
+        from research import _num, _pe_pb
+
+        px = _num(info.get("currentPrice")) or _num(info.get("regularMarketPrice"))
+        pe, pb = _pe_pb(info, px, R.get("_F"), R)
+        if pe:
+            infos[ticker]["trailingPE"] = pe
+        if pb:
+            infos[ticker]["priceToBook"] = pb
+    except Exception:  # noqa: BLE001
+        pass
     krx_names = {}
     if domestic:
         from kr import load_krx
@@ -300,7 +381,9 @@ def render_peers(ticker: str, R: dict, domestic: bool = False, code: str | None 
     label = {p: krx_names.get(p) or d.get("shortName") or p for p, d in infos.items()}
     T = pd.DataFrame({m: {p: _val(d, key, kind) for p, d in infos.items()} for m, (key, kind, _g) in METRICS.items()})
     T["시가총액"] = pd.Series({p: float(d.get("marketCap") or np.nan) for p, d in infos.items()})
-    T = T.sort_values("시가총액", ascending=False)
+    usd = pd.Series({p: T.at[p, "시가총액"] * _usd_per(d.get("currency") or "USD") for p, d in infos.items()})
+    T = T.loc[usd.reindex(T.index).sort_values(ascending=False, na_position="last").index]  # 통화가 섞여도 달러 기준으로 정렬
+    T["_cap_usd"] = usd.reindex(T.index).fillna(T["시가총액"]) if usd.notna().any() else T["시가총액"]
     for m in GOOD_LOW_SKIP_NEG:
         T.loc[T[m] <= 0, m] = np.nan
 
@@ -344,7 +427,7 @@ def render_peers(ticker: str, R: dict, domestic: bool = False, code: str | None 
         return
     xm = c1.selectbox("가로축", num, index=num.index("이익 성장률") if "이익 성장률" in num else 0, key=k + "_sx")
     ym = c2.selectbox("세로축", num, index=num.index("PER") if "PER" in num else 1, key=k + "_sy")
-    d = T[[xm, ym, "시가총액"]].dropna(subset=[xm, ym])
+    d = T[[xm, ym, "_cap_usd"]].rename(columns={"_cap_usd": "시가총액"}).dropna(subset=[xm, ym])
     if len(d) < 2:
         st.caption("두 지표가 모두 있는 기업이 부족합니다.")
         return
