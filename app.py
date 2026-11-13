@@ -59,7 +59,7 @@ st.markdown(
     .block-container { padding-top: 2.5rem !important; }
     .mg { display: grid; gap: 0.5rem 0.6rem; margin: 0.4rem 0 0.8rem 0; }
     .mg-cell { min-width: 0; }
-    .mg-label { font-size: 0.64rem; opacity: 0.75; }
+    .mg-label { font-size: 0.64rem; }
     .mg-value { font-size: clamp(0.72rem, 2.6vw, 0.95rem); font-weight: 500; word-break: keep-all; }
     .mg-delta { font-size: 0.64rem; }
     .mg-delta.up { color: #E5534B; }
@@ -255,9 +255,13 @@ def metric_grid(items: list[tuple], cols: int = 3) -> None:
             cls = "up" if is_up else "down"
             arrow = "▲" if is_up else "▼"
             d = f'<div class="mg-delta {cls}">{arrow} {delta}</div>'
-        cells += f'<div class="mg-cell"><div class="mg-label">{label}</div><div class="mg-value">{value}</div>{d}</div>'
+        from glossary import icon, tip
+
+        cells += f'<div class="mg-cell"><div class="mg-label"><span style="opacity:.75">{label}</span>{icon(tip(label))}</div><div class="mg-value">{value}</div>{d}</div>'
+    from glossary import CSS
+
     st.markdown(
-        f'<div class="mg" style="grid-template-columns: repeat({cols}, minmax(0, 1fr));">{cells}</div>',
+        CSS + f'<div class="mg" style="grid-template-columns: repeat({cols}, minmax(0, 1fr));">{cells}</div>',
         unsafe_allow_html=True,
     )
 
@@ -525,12 +529,7 @@ def risk_grid(k: dict) -> None:
     ], cols=4)
 
 
-RISK_NOTE = (
-    "VaR(Value at Risk) = 하루 동안 해당 신뢰수준에서 넘지 않을 것으로 보는 최대 손실률, "
-    "ES(Expected Shortfall, CVaR) = VaR를 넘는 나쁜 날들의 평균 손실률. 모두 손실을 양수로 표시합니다. "
-    "'과거'는 조회 기간의 실제 일별 수익률 분포(과거 시뮬레이션)에서, '정규분포'는 평균·표준편차만으로 계산합니다. "
-    "조회 기간이 짧으면 특히 99% 값은 최악의 하루 한두 개에 좌우되므로 참고용으로만 보세요."
-)
+RISK_NOTE = "손실은 양수로 표시합니다. 조회 기간이 짧으면 99% 값은 최악의 하루 한두 개에 좌우되므로 참고용으로만 보세요."
 
 
 def capm_grid(c: dict, name: str) -> None:
@@ -551,13 +550,7 @@ def capm_grid(c: dict, name: str) -> None:
 
 
 def capm_note(name: str) -> str:
-    return (
-        f"베타 = 종목(또는 포트폴리오)·{name} 일별 수익률의 공분산 ÷ 지수 분산. "
-        "CAPM 기대수익률 = 무위험수익률 + β × (시장 수익률 − 무위험수익률), 여기서 시장 수익률은 같은 기간 지수의 연환산 평균 수익률(과거 실현값)입니다. "
-        "젠센 알파 = 연환산 수익률 − CAPM 기대수익률. 트레이너 비율 = (연환산 수익률 − 무위험수익률) ÷ β. "
-        "체계적 위험 = |β| × 시장 표준편차, 비체계적 위험 = √(총 분산 − 체계적 분산). "
-        "조회 기간이 짧으면 값이 크게 흔들립니다."
-    )
+    return f"벤치마크: {name} · 조회 기간이 짧으면 값이 크게 흔들립니다."
 
 
 def show_capm(df: pd.DataFrame, rf: float, bench: tuple) -> None:
@@ -618,13 +611,7 @@ def show_stats(df: pd.DataFrame, rf: float, rf_label: str, bench: tuple = None) 
         (f"샤프비율 (무위험 {rf * 100:.2f}%)", "-" if sharpe != sharpe else f"{sharpe:.2f}", None, True),
         ("수익률 표본 수", f"{n:,}일", None, True),
     ], cols=4)
-    st.caption(
-        "일별 종가 기준 단순 수익률로 계산한 과거 통계입니다. "
-        "기대수익률 = 일별 수익률 평균, 연환산은 평균×252 · 표준편차×√252. "
-        "샤프비율 = (연환산 기대수익률 − 무위험수익률) ÷ 연환산 표준편차. "
-        f"무위험수익률: {rf_label}. "
-        "조회 기간이 짧으면 연환산 값이 크게 부풀려질 수 있고, 미래 수익을 보장하지 않습니다."
-    )
+    st.caption(f"일별 종가 기준 과거 통계 · 무위험수익률: {rf_label}")
     if bench:
         show_capm(df, rf, bench)
 
@@ -1103,10 +1090,7 @@ def render_portfolio(listing: pd.DataFrame) -> None:
                       yaxis=dict(title="비중(%)", ticksuffix="%"),
                       legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0))
     st.plotly_chart(bar, use_container_width=True)
-    st.caption(
-        "최대 샤프 = (기대수익률 − 무위험수익률) ÷ 표준편차가 가장 큰 조합(접점 포트폴리오), 공매도 없이 비중 합 100%, "
-        f"종목당 최대 {cap_pct}%. 과거 평균 수익률을 미래 기대수익률로 쓰기 때문에 기간이 짧으면 한두 종목에 비중이 쏠릴 수 있습니다."
-    )
+    st.caption(f"공매도 없이 비중 합 100%, 종목당 최대 {cap_pct}%. 기간이 짧으면 한두 종목에 비중이 쏠릴 수 있습니다.")
 
     # ---- 포트폴리오 수치 비교
     st.subheader("포트폴리오 비교")

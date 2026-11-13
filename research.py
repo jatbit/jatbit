@@ -1,5 +1,6 @@
 """기업 리서치 탭 (해외 종목): Yahoo Finance(yfinance)에서 기업 개요·밸류에이션·수익성·재무제표·애널리스트 의견·일정·뉴스를 모아 보여준다."""
 import html
+import re
 import time
 from datetime import datetime
 
@@ -254,7 +255,7 @@ except Exception:  # noqa: BLE001
     _VAL = {}
 
 
-def _combo_chart(sec, R: dict, ticker: str, px, n_eps) -> None:
+def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") -> None:
     """연간 재무비율(SEC)과 일별 주가·PER 지표를 골라서 한 그래프에 겹쳐 그린다."""
     rt = compute_ratios(sec, R.get("hist"), R.get("splits")) if sec is not None else None
     avail = [k for k in RATIOS if rt is not None and k in rt.index and rt.loc[k].notna().sum() >= 2]
@@ -269,7 +270,14 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps) -> None:
     if isinstance(hist, pd.Series) and len(hist) and _VAL:
         try:
             from valuation import daily_valuation, load_quarterly
-            dv = daily_valuation(load_quarterly(ticker), hist, R.get("splits"))
+            if src == "SEC 10-K":
+                dv = daily_valuation(load_quarterly(ticker), hist, R.get("splits"))
+            elif sec is not None:  # 국내·SEC 미등록 종목: 연간 재무제표를 공시 시점부터 반영 (다음 연간 공시까지 유지)
+                from kr import annual_quarterly_dict
+                info = R.get("info") or {}
+                dv = daily_valuation(annual_quarterly_dict(sec, _num(info.get("sharesOutstanding"))), hist, R.get("splits"), stale=470)
+            else:
+                raise RuntimeError("재무제표 없음")
             d_avail += [k for k in _VAL if k in dv and dv[k].notna().sum() > 20]
         except Exception as e:  # noqa: BLE001
             dv, dv_err = None, str(e)
@@ -295,21 +303,10 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps) -> None:
                             format_func=_label)
     sel = [k for k in chosen if k in a_avail]
     dsel = [k for k in chosen if k in d_avail]
-    groups = {}
-    for k in a_avail:
-        groups.setdefault(RATIOS[k][1], []).append(k)
-    cap = ["일별: 주가, " + ", ".join(val_daily)] if val_daily else []
-    cap += [f"연간 {g}: {', '.join(v)}" for g, v in groups.items()]
-    if cap:
-        st.caption(" · ".join(cap))
-    if dv is not None:
-        st.caption("일별 밸류에이션: SEC 분기 공시(10-Q·10-K)의 최근 12개월 실적·분기 말 재무상태표를 '공시 제출일'부터 반영하고, "
-                   "매일 종가 × 주식 수(액면분할 보정)로 시가총액을 계산합니다. 적자·음수 분모인 날은 비워 둡니다. "
-                   "연간 재무비율은 SEC 10-K 회계연도 말 값입니다.")
-    elif dv_err:
-        st.caption(f"일별 밸류에이션 배수는 SEC 분기 공시가 있는 미국 기업만 지원합니다 ({dv_err}). PBR·PSR은 연간 값으로 보여줍니다.")
+    if dv is None and dv_err:
+        st.caption(f"일별 밸류에이션을 계산하지 못해 연간 값으로 보여줍니다 ({dv_err}).")
     elif sec is None:
-        st.caption("연간 재무비율은 SEC 10개년 재무제표가 있는 미국 기업만 지원합니다.")
+        st.caption("연간 재무제표가 없어 재무비율을 그릴 수 없습니다.")
     mean_lines = st.checkbox("일별 지표에 기간 평균선 표시", value=False, key=f"rs_daily_mean_{ticker}") if dv is not None else False
     if not sel and not dsel:
         st.info("그릴 항목을 하나 이상 고르세요.")
@@ -323,7 +320,8 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps) -> None:
         units.append({"$": "$", "%": "%"}.get(DAILY[k], "x"))
     order = [u for u in ("%", "x", "$") if u in units]
     axis_of = {u: ("y" if i == 0 else f"y{i + 1}") for i, u in enumerate(order)}
-    title_of = {"%": "%", "x": "배·회", "$": "주가($)"}
+    import money
+    title_of = {"%": "%", "x": "배·회", "$": f"주가({money.sym()})"}
 
     # 일별 지표 시작일을 재무비율 기간에 맞춘다
     start = None
@@ -416,7 +414,7 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps) -> None:
     fig.update_layout(**lay)
     st.plotly_chart(fig, use_container_width=True)
     axes_txt = ", ".join(f"{title_of[u]} → {'왼쪽' if i == 0 else ('오른쪽' if i == 1 else '오른쪽 바깥')} 축" for i, u in enumerate(order))
-    st.caption(f"축: {axes_txt}. 재무비율은 회계연도 말 시점의 점(SEC 10-K), 주가·PER·밸류에이션 배수는 일별 선입니다.")
+    st.caption(f"축: {axes_txt}")
 
     if dv is not None:
         from valuation import summary_table
@@ -431,11 +429,8 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps) -> None:
                         v = r[c]
                         show.at[i, c] = "-" if pd.isna(v) else (f"{v:.2f}%" if unit == "%" else f"{v:.2f}배")
                     show.at[i, "현재 백분위"] = f"{r['현재 백분위']:.0f}%"
-                st.dataframe(show, use_container_width=True, hide_index=True)
-                mc = dv["시가총액"].dropna()
-                st.caption((f"현재 시가총액(공시 주식 수 기준) {mc.iloc[-1] / 1e9:,.1f}십억 달러. " if len(mc) else "")
-                           + "현재 백분위 = 조회 기간 중 지금보다 낮았던 날의 비율. 배수는 높을수록(수익률은 낮을수록) 과거 대비 비싸다는 뜻입니다. "
-                           + "평균은 그 기간 전체 데이터가 있을 때만 표시합니다.")
+                from glossary import table_html
+                st.markdown(table_html(show.values.tolist(), list(show.columns)), unsafe_allow_html=True)
 
     if sel:
         tbl = rt.loc[sel].copy()
@@ -443,16 +438,8 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps) -> None:
         tbl = tbl.apply(lambda row: [("-" if pd.isna(v) else (f"{v:.1f}%" if RATIOS[row.name][0] == "%" else f"{v:.2f}"))
                                      for v in row], axis=1, result_type="expand")
         tbl.columns = cols
-        st.dataframe(tbl, use_container_width=True)
-    notes = ["재무비율: ROE·ROA·총자산회전율은 전년 말과 올해 말의 평균 잔액 기준, 성장률은 전년 대비, "
-             "PER·PBR·PSR은 회계연도 말 주가 × 희석 주식 수(액면분할 보정)로 계산. 회사가 공시하지 않은 항목은 빈칸입니다."]
-    if any(k in dsel for k in ("12M 트레일링 PER", "12M 선행 PER (사후 실현 EPS)", "트레일링 PER 평균 ±1σ 밴드")):
-        notes.append("12M 트레일링 PER = 주가 ÷ 그날까지 발표된 최근 4개 분기 EPS 합. 과거의 선행 PER 컨센서스는 무료로 받을 수 없어, "
-                     "'선행 PER (사후 실현 EPS)'는 그 뒤 실제로 발표된 4개 분기 EPS로 계산한 값입니다(최근 1년은 계산 불가). "
-                     "분기 EPS는 Yahoo의 발표 EPS(액면분할 반영)라 공시 순이익 기준 EPS와 다를 수 있습니다.")
-    if "현재 12M 선행 PER (컨센서스)" in dsel:
-        notes.append("별 표시는 오늘의 애널리스트 컨센서스로 계산한 12M 선행(NTM) PER입니다.")
-    st.caption(" ".join(notes))
+        from glossary import table_html
+        st.markdown(table_html([[k] + list(r) for k, r in zip(tbl.index, tbl.values.tolist())], ["재무비율"] + cols), unsafe_allow_html=True)
 
 
 
@@ -495,6 +482,9 @@ def big(x, cur="$"):
     v = _num(x)
     if v is None:
         return "-"
+    if cur == "₩":
+        import money
+        return money.big(v, "KRW")
     a = abs(v)
     for unit, d in (("T", 1e12), ("B", 1e9), ("M", 1e6), ("K", 1e3)):
         if a >= d:
@@ -584,40 +574,114 @@ def _send_to_options(tk):
     st.session_state["opt_ticker"] = tk
 
 
+def _financials(ticker: str, R: dict, domestic: bool, code: str | None):
+    """연간 재무제표 (행: 매출·영업이익… / 열: 회계연도 말)와 출처. 미국: SEC 10-K → Yahoo, 국내: DART → Yahoo."""
+    import kr
+
+    errs = []
+    if domestic:
+        key = kr.dart_key()
+        if key:
+            try:
+                F = kr.load_dart_financials(code, key)
+                if F.shape[1] >= 2:
+                    return F, "DART 사업보고서", errs
+            except Exception as e:  # noqa: BLE001
+                errs.append(f"DART: {e}")
+    else:
+        try:
+            F = load_sec_financials(ticker)
+            if F.shape[1] >= 2:
+                return F, "SEC 10-K", errs
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"SEC: {e}")
+    info = R.get("info") or {}
+    fx = 1.0
+    fin_cur, px_cur = info.get("financialCurrency") or info.get("currency"), info.get("currency")
+    if fin_cur and px_cur and fin_cur != px_cur:
+        try:
+            from dcf import load_fx
+
+            fx = load_fx(fin_cur, px_cur) or 1.0
+        except Exception:  # noqa: BLE001
+            fx = 1.0
+    F = kr.yahoo_frame(R, fx)
+    return F, "Yahoo", errs
+
+
 def render_research() -> None:
     if yf is None:
         st.error("yfinance 패키지가 설치되지 않았습니다.")
         return
-    st.caption("미국 상장 종목·ETF의 기업 정보를 Yahoo Finance에서 모아 보여줍니다 (일부 항목은 종목에 따라 비어 있을 수 있음). 국내 종목은 다음 단계에서 지원 예정입니다.")
+    import kr
+    import money
 
     res = st.session_state.get("pf_opt_result") or {}
-    pf = [it["code"] for it in res.get("items", []) if not it.get("domestic") and is_us_ticker(it["code"])]
-    presets = list(dict.fromkeys(pf + OPT_PRESETS))[:10]
+    pf = [it["code"] if not it.get("domestic") else it["name"] for it in res.get("items", [])
+          if (not it.get("domestic") and is_us_ticker(it["code"])) or (it.get("domestic") and re.fullmatch(r"\d{6}", str(it["code"])))]
+    presets = list(dict.fromkeys(pf + OPT_PRESETS[:6] + ["삼성전자", "SK하이닉스"]))[:12]
     if hasattr(st, "pills"):
         st.pills("빠른 선택", presets, key="rs_pill",
                  on_change=lambda: _set_research(st.session_state.get("rs_pill")) if st.session_state.get("rs_pill") else None)
-    raw = st.text_input("미국 티커 (예: AAPL, MSFT, NVDA)", key="rs_ticker", placeholder="AAPL")
-    ticker = (raw or "").strip().upper()
-    if not ticker:
-        st.info("티커를 입력하거나 위에서 고르세요.")
+    raw = st.text_input("종목 (미국 티커 또는 국내 종목명·코드)", key="rs_ticker", placeholder="AAPL, 삼성전자, 005930")
+    with st.expander("OpenDART API 키 (국내 종목 10년 재무제표·지분 공시용, 선택)"):
+        st.text_input("API 키", key="dart_key_input", type="password",
+                      help="opendart.fss.or.kr에서 무료로 발급. 이 창을 닫으면 지워집니다. 계속 쓰려면 Streamlit 앱 설정의 Secrets에 DART_API_KEY로 넣으세요.")
+        st.caption("Streamlit Secrets에 등록된 키가 있으면 비워 둬도 됩니다." if kr.dart_key() else "키가 없으면 Yahoo 재무제표(약 4년)를 씁니다.")
+    q = (raw or "").strip()
+    if not q:
+        st.info("티커나 종목명을 입력하거나 위에서 고르세요.")
         return
-    if not is_us_ticker(ticker):
-        st.warning("지금은 미국 종목만 지원합니다. 미국 티커를 입력해 주세요.")
-        return
+    domestic, code, kname = False, None, None
+    if kr.is_kr_query(q):
+        try:
+            cands = kr.resolve(q)
+        except Exception as e:  # noqa: BLE001
+            st.error(f"국내 종목 목록을 불러오지 못했습니다: {e}")
+            return
+        if not cands:
+            st.warning(f"'{q}'에 해당하는 국내 상장 종목을 찾지 못했습니다.")
+            return
+        if len(cands) > 1 and cands[0]["name"] != q and not re.fullmatch(r"\d{6}", q):
+            labels = [f"{c['name']} ({c['code']}, {c['market']})" for c in cands]
+            i = st.selectbox("종목 선택", range(len(cands)), format_func=lambda j: labels[j], key=f"rs_pick_{q}")
+            c = cands[i]
+        else:
+            c = cands[0]
+        domestic, code, kname, ticker = True, c["code"], c["name"], c["yahoo"]
+    else:
+        ticker = q.upper()
+        if not is_us_ticker(ticker):
+            st.warning("미국 티커 또는 국내 종목명·6자리 코드를 입력해 주세요.")
+            return
     try:
         R = load_research(ticker)
     except Exception as e:  # noqa: BLE001
-        st.error(f"{ticker} 정보를 불러오지 못했습니다: {e}. 잠시 후 다시 시도해 주세요.")
-        return
+        if domestic and ticker.endswith(".KS"):  # 코스피·코스닥 구분이 틀린 경우 다른 쪽으로 다시 시도
+            try:
+                ticker = ticker.replace(".KS", ".KQ")
+                R = load_research(ticker)
+            except Exception:  # noqa: BLE001
+                st.error(f"{kname} 정보를 불러오지 못했습니다: {e}. 잠시 후 다시 시도해 주세요.")
+                return
+        else:
+            st.error(f"{ticker} 정보를 불러오지 못했습니다: {e}. 잠시 후 다시 시도해 주세요.")
+            return
     info = R["info"]
-    cur = "$" if (info.get("currency") or "USD") == "USD" else ""
+    ccy = info.get("currency") or ("KRW" if domestic else "USD")
+    money.set_cur(ccy)
+    cur = "$" if ccy == "USD" else ("₩" if ccy == "KRW" else "")
 
     # ---- 1. 개요
-    name = info.get("longName") or info.get("shortName") or ticker
-    st.subheader(f"{name} ({ticker})")
-    meta = [x for x in [info.get("sector"), info.get("industry"), info.get("country"),
-                        f"직원 {int(info['fullTimeEmployees']):,}명" if _num(info.get("fullTimeEmployees")) else None,
-                        info.get("exchange")] if x]
+    name = kname or info.get("longName") or info.get("shortName") or ticker
+    st.subheader(f"{name} ({code or ticker})")
+    if domestic:
+        meta = [c.get("market"), c.get("sector") or info.get("sector"), c.get("industry") or info.get("industry"),
+                f"직원 {int(info['fullTimeEmployees']):,}명" if _num(info.get("fullTimeEmployees")) else None]
+    else:
+        meta = [info.get("sector"), info.get("industry"), info.get("country"),
+                f"직원 {int(info['fullTimeEmployees']):,}명" if _num(info.get("fullTimeEmployees")) else None, info.get("exchange")]
+    meta = [x for x in meta if x]
     st.caption(" · ".join(map(str, meta)) + (f" · [홈페이지]({info['website']})" if info.get("website") else ""))
     ko = st.toggle("한국어 번역 (Google 자동 번역)", value=True, key="rs_ko")
     summary = info.get("longBusinessSummary")
@@ -626,7 +690,6 @@ def render_research() -> None:
         with st.expander("사업 설명", expanded=True):
             if tr:
                 st.write(tr.replace("$", "\\$"))
-                st.caption("자동 번역이라 고유명사·전문용어가 어색할 수 있습니다.")
             elif ko:
                 st.caption("번역에 실패해 영문 원문을 보여줍니다.")
             if not tr:
@@ -634,30 +697,41 @@ def render_research() -> None:
         if tr:
             with st.expander("사업 설명 (영문 원문)"):
                 st.write(summary.replace("$", "\\$"))
-    st.button("이 종목을 '옵션 조회' 탭에 설정", key="rs_to_opt", on_click=_send_to_options, args=(ticker,))
+    if not domestic:
+        st.button("이 종목을 '옵션 조회' 탭에 설정", key="rs_to_opt", on_click=_send_to_options, args=(ticker,))
     from news import render_latest_news
-    render_latest_news(ticker, info.get("shortName") or name, R.get("news") or [], ko, translate_ko)
+    render_latest_news(code or ticker, kname or info.get("shortName") or name, R.get("news") or [], ko, translate_ko,
+                       lang="ko" if domestic else "en")
 
-    tab_main, tab_dcf, tab_cr, tab_ins = st.tabs(["개요·재무", "DCF 가치평가", "신용위험·회사채", "내부자 거래·지분 구조"])
-    _sec = None
-    try:
-        _sec = load_sec_financials(ticker)
-    except Exception:  # noqa: BLE001
-        _sec = None
-    with tab_dcf:
+    F, src, ferr = _financials(ticker, R, domestic, code)
+    if src == "Yahoo" and ferr and not domestic:
+        st.caption("SEC 10개년 재무제표가 없어 Yahoo 재무제표(약 4년)를 씁니다.")
+    tabs = st.tabs(["개요·재무", "동종업계 비교", "실적·추정치", "DCF 가치평가", "신용위험·회사채", "내부자 거래·지분 구조"])
+    with tabs[0]:
+        _render_main(ticker, R, info, cur, ko, F, src, domestic)
+    with tabs[1]:
+        from peers import render_peers
+        render_peers(ticker, R, domestic, code)
+    with tabs[2]:
+        from earnings import render_earnings
+        render_earnings(ticker, R, domestic)
+    with tabs[3]:
         from dcf import render_dcf
-        render_dcf(ticker, R, _sec)
-    with tab_cr:
+        render_dcf(ticker, R, F, src, domestic)
+    with tabs[4]:
         from credit import render_credit
-        render_credit(ticker, R, _sec)
-    with tab_ins:
-        from insider import render_insider
-        render_insider(ticker, R)
-    with tab_main:
-        _render_main(ticker, R, info, cur, ko)
+        render_credit(ticker, R, F, domestic)
+    with tabs[5]:
+        if domestic:
+            kr.render_kr_ownership(code, R)
+        else:
+            from insider import render_insider
+            render_insider(ticker, R)
 
 
-def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool) -> None:
+def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool, F=None, src: str = "SEC 10-K", domestic: bool = False) -> None:
+    import money
+
     # ---- 2. 주가·밸류에이션
     px = _num(info.get("currentPrice")) or _num(info.get("regularMarketPrice"))
     lo52, hi52 = _num(info.get("fiftyTwoWeekLow")), _num(info.get("fiftyTwoWeekHigh"))
@@ -670,26 +744,20 @@ def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool) -> None:
         e0, e1, w, fy_end = n_info
         which = min(((abs((fwd_eps or 0) - e0), "이번 회계연도"), (abs((fwd_eps or 0) - e1), "다음 회계연도")))[1] if fwd_eps else "?"
         fwd_note += f" ({fwd_eps:.2f}, {which} 추정치 기준)" if fwd_eps else ""
-    mgrid([("현재가", f"{cur}{px:,.2f}" if px else "-"),
+    mgrid([("현재가", money.price(px) if px else "-"),
            ("시가총액", big(info.get("marketCap"), cur)),
            ("기업가치(EV)", big(info.get("enterpriseValue"), cur)),
            ("52주 범위", f"{lo52:,.2f} ~ {hi52:,.2f}" if lo52 and hi52 else "-",
             f"현재가는 52주 범위의 {pos52 * 100:.0f}% 위치" if pos52 is not None else ""),
            ("PER (최근 12개월)", ratio(info.get("trailingPE"), 1)),
-           ("선행 PER (Yahoo)", ratio(info.get("forwardPE"), 1), fwd_note),
-           ("12M 선행 PER (NTM)", ratio(px / n_eps, 1) if px and n_eps and n_eps > 0 else "-",
-            f"현재가 ÷ 향후 12개월 EPS {n_eps:.2f} (이번 회계연도 {n_info[0]:.2f} × {n_info[2]:.2f} + 다음 회계연도 {n_info[1]:.2f} × {1 - n_info[2]:.2f})" if n_eps else "추정치 없음"),
+           ("선행 PER (Yahoo)", ratio(info.get("forwardPE"), 1), f"{which} 추정치 기준" if n_info and fwd_eps else ""),
+           ("12M 선행 PER (NTM)", ratio(px / n_eps, 1) if px and n_eps and n_eps > 0 else "-"),
            ("PBR", ratio(info.get("priceToBook"))),
            ("EV/EBITDA", ratio(info.get("enterpriseToEbitda"), 1)),
            ("PEG", ratio(info.get("trailingPegRatio") or info.get("pegRatio"))),
            ("PSR", ratio(info.get("priceToSalesTrailing12Months"))),
            ("배당수익률", pct(_div_yield(info), 2)),
            ("베타", ratio(info.get("beta")))])
-    if n_info:
-        st.caption(f"선행 PER(Yahoo)은 현재가 ÷ Yahoo forwardEps({fwd_eps:.2f})이며, 이 값은 {which} EPS 컨센서스"
-                   f"({n_info[0] if which == '이번 회계연도' else n_info[1]:.2f})에 가장 가깝습니다. 즉 '향후 12개월'이 아니라 회계연도 기준입니다. 12M 선행 PER(NTM)은 이번 회계연도({n_info[3]:%Y-%m} 종료) 남은 비중 {n_info[2]:.0%}만큼 "
-                   f"이번 회계연도 EPS {n_info[0]:.2f}, 나머지는 다음 회계연도 EPS {n_info[1]:.2f}를 섞어 향후 12개월 EPS {n_eps:.2f}로 계산했습니다."
-                   if fwd_eps else "12M 선행 PER(NTM)은 이번·다음 회계연도 EPS 컨센서스를 남은 기간 비율로 섞은 향후 12개월 EPS 기준입니다.")
 
     # ---- 3. 수익성·성장·재무건전성
     st.markdown("##### 수익성 · 성장 · 재무건전성")
@@ -701,7 +769,7 @@ def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool) -> None:
            ("순이익률", pct(info.get("profitMargins"))),
            ("ROE", pct(info.get("returnOnEquity"))),
            ("ROA", pct(info.get("returnOnAssets"))),
-           ("부채비율(D/E)", f"{de:.0f}%" if de is not None else "-", "총부채 ÷ 자기자본 (Yahoo는 % 단위로 제공)"),
+           ("부채비율(D/E)", f"{de:.0f}%" if de is not None else "-"),
            ("현금성 자산", big(info.get("totalCash"), cur)),
            ("총차입금", big(info.get("totalDebt"), cur)),
            ("잉여현금흐름(FCF)", big(info.get("freeCashflow"), cur)),
@@ -713,12 +781,11 @@ def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool) -> None:
     mean_t = _num(tg.get("mean")) or _num(info.get("targetMeanPrice"))
     up = (mean_t / px - 1) if mean_t and px else None
     rec = info.get("recommendationKey") or "none"
-    mgrid([("목표주가 평균", f"{cur}{mean_t:,.2f}" if mean_t else "-"),
-           ("상승 여력", pct(up), "목표주가 평균 ÷ 현재가 − 1"),
+    mgrid([("목표주가 평균", money.price(mean_t) if mean_t else "-"),
+           ("상승 여력", pct(up)),
            ("목표주가 범위", f"{_num(tg.get('low')) or _num(info.get('targetLowPrice')) or 0:,.0f} ~ "
                          f"{_num(tg.get('high')) or _num(info.get('targetHighPrice')) or 0:,.0f}" if mean_t else "-"),
-           ("투자의견", f"{REC_KO.get(rec, rec)} ({ratio(info.get('recommendationMean'), 2)})",
-            "1=적극 매수 … 5=매도"),
+           ("투자의견", f"{REC_KO.get(rec, rec)} ({ratio(info.get('recommendationMean'), 2)})"),
            ("의견 수", f"{int(info['numberOfAnalystOpinions'])}명" if _num(info.get("numberOfAnalystOpinions")) else "-")])
     recs = R["recs"]
     if isinstance(recs, pd.DataFrame) and not recs.empty and {"strongBuy", "buy", "hold", "sell", "strongSell"} <= set(recs.columns):
@@ -736,44 +803,14 @@ def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool) -> None:
         st.plotly_chart(fig, use_container_width=True)
 
     # ---- 5. 연간 재무제표
-    inc, bal, cf = R["income"], R["balance"], R["cashflow"]
-    sec, sec_err = None, "데이터 부족"
-    try:
-        sec = load_sec_financials(ticker)
-        if sec.shape[1] < 2:
-            sec = None
-    except Exception as e:  # noqa: BLE001
-        sec_err = str(e)
+    sec = F if F is not None and F.shape[1] >= 2 else None
     if sec is not None:
-        st.markdown(f"##### 연간 재무제표 (최근 {sec.shape[1]}개 회계연도 · SEC 공시)")
-    else:
-        st.markdown("##### 연간 재무제표 (최근 4개 회계연도 · Yahoo)")
-        st.caption(f"SEC 10개년 데이터를 쓰지 못해 Yahoo 데이터로 대신합니다 ({sec_err}).")
-    items = [
-        ("매출", _row(inc, "Total Revenue", "Operating Revenue")),
-        ("매출총이익", _row(inc, "Gross Profit")),
-        ("영업이익", _row(inc, "Operating Income")),
-        ("EBITDA", _row(inc, "EBITDA", "Normalized EBITDA")),
-        ("순이익", _row(inc, "Net Income", "Net Income Common Stockholders")),
-        ("희석 EPS", _row(inc, "Diluted EPS", "Basic EPS")),
-        ("영업현금흐름", _row(cf, "Operating Cash Flow")),
-        ("잉여현금흐름", _row(cf, "Free Cash Flow")),
-        ("총자산", _row(bal, "Total Assets")),
-        ("총부채", _row(bal, "Total Liabilities Net Minority Interest")),
-        ("자기자본", _row(bal, "Stockholders Equity", "Common Stock Equity")),
-    ]
-    items = [(k, v) for k, v in items if v is not None]
-    if sec is not None or items:
-        if sec is not None:
-            fs = sec.loc[[r for r in SEC_SHOW if r in sec.index]].copy()
-        else:
-            fs = pd.DataFrame({k: pd.to_numeric(v, errors="coerce") for k, v in items}).T
-            fs = fs.dropna(axis=1, how="all")
-            fs = fs[sorted(fs.columns)[-4:]]
+        st.markdown(f"##### 연간 재무제표 (최근 {sec.shape[1]}개 회계연도 · {src})")
+        fs = sec.loc[[r for r in SEC_SHOW if r in sec.index]].copy()
         fs.columns = [pd.Timestamp(c).strftime("%Y-%m") for c in fs.columns]
         show = fs.copy().astype(object)
         for k in show.index:
-            show.loc[k] = [ratio(v) if k == "희석 EPS" else big(v, cur) for v in fs.loc[k]]
+            show.loc[k] = [ratio(v) if k == "희석 EPS" else money.big(v) for v in fs.loc[k]]
         if "매출" in fs.index:
             rev = fs.loc["매출"]
             show.loc["매출 성장률"] = [pct(v) for v in rev.pct_change()]
@@ -781,16 +818,13 @@ def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool) -> None:
                 if k in fs.index:
                     show.loc[lab] = [pct(a / b) if b else "-" for a, b in zip(fs.loc[k], rev)]
         st.dataframe(show, use_container_width=True)
-        if sec is not None:
-            st.caption("출처: SEC EDGAR XBRL(10-K). 회사가 공시한 원 수치이며, 회계기준 변경·정정 공시가 있으면 가장 최근 제출값을 씁니다. "
-                       "잉여현금흐름 = 영업현금흐름 − 유형자산 취득(설비투자). 표가 넓으면 옆으로 밀어서 보세요.")
         if "매출" in fs.index:
             fig = go.Figure()
             fig.add_trace(go.Bar(x=fs.columns, y=fs.loc["매출"], name="매출", marker_color="#4C9BE8",
-                                 hovertemplate="%{x} 매출 %{y:$,.0f}<extra></extra>"))
+                                 hovertemplate="%{x} 매출 " + money.hv() + "<extra></extra>"))
             if "순이익" in fs.index:
                 fig.add_trace(go.Bar(x=fs.columns, y=fs.loc["순이익"], name="순이익", marker_color="#F2A93B",
-                                     hovertemplate="%{x} 순이익 %{y:$,.0f}<extra></extra>"))
+                                     hovertemplate="%{x} 순이익 " + money.hv() + "<extra></extra>"))
             if "영업이익" in fs.index:
                 fig.add_trace(go.Scatter(x=fs.columns, y=(fs.loc["영업이익"] / fs.loc["매출"] * 100), name="영업이익률(%)",
                                          yaxis="y2", mode="lines+markers", line=dict(color="#E5534B"),
@@ -800,11 +834,11 @@ def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool) -> None:
                               legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
             st.plotly_chart(fig, use_container_width=True)
     else:
-        st.caption("재무제표를 불러오지 못했습니다 (ETF이거나 Yahoo 응답 지연).")
+        st.caption("재무제표를 불러오지 못했습니다 (ETF이거나 데이터 제공처 응답 지연).")
 
     # ---- 5-1. 재무비율·주가·PER 그래프 (직접 선택)
     st.markdown("##### 재무비율 · 주가 · 밸류에이션 그래프 (직접 선택해서 겹쳐 보기)")
-    _combo_chart(sec, R, ticker, px, n_eps)
+    _combo_chart(sec, R, ticker, px, n_eps, src)
 
 
     # ---- 6. 일정

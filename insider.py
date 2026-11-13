@@ -323,5 +323,4 @@ def render_insider(ticker: str, R: dict) -> None:
                      column_config={"원문": st.column_config.LinkColumn("원문", display_text="보기")})
     except Exception:  # noqa: BLE001
         st.dataframe(t, use_container_width=True, hide_index=True)
-    st.caption("출처: SEC EDGAR Form 4 (거래 후 2영업일 이내 공시). 구분 코드: P 장내 매수, S 장내 매도, A 보상 부여, M·X 옵션/RSU 행사, "
-               "F 세금 납부용 처분, G 증여. 일반적으로 신호로 보는 것은 P(자기 돈으로 산 매수)이며, 매도는 세금·분산 등 이유가 다양합니다.")
+    st.caption("출처: SEC Form 4. 구분 코드: P 장내 매수, S 장내 매도, A 보상 부여, M·X 옵션/RSU 행사, F 세금 납부용 처분, G 증여")

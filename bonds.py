@@ -203,7 +203,6 @@ def _curve(ts: pd.DataFrame) -> None:
     f2.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
                      yaxis=dict(title="금리차(%p)"), legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
     st.plotly_chart(f2, use_container_width=True)
-    st.caption("장단기 금리차가 0 아래(역전)이면 시장이 앞으로 금리 인하·경기 둔화를 예상한다는 신호로 자주 해석됩니다.")
 
 
 def _treasury_lookup(ts: pd.DataFrame) -> None:
@@ -221,7 +220,8 @@ def _treasury_lookup(ts: pd.DataFrame) -> None:
     df = pd.DataFrame(rows)
     st.dataframe(df.style.format({"금리(YTM)": "{:.2f}%", "가정 쿠폰": "{:.2f}%", "가격": "{:.3f}", "맥컬리 듀레이션(년)": "{:.2f}",
                                   "수정 듀레이션": "{:.2f}", "볼록성": "{:.2f}", "DV01(액면 100)": "{:.4f}",
-                                  "1%p 상승 시 가격변화(%)": "{:+.2f}%"}), use_container_width=True, hide_index=True)
+                                  "1%p 상승 시 가격변화(%)": "{:+.2f}%"}), use_container_width=True, hide_index=True,
+                 column_config=__import__("glossary").col_help(df.columns))
     st.caption("현재 FRED 금리로 '새로 발행된 국채'(쿠폰 = 금리, 액면가 거래)를 가정해 계산했습니다. 1년 미만은 무이표 할인채입니다. "
                "실제 개별 국채는 쿠폰·잔존만기가 달라 값이 조금 다를 수 있습니다. 정확한 종목은 '채권 계산기'에 넣어 계산하세요.")
     pick = st.selectbox("자세히 볼 만기", [TENORS[c][0] for c in TENORS if c in ts.columns], index=8, key="bd_pick")
@@ -263,7 +263,6 @@ def _detail(coupon: float, T: float, ytm: float, freq: int, label: str) -> None:
         cft = pd.DataFrame({"시점(년)": m["times"], "현금흐름": m["cf"], "현재가치": m["pv"],
                             "가중치(PV/가격)": m["pv"] / m["dirty"], "시점×가중치": m["times"] * m["pv"] / m["dirty"]})
         st.dataframe(cft.round(4), use_container_width=True, hide_index=True)
-        st.caption("맥컬리 듀레이션 = '시점×가중치'의 합. 수정 듀레이션 = 맥컬리 ÷ (1 + 금리/연 이자횟수).")
 
 
 def _calculator(ts) -> None:

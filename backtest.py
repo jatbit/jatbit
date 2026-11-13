@@ -255,11 +255,13 @@ def render_backtest(load_prices, find_candidates, listing, risk_free_for) -> Non
                      "월 승률": _pct(m["win_m"], nd=0), "최고 월": _pct(m["best_m"], True), "최악 월": _pct(m["worst_m"], True),
                      "1일 VaR95": _pct(m["var95"]), "베타": _r(m.get("beta", np.nan)), "알파(연)": _pct(m.get("alpha", np.nan), True),
                      "추적오차": _pct(m.get("te", np.nan)), "정보비율": _r(m.get("ir", np.nan))})
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-    st.caption("알파·베타·추적오차·정보비율은 벤치마크 대비. 정보비율 = (전략 − 벤치마크) 초과수익 ÷ 추적오차.")
+    from glossary import col_help
+
+    tb = pd.DataFrame(rows)
+    st.dataframe(tb, use_container_width=True, hide_index=True, column_config=col_help(tb.columns))
 
     # ---- 그래프
-    t1, t2, t3, t4, t5 = st.tabs(["누적 가치", "낙폭", "연도별 수익률", "월별 수익률", "비중 변화"])
+    t1, t2, t3, t4, t5, t6, t7 = st.tabs(["누적 가치", "낙폭", "연도별 수익률", "월별 수익률", "비중 변화", "스트레스 테스트", "VaR 검증"])
     curves = {k: r["value"] for k, r in runs.items()}
     if bench is not None and len(bench):
         curves[f"벤치마크 ({bench_name})"] = bench
@@ -323,3 +325,11 @@ def render_backtest(load_prices, find_candidates, listing, risk_free_for) -> Non
                         yaxis=dict(title="비중(%)", ticksuffix="%", range=[0, 100]), legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
         st.plotly_chart(f, use_container_width=True)
         st.caption("리밸런싱 사이에는 가격 변화에 따라 비중이 흘러가고(드리프트), 리밸런싱 날 목표 비중으로 돌아옵니다.")
+    from risklab import render_stress, render_var_test
+
+    with t6:
+        k_s = st.selectbox("비중", pick, key="bt_st_k")
+        render_stress(items, names, sets[k_s], P[names], bench, b_opts[bench_name], bench_name,
+                      lambda c, a, b: _load_close(load_prices, c, a, b), float(runs[k_s]["value"].iloc[-1]), "bt_st")
+    with t7:
+        render_var_test(curves, "bt_var")

@@ -337,21 +337,27 @@ def _is_dark() -> bool:
 
 
 def mgrid(items, cols: int = 4) -> None:
-    """지표를 가로 격자로 나열 (휴대폰에서도 세로로 길게 쌓이지 않게). items: (라벨, 값[, 설명])"""
+    """지표를 가로 격자로 나열 (휴대폰에서도 세로로 길게 쌓이지 않게). items: (라벨, 값[, 보조 설명])
+    라벨 옆 ⓘ(동그라미 ?)에 마우스를 올리거나 탭하면 값이 높을 때·낮을 때의 의미가 뜬다."""
+    import re
+
+    from glossary import CSS, icon, tip
+
     cells = ""
-    for it in items:
+    for i, it in enumerate(items):
         lab, val = it[0], it[1]
-        tip = html.escape(it[2], quote=True) if len(it) > 2 and it[2] else ""
-        cells += (f'<div style="min-width:0" title="{tip}"><div style="font-size:0.78rem;opacity:.7">{html.escape(lab)}</div>'
+        extra = it[2] if len(it) > 2 and it[2] else ""
+        t = tip(lab)
+        if extra and not re.search(r"[÷×=√]| [+−] |N\(", extra):  # 계산식이 아닌 보조 정보(기준일 등)만 덧붙임
+            t = f"{t} ({extra})" if t else extra
+        right = " qr" if cols > 1 and (i % cols) >= cols / 2 else ""
+        cells += (f'<div style="min-width:0" class="mgc{right}"><div style="font-size:0.78rem"><span style="opacity:.7">{html.escape(lab)}</span>{icon(t)}</div>'
                   f'<div style="font-size:1.12rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{html.escape(val)}</div></div>')
     cells = cells.replace("$", "&#36;")  # 마크다운 수식($...$)으로 해석되지 않게
-    st.markdown(f'<div style="display:grid;grid-template-columns:repeat({cols},minmax(0,1fr));gap:6px 12px;margin:2px 0 12px">{cells}</div>',
+    st.markdown(CSS + f'<div style="display:grid;grid-template-columns:repeat({cols},minmax(0,1fr));gap:6px 12px;margin:2px 0 12px">{cells}</div>',
                 unsafe_allow_html=True)
 
 
-# ======================================================================
-# 1) 옵션 체인 화면
-# ======================================================================
 def _pf_us_tickers() -> list:
     res = st.session_state.get("pf_opt_result") or {}
     return [it["code"] for it in res.get("items", []) if is_us_ticker(it["code"]) and not it.get("domestic")]
@@ -435,13 +441,7 @@ def render_chain() -> None:
     rng = c3.slider("행사가 범위", min_value=lo, max_value=hi, value=(d_lo, d_hi), key=f"opt_rng_{ticker}_{expiry}")
     v = d[d["strike"].between(*rng)]
 
-    st.caption(
-        f"이론가 = 블랙-숄즈-머튼(배당수익률 q 반영), 변동성 {P['hv_pick']} 역사적 변동성 {P['sig_theo'] * 100:.1f}%, "
-        f"r {P['r_simple'] * 100:.2f}%, q {P['q'] * 100:.2f}%, 잔존 {T * 365:.1f}일. "
-        "시장가 = 매수·매도호가 중간가(호가가 없으면 최근 체결가). IV = 시장가를 맞추는 BSM 변동성. "
-        "**시장가에 마우스를 올리면(모바일은 탭) 그릭스가 뜹니다.** 파란 칸 = 내가격, 노란 행사가 = 등가격. "
-        "미국 주식옵션은 아메리칸형이라 BSM(유러피언) 이론가와 차이가 날 수 있습니다."
-    )
+    st.caption("시장가에 마우스를 올리면(모바일은 탭) 그릭스가 뜹니다. 파란 칸 = 내가격, 노란 행사가 = 등가격.")
     components.html(chain_html(v, ticker, T, S, _is_dark()), height=560, scrolling=False)
 
     with st.expander("전체 수치 표 · CSV 내려받기"):
@@ -612,8 +612,6 @@ def render_hedge() -> None:
     if summary:
         st.subheader("④ 요약")
         st.dataframe(pd.DataFrame(summary), use_container_width=True, hide_index=True)
-        st.caption("델타는 '주식 수' 단위(기초자산 1주와 같은 민감도), 감마는 기초자산 1달러 변화당 델타 변화(주). "
-                   "헷지는 현재 시점 기준이라 가격·시간·변동성이 바뀌면 다시 맞춰야 합니다(동적 헷지).")
 
 
 def _hedge_one(code: str, info: dict, method: str, rounding: bool):
@@ -758,11 +756,15 @@ def render_options() -> None:
 
     from optvol import render_vol
 
-    t1, t4, t2, t3 = st.tabs(["옵션 체인", "변동성·수급 분석", "델타·감마 헷지", "옵션 포함 CAPM·손익"])
+    from american import render_american
+
+    t1, t4, t5, t2, t3 = st.tabs(["옵션 체인", "변동성·수급 분석", "아메리칸 옵션", "델타·감마 헷지", "옵션 포함 CAPM·손익"])
     with t1:
         render_chain()
     with t4:
         render_vol()
+    with t5:
+        render_american()
     with t2:
         render_hedge()
     with t3:

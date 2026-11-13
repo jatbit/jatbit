@@ -3,3 +3,4 @@ finance-datareader
 plotly
 pandas
 yfinance
+scipy

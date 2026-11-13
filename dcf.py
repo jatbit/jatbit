@@ -146,36 +146,33 @@ def _yahoo_hist(R: dict) -> pd.DataFrame:
 
 
 def _big(x):
-    if x is None or not np.isfinite(x):
-        return "-"
-    a = abs(x)
-    for d, u in ((1e12, "조"), (1e9, "십억"), (1e6, "백만")):
-        if a >= d:
-            return f"${x / d:,.2f}{u}"
-    return f"${x:,.0f}"
+    import money
+
+    return money.big(x)
 
 
 # ----------------------------------------------------------------------
 # 화면
 # ----------------------------------------------------------------------
-def render_dcf(ticker: str, R: dict, sec: pd.DataFrame | None) -> None:
+def render_dcf(ticker: str, R: dict, sec: pd.DataFrame | None, src_name: str = "SEC 10-K", domestic: bool = False) -> None:
+    import money
+
     info = R.get("info") or {}
     px = _num(info.get("currentPrice")) or _num(info.get("regularMarketPrice"))
     shares = _num(info.get("sharesOutstanding")) or _num(info.get("impliedSharesOutstanding"))
     if not px or not shares:
         st.warning("현재가나 발행주식수가 없어 DCF를 계산할 수 없습니다 (ETF·펀드는 지원하지 않습니다).")
         return
-    src = "SEC 10-K"
-    hist = sec if sec is not None and "잉여현금흐름" in sec.index else _yahoo_hist(R)
-    if sec is None or "잉여현금흐름" not in sec.index:
-        src = "Yahoo"
+    given = sec is not None and "잉여현금흐름" in sec.index
+    src = src_name if given else "Yahoo"
+    hist = sec if given else _yahoo_hist(R)
     if hist is None or hist.empty or "잉여현금흐름" not in hist.index or hist.loc["잉여현금흐름"].dropna().empty:
         st.warning("잉여현금흐름 데이터를 찾지 못했습니다. 아래 '기준 FCF'를 직접 입력하면 계산할 수 있습니다.")
         hist = pd.DataFrame()
     # 재무제표 통화와 주가 통화가 다르면(예: 대만·일본 기업 ADR) 환율로 맞춤
     fin_cur, px_cur = info.get("financialCurrency") or "USD", info.get("currency") or "USD"
     fx = 1.0
-    if fin_cur != px_cur and src == "Yahoo":
+    if fin_cur != px_cur and not given:
         fx = load_fx(fin_cur, px_cur) or float("nan")
         st.caption(f"재무제표 통화({fin_cur})를 주가 통화({px_cur})로 환산했습니다: 1 {fin_cur} = {fx:.4f} {px_cur}")
     fcf_h = hist.loc["잉여현금흐름"].dropna() * fx if not hist.empty else pd.Series(dtype=float)
@@ -187,7 +184,7 @@ def render_dcf(ticker: str, R: dict, sec: pd.DataFrame | None) -> None:
         f = go.Figure()
         xs = [pd.Timestamp(c).strftime("%Y-%m") for c in fcf_h.index]
         f.add_trace(go.Bar(x=xs, y=fcf_h.values, name="잉여현금흐름", marker_color=np.where(fcf_h.values >= 0, "#4C9BE8", "#E5534B"),
-                           hovertemplate="%{x} FCF %{y:$,.0f}<extra></extra>"))
+                           hovertemplate="%{x} FCF " + money.hv() + "<extra></extra>"))
         if len(rev_h):
             m = (fcf_h / rev_h.reindex(fcf_h.index) * 100)
             f.add_trace(go.Scatter(x=xs, y=m.values, name="FCF 마진(%)", yaxis="y2", mode="lines+markers", line=dict(color="#F2A93B"),
@@ -197,14 +194,13 @@ def render_dcf(ticker: str, R: dict, sec: pd.DataFrame | None) -> None:
                         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
         st.plotly_chart(f, use_container_width=True)
     g_rev5, g_fcf5 = cagr(rev_h, 5), cagr(fcf_h, 5)
-    st.caption(f"출처: {src}. FCF = 영업현금흐름 − 설비투자 (주식보상비용은 차감하지 않음). "
-               f"매출 5년 연평균 성장률 {g_rev5 * 100:.1f}%" if np.isfinite(g_rev5) else f"출처: {src}.")
+    st.caption(f"출처: {src}")
 
     # ---- 입력
     st.markdown("##### 가정 (모두 직접 고칠 수 있습니다)")
     fcf_last = float(fcf_h.iloc[-1]) if len(fcf_h) else None
     fcf_avg3 = float(fcf_h.iloc[-3:].mean()) if len(fcf_h) else None
-    fcf_ttm = (_num(info.get("freeCashflow")) or 0) * (fx if fin_cur != px_cur else 1) or None
+    fcf_ttm = (_num(info.get("freeCashflow")) or 0) * ((load_fx(fin_cur, px_cur) or 1) if fin_cur != px_cur else 1) or None
     opts = {}
     if fcf_last is not None:
         opts[f"최근 회계연도 FCF ({_big(fcf_last)})"] = fcf_last
@@ -217,7 +213,8 @@ def render_dcf(ticker: str, R: dict, sec: pd.DataFrame | None) -> None:
     c1, c2 = st.columns([2, 1])
     base_pick = c1.selectbox("기준 FCF", list(opts), key=k + "_base")
     if opts[base_pick] is None:
-        fcf0 = c2.number_input("기준 FCF (백만$)", value=round((fcf_last or 1000e6) / 1e6, 1), step=100.0, key=k + "_basem") * 1e6
+        sc, un = money.unit()
+        fcf0 = c2.number_input(f"기준 FCF ({un})", value=round((fcf_last or 1000 * sc) / sc, 1), step=100.0, key=k + "_basem") * sc
     else:
         fcf0 = opts[base_pick]
         c2.metric("기준 FCF", _big(fcf0))
@@ -226,8 +223,16 @@ def render_dcf(ticker: str, R: dict, sec: pd.DataFrame | None) -> None:
 
     g_def = g_rev5 if np.isfinite(g_rev5) else (_num(info.get("revenueGrowth")) or 0.05)
     g_def = float(np.clip(g_def, -0.05, 0.30))
-    rr = load_us10y()
-    rf_def = rr[0] if rr else 0.042
+    if domestic:
+        from kr import kr_rate
+
+        kk = kr_rate("10Y")
+        rr = (kk[0], kk[1]) if kk else None
+        rf_name = kk[2] if kk else "국고채 10년"
+    else:
+        rr = load_us10y()
+        rf_name = "미 국채 10년"
+    rf_def = rr[0] if rr else (0.03 if domestic else 0.042)
     beta_def = _num(info.get("beta")) or 1.0
     D = _num(info.get("totalDebt")) or 0.0
     cash = _num(info.get("totalCash")) or 0.0
@@ -245,10 +250,12 @@ def render_dcf(ticker: str, R: dict, sec: pd.DataFrame | None) -> None:
     gt = a4.number_input("영구성장률 (%)", value=2.5, step=0.25, key=k + "_gt", help="장기 명목 GDP 성장률 수준(2~3%)이 보통") / 100
     b1, b2, b3, b4 = st.columns(4)
     rf = b1.number_input("무위험금리 (%)", value=round(rf_def * 100, 2), step=0.05, key=k + "_rf",
-                         help=f"FRED 미 국채 10년 {rr[0] * 100:.2f}% ({rr[1]})" if rr else "FRED 조회 실패로 4.2% 기본값") / 100
+                         help=f"{rf_name} {rr[0] * 100:.2f}% ({rr[1]})" if rr else "금리 조회 실패로 기본값 사용") / 100
     beta = b2.number_input("베타", value=round(beta_def, 2), step=0.05, key=k + "_beta", help="Yahoo 베타(5년 월간)")
-    mrp = b3.number_input("시장위험프리미엄 (%)", value=5.0, step=0.25, key=k + "_mrp", help="미국 주식 기대초과수익률. 4~6%가 흔히 쓰임") / 100
-    tax = b4.number_input("법인세율 (%)", value=21.0, step=1.0, key=k + "_tax") / 100
+    mrp = b3.number_input("시장위험프리미엄 (%)", value=5.5 if domestic else 5.0, step=0.25, key=k + "_mrp",
+                          help="주식이 무위험금리보다 더 벌 것으로 기대되는 몫. 4~6%가 흔히 쓰임") / 100
+    tax = b4.number_input("법인세율 (%)", value=27.5 if domestic else 21.0, step=1.0, key=k + "_tax",
+                          help="국내: 최고세율 25% + 지방소득세 2.5%" if domestic else "미국 연방 법인세율") / 100
     c1, c2, c3, c4 = st.columns(4)
     rd = c1.number_input("세전 타인자본비용 (%)", value=round(rd_def * 100, 2), step=0.25, key=k + "_rd",
                          help="기본값: 최근 이자비용 ÷ 총차입금" if int_exp and D > 0 else "이자비용 자료가 없어 5% 기본값") / 100
@@ -273,7 +280,7 @@ def render_dcf(ticker: str, R: dict, sec: pd.DataFrame | None) -> None:
 
     # ---- 결과
     st.markdown("##### 결과")
-    mgrid([("주당 내재가치", f"${ps:,.2f}", f"현재가 ${px:,.2f}"),
+    mgrid([("주당 내재가치", money.price(ps), f"현재가 {money.price(px)}"),
            ("상승 여력", f"{up * 100:+.1f}%", "내재가치 ÷ 현재가 − 1"),
            ("WACC", f"{wacc * 100:.2f}%", f"자기자본 {W['w_e'] * 100:.0f}% × {W['re'] * 100:.2f}% + 타인자본 {W['w_d'] * 100:.0f}% × 세후 {W['rd_after'] * 100:.2f}%"),
            ("자기자본비용", f"{W['re'] * 100:.2f}%", f"{rf * 100:.2f}% + {beta:.2f} × {mrp * 100:.2f}%"),
@@ -287,13 +294,13 @@ def render_dcf(ticker: str, R: dict, sec: pd.DataFrame | None) -> None:
     f = go.Figure()
     yrs = [f"{y}년차" for y in res["years"]]
     f.add_trace(go.Bar(x=yrs, y=res["fcf"], name="추정 FCF", marker_color="rgba(76,155,232,0.35)",
-                       hovertemplate="%{x} FCF %{y:$,.0f}<extra></extra>"))
+                       hovertemplate="%{x} FCF " + money.hv() + "<extra></extra>"))
     f.add_trace(go.Bar(x=yrs, y=res["pv"], name="현재가치", marker_color="#4C9BE8",
-                       hovertemplate="%{x} 현재가치 %{y:$,.0f}<extra></extra>"))
+                       hovertemplate="%{x} 현재가치 " + money.hv() + "<extra></extra>"))
     f.add_trace(go.Bar(x=["영구가치"], y=[res["pv_tv"]], name="영구가치 현재가치", marker_color="#9B6FD6",
-                       hovertemplate="영구가치 현재가치 %{y:$,.0f}<extra></extra>"))
+                       hovertemplate="영구가치 현재가치 " + money.hv() + "<extra></extra>"))
     f.update_layout(barmode="overlay", height=300, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), yaxis=dict(title="$"))
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), yaxis=dict(title=money.sym()))
     st.plotly_chart(f, use_container_width=True)
     tbl = pd.DataFrame([[f"{v * 100:.1f}%" for v in res["growth"]], [_big(v) for v in res["fcf"]],
                         [f"{v:.4f}" for v in res["disc"]], [_big(v) for v in res["pv"]]],
@@ -316,11 +323,10 @@ def render_dcf(ticker: str, R: dict, sec: pd.DataFrame | None) -> None:
     up_grid = sens / px - 1
     z = up_grid.values * 100
     hm = go.Figure(go.Heatmap(z=z, x=cl, y=list(sens.index), colorscale="RdYlGn", zmid=0,
-                              text=[[f"${v:,.0f}<br>{u:+.0f}%" if np.isfinite(v) else "-" for v, u in zip(r1, r2)] for r1, r2 in zip(sens.values, z)],
+                              text=[[f"{money.price(v)}<br>{u:+.0f}%" if np.isfinite(v) else "-" for v, u in zip(r1, r2)] for r1, r2 in zip(sens.values, z)],
                               texttemplate="%{text}", hovertemplate="%{y} · %{x}<br>%{text}<extra></extra>", showscale=False))
     hm.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), yaxis=dict(autorange="reversed"))
     st.plotly_chart(hm, use_container_width=True)
-    st.caption("칸 위: 주당 내재가치, 아래: 현재가 대비 상승 여력. 초록일수록 저평가, 빨강일수록 고평가.")
 
     # ---- 역DCF
     st.markdown("##### 역DCF (현재 주가에 반영된 성장률)")
@@ -330,5 +336,3 @@ def render_dcf(ticker: str, R: dict, sec: pd.DataFrame | None) -> None:
            ("내가 넣은 고성장률", f"{g1 * 100:.1f}%"),
            ("과거 매출 성장률(5년)", f"{g_rev5 * 100:.1f}%" if np.isfinite(g_rev5) else "-"),
            ("과거 FCF 성장률(5년)", f"{g_fcf5 * 100:.1f}%" if np.isfinite(g_fcf5) else "-")], cols=4)
-    st.caption("역DCF: 지금 주가가 '맞다'고 할 때 FCF가 몇 % 성장해야 하는지 거꾸로 푼 값입니다. 과거 성장률보다 훨씬 높으면 기대가 많이 반영된 주가로 볼 수 있습니다. "
-               "DCF는 가정에 매우 민감하므로 하나의 정답이 아니라 '어떤 가정이 필요한가'를 보는 도구로 쓰세요.")

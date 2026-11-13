@@ -1,0 +1,224 @@
+"""동종업계 비교 (기업 리서치 탭)
+- 미국: Yahoo 산업 분류(yfinance Industry)의 대표 기업, 국내: KRX 같은 업종 시가총액 상위 기업
+- 밸류에이션·수익성·성장·재무 지표를 한 표로 비교하고, 업계 안에서 이 회사가 몇 등(백분위)인지 보여준다.
+"""
+from concurrent.futures import ThreadPoolExecutor
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+import money
+from glossary import CSS, icon, tip
+
+try:
+    import yfinance as yf
+except Exception:  # noqa: BLE001
+    yf = None
+
+# 열 이름: (Yahoo info 키, 형식, 높을수록 좋은지 — True 좋음 / False 나쁨 / None 중립)
+METRICS = {
+    "PER": ("trailingPE", "x", False), "선행 PER": ("forwardPE", "x", False), "PBR": ("priceToBook", "x", False),
+    "PSR": ("priceToSalesTrailing12Months", "x", False), "EV/EBITDA": ("enterpriseToEbitda", "x", False),
+    "매출 성장률": ("revenueGrowth", "%", True), "이익 성장률": ("earningsGrowth", "%", True),
+    "매출총이익률": ("grossMargins", "%", True), "영업이익률": ("operatingMargins", "%", True), "순이익률": ("profitMargins", "%", True),
+    "ROE": ("returnOnEquity", "%", True), "ROA": ("returnOnAssets", "%", True),
+    "부채비율": ("debtToEquity", "d", False), "배당수익률": ("dividendYield", "y", None), "베타": ("beta", "r", None),
+    "1년 수익률": ("52WeekChange", "%", True),
+}
+GOOD_LOW_SKIP_NEG = {"PER", "선행 PER", "PBR", "PSR", "EV/EBITDA"}  # 음수(적자)는 순위에서 뺌
+
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def _info(sym: str) -> dict:
+    for _ in range(3):
+        try:
+            d = yf.Ticker(sym).info or {}
+            if d:
+                return {k: d.get(k) for k in [v[0] for v in METRICS.values()] +
+                        ["shortName", "longName", "marketCap", "currency", "industry", "sector", "industryKey", "currentPrice", "regularMarketPrice"]}
+        except Exception:  # noqa: BLE001
+            pass
+    return {}
+
+
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def us_peers(industry_key: str, n: int = 10) -> list:
+    try:
+        ind = yf.Industry(industry_key)
+        top = ind.top_companies
+        if isinstance(top, pd.DataFrame) and not top.empty:
+            return [str(s) for s in top.index[:n]]
+    except Exception:  # noqa: BLE001
+        pass
+    return []
+
+
+def kr_peers(code: str, listing: pd.DataFrame, n: int = 10) -> list:
+    me = listing[listing["Code"] == code]
+    if me.empty:
+        return []
+    ind = me["Industry"].iloc[0] if "Industry" in me and pd.notna(me["Industry"].iloc[0]) else None
+    if not ind:
+        return []
+    same = listing[(listing["Industry"] == ind)].sort_values("Marcap", ascending=False)
+    from kr import yahoo_symbol
+
+    return [yahoo_symbol(r.Code, r.Market) for r in same.head(n + 1).itertuples()]
+
+
+def _val(info: dict, key: str, kind: str):
+    v = info.get(key)
+    try:
+        v = float(v)
+    except Exception:  # noqa: BLE001
+        return np.nan
+    if not np.isfinite(v):
+        return np.nan
+    if kind == "%":
+        return v * 100
+    if kind == "y":  # Yahoo 배당수익률은 버전에 따라 0.0123 또는 1.23
+        return v if v > 0.5 else v * 100
+    return v
+
+
+def _fmt(v, kind):
+    if not np.isfinite(v):
+        return "-"
+    if kind in ("%", "y"):
+        return f"{v:.1f}%"
+    if kind == "d":
+        return f"{v:.0f}%"
+    return f"{v:.2f}" if kind == "r" else f"{v:.1f}"
+
+
+def percentile_rank(values: pd.Series, target: str, higher_good):
+    """업계 안에서 '좋은 쪽'으로 몇 % 위치인지 (100 = 가장 좋음)."""
+    s = values.dropna()
+    if target not in s.index or len(s) < 3 or higher_good is None:
+        return np.nan
+    x = s[target]
+    others = s
+    if higher_good:
+        return float((others < x).sum() + 0.5 * ((others == x).sum() - 1)) / (len(others) - 1) * 100
+    return float((others > x).sum() + 0.5 * ((others == x).sum() - 1)) / (len(others) - 1) * 100
+
+
+def render_peers(ticker: str, R: dict, domestic: bool = False, code: str | None = None) -> None:
+    if yf is None:
+        st.error("yfinance가 필요합니다.")
+        return
+    info = R.get("info") or {}
+    peers = []
+    if domestic:
+        from kr import load_krx
+
+        listing = load_krx()
+        peers = kr_peers(code, listing)
+        if peers:
+            ind = listing.loc[listing["Code"] == code, "Industry"]
+            st.caption(f"KRX 업종 '{ind.iloc[0] if len(ind) else '-'}' 시가총액 상위 기업")
+    else:
+        ik = info.get("industryKey")
+        peers = us_peers(ik) if ik else []
+        if peers:
+            st.caption(f"Yahoo 산업 분류 '{info.get('industry') or ik}' 대표 기업")
+    k = f"pe_{ticker}"
+    extra = st.text_input("비교 종목 추가·변경 (쉼표로 구분, 비우면 자동)", key=k + "_x",
+                          placeholder="예: MSFT, GOOGL" if not domestic else "예: 000660, 005380")
+    if extra.strip():
+        toks = [t.strip().upper() for t in extra.split(",") if t.strip()]
+        if domestic:
+            from kr import resolve
+
+            conv = []
+            for t in toks:
+                c = resolve(t)
+                conv.append(c[0]["yahoo"] if c else t)
+            toks = conv
+        peers = toks
+    peers = [p for p in dict.fromkeys([ticker] + peers)][:12]
+    if len(peers) < 2:
+        st.info("비교할 동종업계 기업을 찾지 못했습니다. 위에 비교 종목을 직접 입력하세요.")
+        return
+    with st.spinner(f"{len(peers)}개 기업 지표를 불러오는 중..."):
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            infos = dict(zip(peers, ex.map(_info, peers)))
+    infos = {p: d for p, d in infos.items() if d}
+    if ticker not in infos:
+        infos[ticker] = info
+    krx_names = {}
+    if domestic:
+        from kr import load_krx
+
+        L = load_krx()
+        krx_names = {f"{c}.KS": n for c, n in zip(L["Code"], L["Name"])}
+        krx_names.update({f"{c}.KQ": n for c, n in zip(L["Code"], L["Name"])})
+    label = {p: krx_names.get(p) or d.get("shortName") or p for p, d in infos.items()}
+    T = pd.DataFrame({m: {p: _val(d, key, kind) for p, d in infos.items()} for m, (key, kind, _g) in METRICS.items()})
+    T["시가총액"] = pd.Series({p: float(d.get("marketCap") or np.nan) for p, d in infos.items()})
+    T = T.sort_values("시가총액", ascending=False)
+    for m in GOOD_LOW_SKIP_NEG:
+        T.loc[T[m] <= 0, m] = np.nan
+
+    # ---- 이 회사의 업계 내 위치
+    st.markdown(f"##### {label.get(ticker, ticker)}의 업계 내 위치 ({len(T)}개 기업 중)")
+    ranks = {m: percentile_rank(T[m], ticker, g) for m, (_k, _kind, g) in METRICS.items()}
+    med = T.median(numeric_only=True)
+    cells = ""
+    for m, (_k, kind, g) in METRICS.items():
+        if g is None:
+            continue
+        v = T.at[ticker, m] if ticker in T.index else np.nan
+        rk = ranks[m]
+        col = "#5BB56E" if np.isfinite(rk) and rk >= 66 else ("#E5534B" if np.isfinite(rk) and rk <= 33 else "#B0B4BA")
+        bar = (f'<div style="height:5px;background:rgba(128,128,128,.2);border-radius:3px;margin-top:3px">'
+               f'<div style="width:{rk if np.isfinite(rk) else 0:.0f}%;height:5px;background:{col};border-radius:3px"></div></div>')
+        cells += (f'<div style="min-width:0"><div style="font-size:0.78rem"><span style="opacity:.7">{m}</span>{icon(tip(m))}</div>'
+                  f'<div style="font-size:1.0rem;font-weight:600">{_fmt(v, kind)} <span style="font-size:0.75rem;opacity:.6">중앙값 {_fmt(med.get(m, np.nan), kind)}</span></div>'
+                  f'{bar}<div style="font-size:0.7rem;opacity:.6">{"상위 " + format(100 - rk, ".0f") + "%" if np.isfinite(rk) else "순위 없음"}</div></div>')
+    st.markdown(CSS + f'<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px 14px;margin:2px 0 6px">{cells}</div>'
+                f'<div style="font-size:0.75rem;opacity:.6;margin-bottom:10px">막대가 길수록(초록) 업계에서 좋은 쪽입니다 — 배수는 낮을수록, 마진·성장·ROE는 높을수록 좋게 봅니다.</div>',
+                unsafe_allow_html=True)
+
+    # ---- 비교표
+    st.markdown("##### 지표 비교")
+    show = pd.DataFrame(index=T.index)
+    show["기업"] = [("▶ " if p == ticker else "") + label.get(p, p) for p in T.index]
+    show["시가총액"] = [money.big(v, (infos.get(p) or {}).get("currency") or "USD") for p, v in T["시가총액"].items()]
+    for m, (_k, kind, _g) in METRICS.items():
+        show[m] = [_fmt(v, kind) for v in T[m]]
+    show.loc["업계 중앙값"] = ["업계 중앙값", "-"] + [_fmt(med.get(m, np.nan), METRICS[m][1]) for m in METRICS]
+    from glossary import col_help
+
+    st.dataframe(show.reset_index(drop=True), use_container_width=True, hide_index=True, column_config=col_help(show.columns))
+
+    # ---- 산점도
+    st.markdown("##### 두 지표로 비교")
+    c1, c2 = st.columns(2)
+    num = [m for m in METRICS if T[m].notna().sum() >= 3]
+    if len(num) < 2:
+        return
+    xm = c1.selectbox("가로축", num, index=num.index("이익 성장률") if "이익 성장률" in num else 0, key=k + "_sx")
+    ym = c2.selectbox("세로축", num, index=num.index("PER") if "PER" in num else 1, key=k + "_sy")
+    d = T[[xm, ym, "시가총액"]].dropna(subset=[xm, ym])
+    if len(d) < 2:
+        st.caption("두 지표가 모두 있는 기업이 부족합니다.")
+        return
+    sz = np.sqrt(d["시가총액"].fillna(d["시가총액"].median()).clip(lower=1))
+    sz = 12 + 30 * (sz - sz.min()) / (sz.max() - sz.min() + 1e-9)
+    f = go.Figure(go.Scatter(x=d[xm], y=d[ym], mode="markers+text", text=[label.get(p, p) for p in d.index], textposition="top center",
+                             marker=dict(size=sz, color=["#E5534B" if p == ticker else "#4C9BE8" for p in d.index], opacity=0.8),
+                             hovertemplate="%{text}<br>" + xm + " %{x:.2f}<br>" + ym + " %{y:.2f}<extra></extra>"))
+    if len(d) >= 3:
+        try:
+            b = np.polyfit(d[xm].values, d[ym].values, 1)
+            xs = np.linspace(d[xm].min(), d[xm].max(), 20)
+            f.add_trace(go.Scatter(x=xs, y=b[0] * xs + b[1], mode="lines", line=dict(color="#888", dash="dash", width=1),
+                                   name="추세선", hoverinfo="skip"))
+        except Exception:  # noqa: BLE001
+            pass
+    f.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), showlegend=False,
+                    xaxis_title=xm, yaxis_title=ym)
+    st.plotly_chart(f, use_container_width=True)

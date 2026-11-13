@@ -167,7 +167,9 @@ def render_vol() -> None:
             else "Yahoo가 이 만기의 미결제약정을 0으로 제공해 계산할 수 없음"),
            ("HV 백분위 (1년)", f"{hv_pct * 100:.0f}%" if np.isfinite(hv_pct) else "-")], cols=5)
 
-    sub = st.tabs(["기간구조·스큐", "스마일", "변동성 곡면", "미결제약정·맥스페인", "감마 노출(GEX)", "만기별 표"])
+    sub = st.tabs(["기간구조·스큐", "스마일", "변동성 곡면", "미결제약정·맥스페인", "감마 노출(GEX)", "만기별 표", "변동성 모형 보정"])
+    with sub[6]:
+        render_calibration(ticker, chains, S, P["r"], P["q"])
     with sub[0]:
         f = go.Figure()
         f.add_trace(go.Scatter(x=ST["days"], y=ST["atm_iv"] * 100, name="ATM IV", mode="lines+markers", line=dict(color="#4C9BE8", width=2)))
@@ -178,8 +180,6 @@ def render_vol() -> None:
                         xaxis=dict(title="잔존일수"), yaxis=dict(title="내재변동성(%)", ticksuffix="%"),
                         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
         st.plotly_chart(f, use_container_width=True)
-        st.caption("기간구조: 가까운 만기 IV가 먼 만기보다 높으면(역전) 단기 이벤트(실적 발표 등)나 불안을 반영합니다. "
-                   "25델타 풋 IV가 콜 IV보다 높으면 하락 대비 수요가 큰 것(보통의 주식 옵션 모양)입니다.")
     pick = None
     with sub[1]:
         pick = st.selectbox("만기", list(ST.index), key="ov_smile_exp",
@@ -197,7 +197,6 @@ def render_vol() -> None:
                         xaxis=dict(title="행사가", range=[lo, hi]), yaxis=dict(title="내재변동성(%)", ticksuffix="%"),
                         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
         st.plotly_chart(f, use_container_width=True)
-        st.caption("변동성 스마일: 행사가별 IV. 현재가 아래쪽(외가격 풋) IV가 높을수록 급락 위험을 비싸게 사고 있다는 뜻입니다.")
     with sub[2]:
         bins = np.arange(0.70, 1.31, 0.05)
         grid = []
@@ -273,8 +272,7 @@ def render_vol() -> None:
         mgrid([("총 GEX (1% 변동당)", f"{tot / 1e6:,.1f}백만$"),
                ("해석", "딜러 순매수 감마 → 변동 완화" if tot > 0 else "딜러 순매도 감마 → 변동 증폭"),
                ("누적 GEX 부호 전환 행사가", f"{flip:,.2f}" if flip is not None else "-")], cols=3)
-        st.caption("GEX = 감마 × 미결제약정 × 100주 × 주가² × 1%. 딜러가 콜은 매도·풋은 매수 포지션이라는 업계 통상 가정을 썼고, "
-                   "실제 딜러 포지션은 공개되지 않으므로 방향성 참고용 추정치입니다.")
+        st.caption("딜러 포지션은 공개되지 않아 업계 통상 가정(고객이 콜 매수·풋 매수)으로 추정한 값입니다.")
     with sub[5]:
         tbl = ST[["days", "atm_iv", "p25", "c25", "rr25", "straddle", "move_pct", "move_iv", "max_pain", "pc_vol", "pc_oi",
                   "call_vol", "put_vol", "call_oi", "put_oi"]].copy()
@@ -287,6 +285,118 @@ def render_vol() -> None:
         show = tbl.copy().astype(object)
         for c_, f_ in fmt.items():
             show[c_] = [f_.format(v) if v is not None and np.isfinite(v) else "-" for v in tbl[c_].astype(float)]
-        st.dataframe(show, use_container_width=True)
-        st.caption("기대 변동폭 = ATM 스트래들 가격 ÷ 현재가(시장이 예상하는 만기까지의 움직임 크기). IV 기준 1σ = ATM IV × √잔존기간. "
-                   "Yahoo는 일부 만기의 미결제약정을 0으로 줄 때가 있어, 그런 만기는 맥스페인·풋/콜 미결제가 '-'로 표시됩니다.")
+        from glossary import col_help
+        st.dataframe(show, use_container_width=True, column_config=col_help(show.columns))
+        st.caption("Yahoo가 미결제약정을 0으로 준 만기는 맥스페인·풋/콜 미결제가 '-'로 표시됩니다.")
+
+
+# ----------------------------------------------------------------------
+# 변동성 모형 보정 (SVI · SABR · 헤스턴)
+# ----------------------------------------------------------------------
+def _otm_quotes(d: pd.DataFrame, S: float, T: float, r: float, q: float, kmax: float = 0.5):
+    """외가격 옵션(행사가 < 선도가는 풋, 이상은 콜)의 IV. 호가가 있는 것만, 로그 머니니스 |k| ≤ kmax."""
+    F = S * math.exp((r - q) * T)
+    x = d[np.isfinite(d["iv"]) & (d["iv"] > 0.02) & (d["iv"] < 3) & (d["bid"].fillna(0) > 0)].copy()
+    x = x[(x["is_call"] & (x["strike"] >= F)) | (~x["is_call"] & (x["strike"] < F))]
+    x["k"] = np.log(x["strike"] / F)
+    x = x[x["k"].abs() <= kmax * max(1.0, math.sqrt(T / 0.25))]
+    return F, x.sort_values("strike")
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _fit_all(ticker: str, keyset: tuple, data: tuple, S: float, r: float, q: float, beta: float, n_hes: int):
+    import volmodels as vm
+
+    out = {"svi": {}, "sabr": {}}
+    hes_in = []
+    for e, T, F, ks, Ks, ivs in data:
+        ks, Ks, ivs = np.array(ks), np.array(Ks), np.array(ivs)
+        out["svi"][e] = vm.fit_svi(ks, ivs, T)
+        out["sabr"][e] = vm.fit_sabr(F, Ks, ivs, T, beta)
+        if T >= 10 / 365 and len(Ks) >= 4:
+            sel = np.linspace(0, len(Ks) - 1, min(15, len(Ks))).round().astype(int)
+            hes_in.append((T, Ks[sel], ivs[sel]))
+    hes_in = hes_in[:n_hes]
+    out["heston"] = vm.fit_heston(S, r, q, hes_in) if hes_in else {"ok": False, "msg": "10일 이상 만기가 없습니다"}
+    return out
+
+
+def render_calibration(ticker: str, chains: dict, S: float, r: float, q: float) -> None:
+    import volmodels as vm
+
+    if vm.least_squares is None:
+        st.error("이 기능에는 scipy 패키지가 필요합니다 (requirements.txt에 scipy 추가).")
+        return
+    c1, c2 = st.columns(2)
+    beta = c1.selectbox("SABR β", [0.5, 1.0, 0.0, 0.7], index=0, key="cal_beta",
+                        help="1 = 로그정규, 0 = 정규, 주식은 보통 0.5~1을 고정하고 나머지만 맞춥니다")
+    n_hes = c2.slider("헤스턴에 쓸 만기 수", 2, 8, 5, key="cal_nh", help="많을수록 정확하지만 오래 걸립니다")
+    data = []
+    for e, d in chains.items():
+        T = years_to_expiry(e)
+        if T < 3 / 365:
+            continue
+        F, x = _otm_quotes(d, S, T, r, q)
+        if len(x) >= 5:
+            data.append((e, T, F, tuple(x["k"].round(6)), tuple(x["strike"]), tuple(x["iv"].round(6))))
+    if not data:
+        st.info("보정에 쓸 외가격 옵션 호가가 부족합니다.")
+        return
+    with st.spinner("SVI·SABR·헤스턴 모형을 시장 IV에 맞추는 중..."):
+        Fit = _fit_all(ticker, tuple(e for e, *_ in data), tuple(data), float(S), float(r), float(q), float(beta), int(n_hes))
+
+    # ---- 요약
+    H = Fit["heston"]
+    svi_r = [v["rmse"] for v in Fit["svi"].values() if v.get("ok")]
+    sab_r = [v["rmse"] for v in Fit["sabr"].values() if v.get("ok")]
+    st.markdown("###### 모형별 평균 오차")
+    mgrid([("SVI RMSE", f"{np.mean(svi_r) * 100:.2f}%p" if svi_r else "-", "만기별 스마일 맞춤"),
+           ("SABR RMSE", f"{np.mean(sab_r) * 100:.2f}%p" if sab_r else "-", f"β = {beta:g}"),
+           ("헤스턴 RMSE", f"{H['rmse'] * 100:.2f}%p" if H.get("ok") else "-", f"{len(H.get('fits', []))}개 만기를 한 번에 맞춤" if H.get("ok") else H.get("msg", "")),
+           ("나비 차익 없는 SVI 만기", f"{sum(v.get('arb_free', False) for v in Fit['svi'].values())}/{len(Fit['svi'])}")], cols=4)
+    if H.get("ok"):
+        st.markdown("###### 헤스턴 파라미터 (곡면 전체)")
+        mgrid([("v0", f"{H['v0']:.4f}", f"현재 변동성 {math.sqrt(H['v0']) * 100:.1f}%"), ("θ", f"{H['theta']:.4f}", f"장기 변동성 {math.sqrt(H['theta']) * 100:.1f}%"),
+               ("κ", f"{H['kappa']:.2f}", f"반감기 {math.log(2) / H['kappa'] * 12:.1f}개월"), ("σv", f"{H['sigma']:.2f}"),
+               ("ρ", f"{H['rho']:+.2f}"), ("펠러 조건", "충족" if H["feller"] else "위반")], cols=6)
+
+    # ---- 만기별 스마일
+    exps = [e for e, *_ in data]
+    e = st.selectbox("스마일을 볼 만기", exps, key="cal_exp")
+    row = next(x for x in data if x[0] == e)
+    _, T, F, ks, Ks, ivs = row
+    ks, Ks, ivs = np.array(ks), np.array(Ks), np.array(ivs)
+    grid = np.linspace(Ks.min(), Ks.max(), 80)
+    kg = np.log(grid / F)
+    f = go.Figure()
+    f.add_trace(go.Scatter(x=Ks, y=ivs * 100, mode="markers", name="시장 IV (외가격)", marker=dict(color="#888", size=7)))
+    sv = Fit["svi"].get(e, {})
+    if sv.get("ok"):
+        f.add_trace(go.Scatter(x=grid, y=np.sqrt(np.maximum(vm.svi_w(kg, sv["a"], sv["b"], sv["rho"], sv["m"], sv["s"]), 1e-12) / T) * 100,
+                               name=f"SVI (오차 {sv['rmse'] * 100:.2f}%p)", line=dict(color="#4C9BE8", width=2)))
+    sb = Fit["sabr"].get(e, {})
+    if sb.get("ok"):
+        f.add_trace(go.Scatter(x=grid, y=vm.sabr_vol(F, grid, T, sb["alpha"], sb["beta"], sb["rho"], sb["nu"]) * 100,
+                               name=f"SABR (오차 {sb['rmse'] * 100:.2f}%p)", line=dict(color="#F2A93B", width=2, dash="dash")))
+    if H.get("ok"):
+        hv = vm.heston_iv(S, grid, T, r, q, (H["v0"], H["kappa"], H["theta"], H["sigma"], H["rho"]))
+        f.add_trace(go.Scatter(x=grid, y=hv * 100, name="헤스턴", line=dict(color="#E5534B", width=2, dash="dot")))
+    f.add_vline(x=F, line_dash="dot", line_color="#888", annotation_text="선도가")
+    f.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
+                    xaxis_title="행사가", yaxis=dict(title="내재변동성(%)", ticksuffix="%"), legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+    st.plotly_chart(f, use_container_width=True)
+
+    rows = []
+    for e_, T_, *_r in data:
+        sv, sb = Fit["svi"].get(e_, {}), Fit["sabr"].get(e_, {})
+        rows.append({"만기": e_, "잔존일": int(round(T_ * 365)),
+                     "SVI a": f"{sv['a']:.4f}" if sv.get("ok") else "-", "SVI b": f"{sv['b']:.4f}" if sv.get("ok") else "-",
+                     "SVI ρ": f"{sv['rho']:+.3f}" if sv.get("ok") else "-", "SVI m": f"{sv['m']:+.3f}" if sv.get("ok") else "-",
+                     "SVI σ": f"{sv['s']:.3f}" if sv.get("ok") else "-", "SVI 오차": f"{sv['rmse'] * 100:.2f}%p" if sv.get("ok") else "-",
+                     "나비 차익": ("없음" if sv.get("arb_free") else "있음") if sv.get("ok") else "-",
+                     "SABR α": f"{sb['alpha']:.4f}" if sb.get("ok") else "-", "SABR ρ": f"{sb['rho']:+.3f}" if sb.get("ok") else "-",
+                     "SABR ν": f"{sb['nu']:.3f}" if sb.get("ok") else "-", "SABR 오차": f"{sb['rmse'] * 100:.2f}%p" if sb.get("ok") else "-"})
+    from glossary import col_help
+
+    tb = pd.DataFrame(rows)
+    st.dataframe(tb, use_container_width=True, hide_index=True, column_config=col_help(tb.columns))

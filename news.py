@@ -116,7 +116,7 @@ def relevance(item: dict, kws: list, ticker: str) -> int:
 
 
 def _tokens(title: str) -> set:
-    w = re.findall(r"[a-z0-9]+", title.lower())
+    w = re.findall(r"[a-z0-9가-힣]+", title.lower())
     stop = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "as", "is", "are", "at", "by", "with", "its", "after", "from"}
     return {x for x in w if x not in stop}
 
@@ -135,13 +135,20 @@ def dedupe(items: list, thr: float = 0.6) -> list:
 
 
 @st.cache_data(ttl=15 * 60, show_spinner="최신 뉴스를 검색하는 중...")
-def latest_news(ticker: str, name: str, yf_items: list, n: int = 3, days: int = 7) -> dict:
-    kws = keywords(name, ticker)
-    q = " OR ".join([f'"{k}"' for k in kws[:3]] + [ticker]) + f" when:{days}d"
+def latest_news(ticker: str, name: str, yf_items: list, n: int = 3, days: int = 7, lang: str = "en") -> dict:
+    if lang == "ko":  # 국내 종목: 한국어 Google 뉴스에서 회사 이름으로 검색
+        kws = [name]
+        q = f'"{name}" when:{days}d'
+        g_url = "https://news.google.com/rss/search?" + urllib.parse.urlencode({"q": q, "hl": "ko", "gl": "KR", "ceid": "KR:ko"})
+        feeds = ((g_url, "google"),)
+    else:
+        kws = keywords(name, ticker)
+        q = " OR ".join([f'"{k}"' for k in kws[:3]] + [ticker]) + f" when:{days}d"
+        g_url = "https://news.google.com/rss/search?" + urllib.parse.urlencode({"q": q, "hl": "en-US", "gl": "US", "ceid": "US:en"})
+        y_url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={urllib.parse.quote(ticker)}&region=US&lang=en-US"
+        feeds = ((g_url, "google"), (y_url, "yahoo"))
     pool, errs = [], []
-    g_url = "https://news.google.com/rss/search?" + urllib.parse.urlencode({"q": q, "hl": "en-US", "gl": "US", "ceid": "US:en"})
-    y_url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={urllib.parse.quote(ticker)}&region=US&lang=en-US"
-    for url, tag in ((g_url, "google"), (y_url, "yahoo")):
+    for url, tag in feeds:
         for _ in range(2):
             try:
                 pool += _parse_rss(_get(url), tag)
@@ -150,7 +157,7 @@ def latest_news(ticker: str, name: str, yf_items: list, n: int = 3, days: int = 
                 err = f"{tag}: {e}"
         else:
             errs.append(err)
-    pool += _from_yf(yf_items)
+    pool += _from_yf(yf_items) if lang != "ko" else []
     now = datetime.now(timezone.utc)
     pool = [p for p in pool if p["time"] is None or (now - p["time"]).days <= max(days, 14)]
     for p in pool:
@@ -180,10 +187,12 @@ def _ago(dt) -> str:
     return f"{rel} · {dt.astimezone(KST):%m-%d %H:%M} KST"
 
 
-def render_latest_news(ticker: str, name: str, yf_items: list, ko: bool, translate) -> None:
+def render_latest_news(ticker: str, name: str, yf_items: list, ko: bool, translate, lang: str = "en") -> None:
     st.markdown("##### 최신 뉴스 3")
+    if lang == "ko":
+        ko = False  # 이미 한국어 기사
     try:
-        res = latest_news(ticker, name, yf_items or [])
+        res = latest_news(ticker, name, yf_items or [], lang=lang)
     except Exception as e:  # noqa: BLE001
         st.caption(f"뉴스를 검색하지 못했습니다: {e}")
         return
@@ -205,6 +214,5 @@ def render_latest_news(ticker: str, name: str, yf_items: list, ko: bool, transla
                      f'<span style="opacity:.6;margin-right:6px">{i}</span>{link}{orig}{summ}'
                      f'<div style="font-size:0.78rem;opacity:.6;margin-top:3px">{html.escape(meta)}</div></div>')
     st.markdown("".join(cards).replace("$", "&#36;"), unsafe_allow_html=True)
-    st.caption(f"Google 뉴스·Yahoo Finance에서 최근 7일 기사 {res['pool']}건을 모아 제목에 '{'·'.join(res['keywords'])}' 또는 '{ticker}'가 들어간 기사를 "
-               "우선 고르고, 같은 사건을 다룬 중복 기사와 여러 종목을 묶은 목록형 기사는 걸러낸 뒤 가장 최근 3건을 보여줍니다. 15분마다 새로 검색합니다."
-               + (f" (일부 출처 실패: {', '.join(res['errors'])})" if res["errors"] else ""))
+    if res["errors"]:
+        st.caption(f"일부 출처를 불러오지 못했습니다: {', '.join(res['errors'])}")

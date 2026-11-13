@@ -255,8 +255,6 @@ def render_capm_opt() -> None:
     st.dataframe(df.style.format({"단가($)": "{:,.2f}", "가치($)": "{:,.0f}", "달러 델타($)": "{:,.0f}", "탄력성 Ω": "{:,.2f}",
                                   "베타": "{:,.2f}", "CAPM 기대수익률(연)": "{:.1%}"}, na_rep="-"),
                  use_container_width=True, hide_index=True)
-    st.caption("옵션 베타 = 탄력성 Ω(=Δ·S/옵션가) × 주식 베타. 주식 베타는 최근 1년 일별 수익률을 S&P 500에 회귀해 구했습니다. "
-               "옵션의 CAPM 기대수익률은 '지금 이 순간'의 값이며, 옵션 베타는 가격·시간에 따라 계속 바뀝니다. 매도 포지션은 가치가 음수입니다.")
 
     # ---- 포트폴리오 수치
     st.subheader("포트폴리오 수치")
@@ -284,18 +282,10 @@ def render_capm_opt() -> None:
         pnlh, _ = simulate(book, max(h_days, 1e-3), drifts, n_sims) if h_days > 0 else (np.zeros(1), None)
     v95, e95 = _var_es(pnl1, 0.95)
     v99, e99 = _var_es(pnl1, 0.99)
-    # 델타-정규 VaR: 기초자산별 달러 델타와 공분산
-    codes = list(book)
-    dd_vec = np.array([book[c]["shares"] * book[c]["P"]["S"] +
-                       sum(lg["n"] * MULT * lg["delta"] * book[c]["P"]["S"] for lg in book[c]["legs"]) for c in codes])
-    rets = pd.concat({c: np.log(book[c]["P"]["close"]).diff() for c in codes}, axis=1, join="inner").dropna().iloc[-252:]
-    cov_d = rets.cov().values if len(rets) >= 30 else np.diag([(book[c]["P"]["sig_theo"] ** 2) / 252 for c in codes])
-    sig_dd = float(np.sqrt(max(dd_vec @ cov_d @ dd_vec, 0.0)))
 
     st.subheader("위험 수치 (1일)")
     mgrid([("VaR 95%", _usd(v95)), ("ES 95%", _usd(e95)), ("VaR 99%", _usd(v99)), ("ES 99%", _usd(e99))])
-    st.caption(f"몬테카를로 {n_sims:,}회, 최근 1년 수익률 공분산으로 종목 간 상관 반영, 옵션은 전체 재평가(감마 효과 포함). "
-               f"참고: 델타-정규 VaR 95% = {_usd(1.645 * sig_dd)}, 99% = {_usd(2.326 * sig_dd)} (델타만 반영).")
+    st.caption(f"몬테카를로 {n_sims:,}회, 최근 1년 수익률 상관 반영, 옵션은 전체 재평가")
 
     if h_days > 0:
         st.subheader(f"{h_days:g}일 뒤 손익 분포 (CAPM 기대수익률을 추세로 사용)")

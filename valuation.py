@@ -147,7 +147,7 @@ def load_quarterly(ticker: str) -> dict:
     return out
 
 
-def _asof(df: pd.DataFrame, days: pd.DatetimeIndex) -> pd.Series:
+def _asof(df: pd.DataFrame, days: pd.DatetimeIndex, stale: int = STALE_DAYS) -> pd.Series:
     """제출일 기준으로 그날 알 수 있던 가장 최근 값. 너무 오래된 값은 비움."""
     if df is None or len(df) == 0:
         return pd.Series(np.nan, index=days)
@@ -159,11 +159,11 @@ def _asof(df: pd.DataFrame, days: pd.DatetimeIndex) -> pd.Series:
     left = pd.DataFrame({"d": pd.DatetimeIndex(days).astype("datetime64[ns]")})
     m = pd.merge_asof(left, s[["filed", "val", "end"]].rename(columns={"filed": "d"}), on="d", direction="backward")
     age = (m["d"] - m["end"]).dt.days
-    v = m["val"].where(age <= STALE_DAYS)
+    v = m["val"].where(age <= stale)
     return pd.Series(v.values, index=days)
 
 
-def daily_valuation(Q: dict, hist: pd.Series, splits) -> pd.DataFrame:
+def daily_valuation(Q: dict, hist: pd.Series, splits, stale: int = STALE_DAYS) -> pd.DataFrame:
     h = hist.dropna().astype(float).copy()
     h.index = pd.to_datetime(h.index)
     if h.index.tz is not None:
@@ -180,9 +180,9 @@ def daily_valuation(Q: dict, hist: pd.Series, splits) -> pd.DataFrame:
         if sp.index.tz is not None:
             sp.index = sp.index.tz_localize(None)
         sh["val"] = [v * float(np.prod(sp[sp.index > f].values)) if (sp.index > f).any() else v for v, f in zip(sh["val"], sh["filed"])]
-    shares = _asof(sh, days)
+    shares = _asof(sh, days, max(stale, 500))
     mcap = h * shares
-    g = {k: _asof(Q.get(k), days) for k in list(DUR) + list(INST)}
+    g = {k: _asof(Q.get(k), days, stale) for k in list(DUR) + list(INST)}
     debt = g["단기차입금"].fillna(0) + g["장기차입금"].fillna(0)
     cash = g["현금성자산"].fillna(0) + g["단기투자"].fillna(0)
     ev = mcap + debt - cash
