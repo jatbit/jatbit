@@ -257,13 +257,22 @@ def compute_ratios(sec: pd.DataFrame, hist: pd.Series, splits) -> pd.DataFrame:
 DAILY = {  # 이름: 단위
     "주가": "$", "12M 트레일링 PER": "배", "12M 선행 PER (사후 실현 EPS)": "배",
     "현재 12M 선행 PER (컨센서스)": "배", "트레일링 PER 평균 ±1σ 밴드": "배",
-    "현재 PER (최근 12개월 EPS)": "배",
 }
 try:  # 일별 밸류에이션 배수 (valuation.py, SEC 분기 공시 기준)
     from valuation import VAL as _VAL
     DAILY.update({k: v[0] for k, v in _VAL.items()})
 except Exception:  # noqa: BLE001
     _VAL = {}
+
+
+_PER_LABEL = {  # 목록에 보이는 이름 (안쪽 키는 그대로)
+    "12M 트레일링 PER": "PER · 일별 (그날 주가 ÷ 그때까지 발표된 1년치 EPS)",
+    "PER (시가총액 ÷ 순이익 TTM)": "PER · 일별 (그날 시가총액 ÷ 그때까지 발표된 1년치 순이익)",
+    "12M 선행 PER (사후 실현 EPS)": "선행 PER · 일별 (그날 주가 ÷ 그 뒤 1년 동안 실제로 나온 EPS)",
+    "트레일링 PER 평균 ±1σ 밴드": "PER 평균 ±1σ 밴드",
+    "현재 12M 선행 PER (컨센서스)": "오늘 선행 PER (애널리스트 예상 EPS 기준, 점 하나)",
+}
+_PER_TRACE = {"12M 트레일링 PER": "PER", "PER (시가총액 ÷ 순이익 TTM)": "PER", "12M 선행 PER (사후 실현 EPS)": "선행 PER(사후)"}
 
 
 def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") -> None:
@@ -275,16 +284,6 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
     d_avail = ["주가"] if isinstance(hist, pd.Series) and len(hist) else []
     if per is not None:
         d_avail += ["12M 트레일링 PER", "12M 선행 PER (사후 실현 EPS)", "트레일링 PER 평균 ±1σ 밴드"]
-    # 현재 PER(트레일링): 분기 EPS로 만든 일별 트레일링 PER의 마지막 값, 없으면 Yahoo trailingPE
-    cur_pe, cur_pe_src = None, ""
-    if per is not None and per[0].notna().any():
-        cur_pe, cur_pe_src = float(per[0].dropna().iloc[-1]), "최근 4개 분기 발표 EPS 합"
-    else:
-        _tpe = _num((R.get("info") or {}).get("trailingPE"))
-        if _tpe and _tpe > 0:
-            cur_pe, cur_pe_src = float(_tpe), "Yahoo 최근 12개월 EPS"
-    if cur_pe:
-        d_avail.append("현재 PER (최근 12개월 EPS)")
     if px and n_eps and n_eps > 0:
         d_avail.append("현재 12M 선행 PER (컨센서스)")
     dv, dv_err = None, None
@@ -315,14 +314,15 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
     def _label(k):
         if k in a_avail:
             return f"{k} · 연간 ({RATIOS[k][1]}, {RATIOS[k][0]})"
+        if k in _PER_LABEL:
+            return _PER_LABEL[k]
         if k in _VAL:
             return f"{k} · 일별 ({DAILY[k]})"
-        if k.startswith("현재 "):
-            return f"{k} · 오늘 값 (점)"
-        return k if k == "주가" else f"{k} · 일별"
+        return _PER_LABEL.get(k) or (k if k == "주가" else f"{k} · 일별")
 
     chosen = st.multiselect("그래프에 그릴 항목 (주가·밸류에이션은 일별, 나머지 재무비율은 연간)", options,
-                            default=[k for k in ("주가",) if k in options], key=f"rs_combo_{ticker}",
+                            default=[k for k in ("주가", "12M 트레일링 PER", "PER (시가총액 ÷ 순이익 TTM)") if k in options][:2],
+                            key=f"rs_combo_{ticker}",
                             format_func=_label)
     sel = [k for k in chosen if k in a_avail]
     dsel = [k for k in chosen if k in d_avail]
@@ -379,7 +379,7 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
         if k in _VAL and dv is not None:
             sr = _clip(dv[k]).dropna()
             unit = DAILY[k]
-            fig.add_trace(go.Scatter(x=sr.index, y=sr.values, name=f"{k} (일별)", mode="lines", yaxis=ax, line=dict(color=color, width=1.3),
+            fig.add_trace(go.Scatter(x=sr.index, y=sr.values, name=_PER_TRACE.get(k, f"{k} (일별)"), mode="lines", yaxis=ax, line=dict(color=color, width=1.3),
                                      hovertemplate="%{x|%Y-%m-%d} " + k + (" %{y:.2f}%" if unit == "%" else " %{y:.2f}배") + "<extra></extra>"))
             if unit != "%":
                 x_vals.append(sr.values)
@@ -392,10 +392,10 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
             fig.add_trace(go.Scatter(x=h.index, y=h.values, name="주가", mode="lines", yaxis=ax, line=dict(color=color, width=1.4),
                                      hovertemplate="%{x|%Y-%m-%d} 주가 %{y:,.2f}<extra></extra>"))
         elif k == "12M 트레일링 PER":
-            fig.add_trace(go.Scatter(x=trail.index, y=trail.values, name=k, mode="lines", yaxis=ax, line=dict(color=color, width=1.4),
-                                     hovertemplate="%{x|%Y-%m-%d} 트레일링 PER %{y:.1f}배<extra></extra>"))
+            fig.add_trace(go.Scatter(x=trail.index, y=trail.values, name="PER", mode="lines", yaxis=ax, line=dict(color=color, width=1.4),
+                                     hovertemplate="%{x|%Y-%m-%d} PER %{y:.1f}배<extra></extra>"))
         elif k == "12M 선행 PER (사후 실현 EPS)":
-            fig.add_trace(go.Scatter(x=fwd_r.index, y=fwd_r.values, name=k, mode="lines", yaxis=ax,
+            fig.add_trace(go.Scatter(x=fwd_r.index, y=fwd_r.values, name="선행 PER(사후)", mode="lines", yaxis=ax,
                                      line=dict(color=color, width=1.4, dash="dash"),
                                      hovertemplate="%{x|%Y-%m-%d} 선행 PER(사후) %{y:.1f}배<extra></extra>"))
         elif k == "트레일링 PER 평균 ±1σ 밴드":
@@ -407,15 +407,9 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
                                      (m - sd, f"평균−1σ {m - sd:.1f}배", "dot")):
                     fig.add_trace(go.Scatter(x=[x0, x1], y=[yv, yv], name=nm, mode="lines", yaxis=ax,
                                              line=dict(color="#888", width=1, dash=dash), hoverinfo="skip"))
-        elif k == "현재 PER (최근 12개월 EPS)":
-            now = pd.Timestamp(hist.index[-1]).tz_localize(None) if getattr(hist.index, "tz", None) is not None else pd.Timestamp(hist.index[-1])
-            fig.add_trace(go.Scatter(x=[now], y=[cur_pe], name=f"현재 PER {cur_pe:.1f}배", mode="markers", yaxis=ax,
-                                     marker=dict(size=14, symbol="diamond", color="#4C9BE8"),
-                                     hovertemplate=f"현재 PER(트레일링) {cur_pe:.1f}배 · {cur_pe_src}<extra></extra>"))
-            x_vals.append(np.array([cur_pe]))
         elif k == "현재 12M 선행 PER (컨센서스)":
             now = pd.Timestamp(hist.index[-1]).tz_localize(None) if getattr(hist.index, "tz", None) is not None else pd.Timestamp(hist.index[-1])
-            fig.add_trace(go.Scatter(x=[now], y=[px / n_eps], name=f"현재 12M 선행 PER {px / n_eps:.1f}배", mode="markers", yaxis=ax,
+            fig.add_trace(go.Scatter(x=[now], y=[px / n_eps], name=f"오늘 선행 PER {px / n_eps:.1f}배", mode="markers", yaxis=ax,
                                      marker=dict(size=14, symbol="star", color="#E5534B"),
                                      hovertemplate=f"현재 12M 선행(NTM) PER {px / n_eps:.1f}배<extra></extra>"))
         ci += 1
