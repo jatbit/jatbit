@@ -300,23 +300,35 @@ def render_capm_opt() -> None:
 
     # ---- 기초자산별 손익 그래프
     st.subheader("기초자산별 손익 그래프")
+    st.caption("가로축은 기초자산 가격, 세로축은 그 가격이 되었을 때 내 포지션의 손익입니다. 주식만 보유하면 손익 = 주식 수 × 가격 변화라 "
+               "곧은 직선(주가와 같은 방향)으로 나오고, 옵션이나 헷지 거래가 들어가면 선이 꺾이거나 현재가 근처에서 평평해집니다.")
+    hedged = {}
+    if not include_hedge and st.session_state.get("hedge_trades"):
+        try:
+            u2, _sk = collect_positions(True)
+            b2, _w = price_positions({c: v for c, v in u2.items() if c in book})
+            hedged = {c: v for c, v in b2.items() if c in book}
+        except Exception:  # noqa: BLE001
+            hedged = {}
     rng_pct = st.slider("가격 범위 (현재가 대비 ±%)", 10, 80, 30, 5, key="capm_rng")
     for code, u in book.items():
-        _payoff_chart(code, u, h_days, rng_pct / 100)
+        _payoff_chart(code, u, h_days, rng_pct / 100, hedged.get(code))
 
 
-def _payoff_chart(code: str, u: dict, h_days: float, rng: float) -> None:
+def _payoff_chart(code: str, u: dict, h_days: float, rng: float, u_hedged: dict | None = None) -> None:
     P = u["P"]
     S0 = P["S"]
     xs = np.linspace(S0 * (1 - rng), S0 * (1 + rng), 401)
     first_T = min([lg["T"] for lg in u["legs"]], default=None)
     curves = {"오늘": (pnl_at(u, xs, 0.0), COLORS["today"], "dot")}
+    if u_hedged is not None and (u_hedged["legs"] or u_hedged["shares"] != u["shares"]):
+        curves["헷지 거래까지 넣으면 (오늘)"] = (pnl_at(u_hedged, xs, 0.0), "#5BB56E", "solid")
     if h_days > 0 and (first_T is None or abs(h_days / 365 - first_T) > 0.5 / 365):
         curves[f"{h_days:g}일 뒤"] = (pnl_at(u, xs, h_days / 365), COLORS["horizon"], "dash")
     if first_T is not None:
         exp_lbl = next(lg["exp"] for lg in u["legs"] if lg["T"] == first_T)
         curves[f"가장 가까운 만기 {exp_lbl}"] = (pnl_at(u, xs, first_T), COLORS["expiry"], "solid")
-    key_name, (ky, _, _) = list(curves.items())[-1]
+    key_name, (ky, _, _) = [kv for kv in curves.items() if not kv[0].startswith("헷지")][-1]
 
     fig = go.Figure()
     for name, (y, color, dash) in curves.items():
@@ -334,6 +346,8 @@ def _payoff_chart(code: str, u: dict, h_days: float, rng: float) -> None:
                       xaxis_title=f"{code} 가격($)", yaxis_title="손익($)",
                       legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0))
     st.markdown(f"**{code}** · 현재가 {S0:,.2f} · 주식 {u['shares']:,.2f}주 · 옵션 {len(u['legs'])}건 · 베타 {u.get('beta', float('nan')):.2f}")
+    if not u["legs"] and u_hedged is None:
+        st.caption("옵션이 없어 손익선이 직선입니다 (주식 수 × 가격 변화). '델타·감마 헷지' 탭에서 헷지를 계산하면 헷지 후 선이 함께 그려집니다.")
     st.plotly_chart(fig, use_container_width=True)
 
     mx, mn = float(ky.max()), float(ky.min())
