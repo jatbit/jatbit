@@ -17,12 +17,12 @@ import ui
 GROUPS = [
     ("국내 · 미국 지수", [("^KS11", "코스피", "idx"), ("^KQ11", "코스닥", "idx"), ("^GSPC", "S&P 500", "idx"),
                        ("^IXIC", "나스닥 종합", "idx"), ("^DJI", "다우존스", "idx"), ("^SOX", "필라델피아 반도체", "idx")]),
-    ("환율 · 금리 · 변동성", [("KRW=X", "원/달러 환율", "fx"), ("DX-Y.NYB", "달러인덱스", "idx"), ("KR3Y", "국고채 3년", "rate"),
+    ("환율 · 금리 · 변동성", [("KRW=X", "원/달러 환율", "fx"), ("DX-Y.NYB", "달러인덱스", "idx"), ("^IRX", "미국 국채 3개월", "rate"),
                          ("^TNX", "미국 국채 10년", "rate"), ("^VIX", "VIX (공포지수)", "idx"), ("JPYKRW=X", "원/엔 (100엔)", "jpy")]),
     ("원자재 · 가상자산", [("CL=F", "WTI 원유", "usd"), ("GC=F", "금", "usd"), ("HG=F", "구리", "usd2"),
                        ("NG=F", "천연가스", "usd2"), ("BTC-USD", "비트코인", "usd0"), ("ETH-USD", "이더리움", "usd0")]),
 ]
-RATE_KINDS = {"KR3Y", "^TNX"}
+RATE_KINDS = {"^IRX", "^TNX"}
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -30,29 +30,11 @@ def load_quotes() -> pd.DataFrame:
     """Yahoo 일별 종가 (최근 1년). 열 = 심볼."""
     import yfinance as yf
 
-    syms = [s for _, items in GROUPS for s, _, _ in items if s != "KR3Y"]
+    syms = [s for _, items in GROUPS for s, _, _ in items]
     d = yf.download(syms, period="1y", interval="1d", progress=False, auto_adjust=False, threads=True)
     close = d["Close"] if isinstance(d.columns, pd.MultiIndex) else d[["Close"]]
     close.index = pd.to_datetime(close.index).tz_localize(None) if getattr(close.index, "tz", None) else pd.to_datetime(close.index)
     return close.sort_index()
-
-
-@st.cache_data(ttl=60 * 30, show_spinner=False)
-def load_kr3y() -> pd.Series:
-    import FinanceDataReader as fdr
-
-    start = pd.Timestamp.today() - pd.Timedelta(days=380)
-    end = pd.Timestamp.today()
-    try:
-        s = fdr.DataReader("KR3YT=RR", start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))["Close"].dropna()
-        if len(s) >= 2:
-            return s
-    except Exception:  # noqa: BLE001
-        pass
-    from rates import _load_kr3y_range  # 한국은행 ECOS (최근 3개월만: 요청 수를 줄임)
-
-    rows = _load_kr3y_range((end - pd.Timedelta(days=100)).strftime("%Y%m%d"), end.strftime("%Y%m%d"))
-    return pd.Series({pd.to_datetime(t, format="%Y%m%d"): v for t, v in rows}).sort_index()
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -90,12 +72,10 @@ def _fmt(v: float, kind: str) -> str:
 
 
 def _series(close: pd.DataFrame, kr3y, sym: str, kind: str) -> pd.Series:
-    if sym == "KR3Y":
-        return kr3y if kr3y is not None else pd.Series(dtype=float)
     if close is None or sym not in close.columns:
         return pd.Series(dtype=float)
     s = close[sym].dropna()
-    if sym == "^TNX" and len(s) and float(s.iloc[-1]) > 20:  # 예전 표기(×10) 대비
+    if sym in ("^TNX", "^IRX") and len(s) and float(s.iloc[-1]) > 20:  # 예전 표기(×10) 대비
         s = s / 10
     if kind == "jpy":
         s = s * 100
@@ -183,11 +163,11 @@ def _with_ctx(fn):
 
 def render_market() -> None:
     with st.spinner("시장 데이터를 불러오는 중..."):
-        with ThreadPoolExecutor(max_workers=3) as ex:
-            f_q, f_k, f_x = (ex.submit(_with_ctx(fn)) for fn in (load_quotes, load_kr3y, load_krx_snapshot))
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_q, f_x = (ex.submit(_with_ctx(fn)) for fn in (load_quotes, load_krx_snapshot))
             close = kr3y = snap = None
             errs = []
-            for nm, f in (("해외·지수", f_q), ("국고채", f_k), ("국내 종목", f_x)):
+            for nm, f in (("해외·지수", f_q), ("국내 종목", f_x)):
                 try:
                     v = f.result()
                 except Exception as e:  # noqa: BLE001
@@ -195,8 +175,6 @@ def render_market() -> None:
                     continue
                 if nm == "해외·지수":
                     close = v
-                elif nm == "국고채":
-                    kr3y = v
                 else:
                     snap = v
 
@@ -263,4 +241,4 @@ def render_market() -> None:
             st.caption("금리는 bp(0.01%p) 변화, 나머지는 % 등락률입니다.")
     if errs:
         st.caption("일부 데이터를 불러오지 못했습니다: " + " · ".join(errs))
-    st.caption("출처: Yahoo Finance · KRX(FinanceDataReader) · 국고채 금리(FinanceDataReader). 투자 판단의 참고 자료로만 사용하세요.")
+    st.caption("출처: Yahoo Finance · KRX(FinanceDataReader). 투자 판단의 참고 자료로만 사용하세요.")
