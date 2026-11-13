@@ -718,6 +718,11 @@ def render_research() -> None:
     ui.quote_header(name, code or ticker, " · ".join(meta), money.price(px) if px else "-",
                     money.price(abs(chg)) if chg is not None else None, (chg / prev * 100) if chg is not None else None,
                     "Yahoo 지연 시세")
+    if not _num(info.get("trailingPE")) or not _num(info.get("priceToBook")):
+        try:  # Yahoo에 PER·PBR이 없으면 재무제표로 직접 계산 (첫 탭에서도 쓰므로 캐시됨)
+            R["_F"] = _financials(ticker, R, domestic, code)[0]
+        except Exception:  # noqa: BLE001
+            pass
     _key_stats(R, info, cur, px)
 
     tabs = ui.lazy_tabs(["재무·밸류에이션", "뉴스·기업 개요", "동종업계 비교", "실적·추정치", "DCF 가치평가", "신용위험·회사채", "지분 구조·내부자"],
@@ -782,6 +787,55 @@ def render_research() -> None:
                 render_insider(ticker, R)
 
 
+def _last_pos(F, row):
+    """연간 재무제표 F에서 row의 가장 최근 값 (없으면 None)."""
+    try:
+        if F is None or row not in F.index:
+            return None
+        s = pd.to_numeric(F.loc[row], errors="coerce").dropna()
+        return float(s.iloc[-1]) if len(s) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _pe_pb(info: dict, px, F=None, R: dict | None = None):
+    """오늘의 PER·PBR. Yahoo 값이 비어 있으면 (현재가 ÷ 최근 4개 분기 발표 EPS 합, 그래프와 같은 기준)
+    → (현재가 ÷ EPS) → (시가총액 ÷ 순이익) → 재무제표 순으로 직접 계산."""
+    mcap = _num(info.get("marketCap"))
+    pe = _num(info.get("trailingPE"))
+    if (not pe or pe <= 0) and R is not None and px:
+        try:
+            per = per_series(R.get("hist"), R.get("edates"))
+            if per is not None:
+                ttm = float(per[2].rolling(4).sum().iloc[-1])
+                pe = px / ttm if ttm > 0 else None
+        except Exception:  # noqa: BLE001
+            pe = None
+    if not pe or pe <= 0:
+        pe = None
+        eps = _num(info.get("trailingEps"))
+        ni = _num(info.get("netIncomeToCommon"))
+        if px and eps and eps > 0:
+            pe = px / eps
+        elif mcap and ni and ni > 0:
+            pe = mcap / ni
+        else:
+            ni = _last_pos(F, "순이익")
+            if mcap and ni and ni > 0:
+                pe = mcap / ni
+    pb = _num(info.get("priceToBook"))
+    if not pb or pb <= 0:
+        pb = None
+        bv = _num(info.get("bookValue"))
+        if px and bv and bv > 0:
+            pb = px / bv
+        else:
+            eq = _last_pos(F, "자기자본")
+            if mcap and eq and eq > 0:
+                pb = mcap / eq
+    return pe, pb
+
+
 def _key_stats(R: dict, info: dict, cur: str, px) -> None:
     """MTS·Yahoo 요약 화면처럼 가장 자주 보는 지표만 먼저."""
     import money
@@ -794,10 +848,11 @@ def _key_stats(R: dict, info: dict, cur: str, px) -> None:
     rec = info.get("recommendationKey") or "none"
     n_op = int(info["numberOfAnalystOpinions"]) if _num(info.get("numberOfAnalystOpinions")) else None
     rng = (f"{lo52:,.0f} ~ {hi52:,.0f}" if cur == "₩" else f"{lo52:,.2f} ~ {hi52:,.2f}") if lo52 and hi52 else "-"
+    pe, pb = _pe_pb(info, px, R.get("_F"), R)
     ui.cards([
         ("시가총액", big(info.get("marketCap"), cur)),
-        ("PER (최근 12개월)", ratio(info.get("trailingPE"), 1), f"선행 {ratio(info.get('forwardPE'), 1)}" if _num(info.get("forwardPE")) else ""),
-        ("PBR", ratio(info.get("priceToBook"))),
+        ("PER", ratio(pe, 1), f"선행 {ratio(info.get('forwardPE'), 1)}" if _num(info.get("forwardPE")) else ""),
+        ("PBR", ratio(pb)),
         ("배당수익률", pct(_div_yield(info), 2)),
         ("ROE", pct(info.get("returnOnEquity")), f"영업이익률 {pct(info.get('operatingMargins'))}" if _num(info.get("operatingMargins")) is not None else ""),
         ("52주 범위", rng, f"현재가는 범위의 {pos52 * 100:.0f}% 위치" if pos52 is not None else ""),
@@ -814,6 +869,7 @@ def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool, F=None, s
     lo52, hi52 = _num(info.get("fiftyTwoWeekLow")), _num(info.get("fiftyTwoWeekHigh"))
     pos52 = (px - lo52) / (hi52 - lo52) if px and lo52 and hi52 and hi52 > lo52 else None
     st.markdown("##### 주가 · 밸류에이션")
+    pe_now, pb_now = _pe_pb(info, px, F, R)
     n_eps, n_info = ntm_eps(info, R.get("eps_est"))
     fwd_eps = _num(info.get("forwardEps"))
     fwd_note = "Yahoo 'Forward P/E' = 현재가 ÷ forwardEps"
@@ -826,10 +882,10 @@ def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool, F=None, s
            ("기업가치(EV)", big(info.get("enterpriseValue"), cur)),
            ("52주 범위", (f"{lo52:,.0f} ~ {hi52:,.0f}" if cur == "₩" else f"{lo52:,.2f} ~ {hi52:,.2f}") if lo52 and hi52 else "-",
             f"현재가는 52주 범위의 {pos52 * 100:.0f}% 위치" if pos52 is not None else ""),
-           ("PER (최근 12개월)", ratio(info.get("trailingPE"), 1)),
+           ("PER", ratio(pe_now, 1)),
            ("선행 PER (Yahoo)", ratio(info.get("forwardPE"), 1), f"{which} 추정치 기준" if n_info and fwd_eps else ""),
            ("12M 선행 PER (NTM)", ratio(px / n_eps, 1) if px and n_eps and n_eps > 0 else "-"),
-           ("PBR", ratio(info.get("priceToBook"))),
+           ("PBR", ratio(pb_now)),
            ("EV/EBITDA", ratio(info.get("enterpriseToEbitda"), 1)),
            ("PEG", ratio(info.get("trailingPegRatio") or info.get("pegRatio"))),
            ("PSR", ratio(info.get("priceToSalesTrailing12Months"))),
