@@ -140,6 +140,76 @@ def _movers_table(df: pd.DataFrame, title: str) -> str:
             f'<th style="text-align:right;padding:3px 6px;font-weight:500">거래대금</th></tr></thead><tbody>{rows}</tbody></table>')
 
 
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def _sector_map() -> pd.DataFrame:
+    """종목코드 → 업종 (KRX 업종 분류)."""
+    import kr
+
+    d = kr.load_krx()
+    d = d[["Code", "Sector"]].copy()
+    d["Sector"] = (d["Sector"].fillna("기타").astype(str).str.replace(" 제조업", "", regex=False)
+                   .str.replace(" 및 ", "·", regex=False).str.slice(0, 18))
+    return d
+
+
+def _heatmap(snap: pd.DataFrame) -> None:
+    """Finviz식 시장 지도: 업종별로 묶고, 칸 크기 = 시가총액, 색 = 오늘 등락률 (상승 빨강, 하락 파랑)."""
+    import plotly.graph_objects as go
+
+    need = {"Code", "Name", "Marcap", "ChangesRatio"}
+    if not need.issubset(snap.columns):
+        return
+    ui.section("국내 시장 지도", "칸 크기 = 시가총액 · 색 = 오늘 등락률 · 업종을 누르면 확대")
+    try:
+        c1, c2 = st.columns([2, 1], vertical_alignment="bottom")
+    except TypeError:
+        c1, c2 = st.columns([2, 1])
+    seg = getattr(st, "segmented_control", None) or getattr(st, "pills", None)
+    mk, n = "전체", 200
+    if seg:
+        with c1:
+            mk = seg("시장", ["전체", "KOSPI", "KOSDAQ"], default="전체", key="mk_map_mk", label_visibility="collapsed") or "전체"
+        with c2:
+            n = seg("종목 수", [100, 200, 400], default=200, key="mk_map_n", label_visibility="collapsed",
+                    format_func=lambda x: f"상위 {x}") or 200
+    m = snap.dropna(subset=["Marcap", "ChangesRatio"]).copy()
+    if mk != "전체" and "Market" in m.columns:
+        m = m[m["Market"].astype(str).str.upper().str.startswith(mk)]
+    m["Code"] = m["Code"].astype(str).str.zfill(6)
+    m = m[m["Code"].str.endswith("0")]  # 우선주 제외
+    m = m.nlargest(int(n), "Marcap")
+    if m.empty:
+        return
+    try:
+        m = m.merge(_sector_map(), on="Code", how="left")
+    except Exception:  # noqa: BLE001
+        m["Sector"] = "기타"
+    m["Sector"] = m["Sector"].fillna("기타")
+    m["_w"] = m["ChangesRatio"] * m["Marcap"]
+    g = m.groupby("Sector").agg(Marcap=("Marcap", "sum"), W=("_w", "sum"))
+    g["Chg"] = g["W"] / g["Marcap"]
+    ids = ["root"] + [f"s:{k}" for k in g.index] + [f"c:{c}" for c in m["Code"]]
+    labels = ["전체"] + list(g.index) + list(m["Name"])
+    parents = [""] + ["root"] * len(g) + [f"s:{s_}" for s_ in m["Sector"]]
+    values = [float(g["Marcap"].sum())] + list(g["Marcap"]) + list(m["Marcap"])
+    tot_chg = float(np.average(m["ChangesRatio"], weights=m["Marcap"]))
+    chg = [tot_chg] + list(g["Chg"]) + list(m["ChangesRatio"])
+    px_txt = [f"현재가 {x:,.0f}원" for x in m["Close"]] if "Close" in m.columns else [""] * len(m)
+    price = [""] * (1 + len(g)) + px_txt
+    fig = go.Figure(go.Treemap(
+        ids=ids, labels=labels, parents=parents, values=values, branchvalues="total",
+        customdata=[[float(c), float(v) / 1e12, t] for c, v, t in zip(chg, values, price)],
+        texttemplate="<b>%{label}</b><br>%{customdata[0]:+.2f}%",
+        hovertemplate="<b>%{label}</b><br>등락률 %{customdata[0]:+.2f}%<br>시가총액 %{customdata[1]:,.1f}조원<br>%{customdata[2]}<extra></extra>",
+        marker=dict(colors=[float(x) for x in np.clip(chg, -5, 5)], cmin=-5, cmax=5, showscale=False,
+                    colorscale=[[0, "#1E5BC6"], [0.4, "#5B86D6"], [0.5, "#4A4F5A"], [0.6, "#D9686A"], [1, "#C8232C"]],
+                    line=dict(width=1, color="rgba(0,0,0,0.35)")),
+        tiling=dict(pad=1), pathbar=dict(visible=True), maxdepth=3, textfont=dict(color="white"),
+    ))
+    fig.update_layout(height=520, margin=dict(l=0, r=0, t=24, b=0))
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def _with_ctx(fn):
     """작업 스레드에서도 Streamlit 캐시가 경고 없이 동작하도록 현재 실행 정보를 붙인다."""
     try:
@@ -201,6 +271,7 @@ def render_market() -> None:
                       (f"{mk} 거래대금", f"{amt / 1e12:,.1f}조원" if amt == amt else "-")]
         ui.cards(items, cols=4)
 
+        _heatmap(snap)
         liquid = snap[snap["Amount"] >= 1e10] if "Amount" in snap.columns else snap  # 거래대금 100억 이상만 (급등락 잡주 제외)
         c1, c2 = st.columns(2)
         with c1:
