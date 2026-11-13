@@ -38,7 +38,7 @@ def fit_svi(k, iv, T, weights=None) -> dict:
         return (svi_w(k, *p) - w) * wt / max(T, 1e-4)
 
     try:
-        r = least_squares(res, x0, bounds=(lo, hi), max_nfev=4000)
+        r = least_squares(res, x0, bounds=(lo, hi), max_nfev=4000, loss="soft_l1", f_scale=0.01)
     except Exception:  # noqa: BLE001
         return {"ok": False}
     a, b, rho, m, s = r.x
@@ -87,7 +87,7 @@ def fit_sabr(F, K, iv, T, beta=0.5) -> dict:
         return np.where(np.isfinite(v), v - iv, 1.0)
 
     try:
-        r = least_squares(res, x0, bounds=([1e-6, -0.999, 1e-4], [10 * F ** (1 - beta) + 10, 0.999, 10.0]), max_nfev=3000)
+        r = least_squares(res, x0, bounds=([1e-6, -0.999, 1e-4], [10 * F ** (1 - beta) + 10, 0.999, 10.0]), max_nfev=3000, loss="soft_l1", f_scale=0.02)
     except Exception:  # noqa: BLE001
         return {"ok": False}
     v = sabr_vol(F, K, T, r.x[0], beta, r.x[1], r.x[2])
@@ -159,7 +159,7 @@ def fit_heston(S, r, q, data: list) -> dict:
         return np.concatenate(out)
 
     try:
-        r_ = least_squares(res, x0, bounds=(lo, hi), max_nfev=300, x_scale=[0.05, 1.0, 0.05, 0.3, 0.3])
+        r_ = least_squares(res, x0, bounds=(lo, hi), max_nfev=300, x_scale=[0.05, 1.0, 0.05, 0.3, 0.3], loss="soft_l1", f_scale=0.02)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "msg": str(e)}
     v0, kappa, theta, sigma, rho = r_.x

@@ -296,7 +296,7 @@ def render_vol() -> None:
 def _otm_quotes(d: pd.DataFrame, S: float, T: float, r: float, q: float, kmax: float = 0.5):
     """외가격 옵션(행사가 < 선도가는 풋, 이상은 콜)의 IV. 호가가 있는 것만, 로그 머니니스 |k| ≤ kmax."""
     F = S * math.exp((r - q) * T)
-    x = d[np.isfinite(d["iv"]) & (d["iv"] > 0.02) & (d["iv"] < 3) & (d["bid"].fillna(0) > 0)].copy()
+    x = d[np.isfinite(d["iv"]) & (d["iv"] > 0.02) & (d["iv"] < 3) & (d["mkt"].fillna(0) > 0)].copy()  # 장 마감 뒤엔 호가가 0이라 체결가도 씀
     x = x[(x["is_call"] & (x["strike"] >= F)) | (~x["is_call"] & (x["strike"] < F))]
     x["k"] = np.log(x["strike"] / F)
     x = x[x["k"].abs() <= kmax * max(1.0, math.sqrt(T / 0.25))]

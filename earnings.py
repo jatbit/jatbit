@@ -61,6 +61,7 @@ def surprise_table(edates: pd.DataFrame) -> pd.DataFrame:
     est = pd.to_numeric(e.get("EPS Estimate"), errors="coerce")
     rep = pd.to_numeric(e["Reported EPS"], errors="coerce")
     sp = (rep - est) / est.abs() * 100
+    sp = sp.where(sp.abs() <= 300)  # 예상치 단위가 어긋난 비정상 자료는 뺌
     out = pd.DataFrame({"when": list(e["when"]), "est": est.values, "rep": rep.values, "surp": sp.values})  # 현지 시각(시간대) 유지
     return out.drop_duplicates("when").reset_index(drop=True)
 
@@ -198,7 +199,7 @@ def render_earnings(ticker: str, R: dict, domestic: bool = False) -> None:
     else:
         sv = S["surp"].dropna()
         items = [("실적 상회 비율", f"{(sv > 0).mean() * 100:.0f}%" if len(sv) else "-", f"최근 {len(sv)}개 분기"),
-                 ("평균 서프라이즈", f"{sv.mean():+.1f}%" if len(sv) else "-")]
+                 ("서프라이즈 중앙값", f"{sv.median():+.1f}%" if len(sv) else "-", "예상치가 0에 가까운 분기에 휘둘리지 않게 중앙값")]
         if not rx.empty:
             r1 = rx["다음날 반응"].dropna()
             items += [("평균 주가 반응", _p(r1.mean(), 2, True)), ("평균 절대 반응", _p(r1.abs().mean(), 2)),
@@ -208,8 +209,8 @@ def render_earnings(ticker: str, R: dict, domestic: bool = False) -> None:
 
         f = go.Figure()
         xs = [pd.Timestamp(w).strftime("%Y-%m-%d") for w in S["when"]]
-        f.add_trace(go.Bar(x=xs, y=S["surp"], name="서프라이즈(%)", marker_color=np.where(S["surp"] >= 0, "#5BB56E", "#E5534B"),
-                           hovertemplate="%{x} 서프라이즈 %{y:+.1f}%<extra></extra>"))
+        f.add_trace(go.Bar(x=xs, y=S["surp"].clip(-100, 100), name="서프라이즈(%)", marker_color=np.where(S["surp"] >= 0, "#5BB56E", "#E5534B"),
+                           customdata=S["surp"], hovertemplate="%{x} 서프라이즈 %{customdata:+.1f}%<extra></extra>"))
         if not rx.empty:
             f.add_trace(go.Scatter(x=[d.strftime("%Y-%m-%d") for d in rx["발표일"]], y=rx["다음날 반응"] * 100, name="다음날 주가 반응(%)",
                                    yaxis="y2", mode="lines+markers", line=dict(color="#4C9BE8"),
@@ -405,7 +406,7 @@ def _render_event_iv(ticker: str, nxt, kind: str, rx: pd.DataFrame) -> None:
     hist_abs = rx["다음날 반응"].abs().mean() if isinstance(rx, pd.DataFrame) and not rx.empty else np.nan
     e1 = after[0] if after else None
     straddle = stats.get(e1, {}).get("move_pct", np.nan) if e1 else np.nan
-    mgrid([("실적 발표 예상 변동폭", f"±{res['move'] * 100:.1f}%", f"1σ, {res['how']}"),
+    mgrid([("실적 발표 예상 변동폭", f"±{res['abs_move'] * 100:.1f}%", f"평균 기준 · 1σ ±{res['move'] * 100:.1f}% · {res['how']}"),
            ("과거 평균 실적 반응", _p(hist_abs, 1), "다음날 절대 수익률 평균"),
            ("실적 포함 IV", _p(res["s1"]), f"{e1} 만기"),
            ("실적 후 예상 IV", _p(res["sb"]), "발표가 지나간 뒤 같은 만기에 남을 변동성"),

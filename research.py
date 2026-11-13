@@ -747,7 +747,7 @@ def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool, F=None, s
     mgrid([("현재가", money.price(px) if px else "-"),
            ("시가총액", big(info.get("marketCap"), cur)),
            ("기업가치(EV)", big(info.get("enterpriseValue"), cur)),
-           ("52주 범위", f"{lo52:,.2f} ~ {hi52:,.2f}" if lo52 and hi52 else "-",
+           ("52주 범위", (f"{lo52:,.0f} ~ {hi52:,.0f}" if cur == "₩" else f"{lo52:,.2f} ~ {hi52:,.2f}") if lo52 and hi52 else "-",
             f"현재가는 52주 범위의 {pos52 * 100:.0f}% 위치" if pos52 is not None else ""),
            ("PER (최근 12개월)", ratio(info.get("trailingPE"), 1)),
            ("선행 PER (Yahoo)", ratio(info.get("forwardPE"), 1), f"{which} 추정치 기준" if n_info and fwd_eps else ""),

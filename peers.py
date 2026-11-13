@@ -105,6 +105,16 @@ def percentile_rank(values: pd.Series, target: str, higher_good):
     return float((others > x).sum() + 0.5 * ((others == x).sum() - 1)) / (len(others) - 1) * 100
 
 
+def _place(values: pd.Series, target: str, higher_good) -> str:
+    """'N개 중 k위' (좋은 쪽이 1위)."""
+    s = values.dropna()
+    if target not in s.index or len(s) < 3:
+        return "순위 없음"
+    x = s[target]
+    better = (s > x).sum() if higher_good else (s < x).sum()
+    return f"{len(s)}개 중 {int(better) + 1}위"
+
+
 def render_peers(ticker: str, R: dict, domestic: bool = False, code: str | None = None) -> None:
     if yf is None:
         st.error("yfinance가 필요합니다.")
@@ -177,7 +187,7 @@ def render_peers(ticker: str, R: dict, domestic: bool = False, code: str | None 
                f'<div style="width:{rk if np.isfinite(rk) else 0:.0f}%;height:5px;background:{col};border-radius:3px"></div></div>')
         cells += (f'<div style="min-width:0"><div style="font-size:0.78rem"><span style="opacity:.7">{m}</span>{icon(tip(m))}</div>'
                   f'<div style="font-size:1.0rem;font-weight:600">{_fmt(v, kind)} <span style="font-size:0.75rem;opacity:.6">중앙값 {_fmt(med.get(m, np.nan), kind)}</span></div>'
-                  f'{bar}<div style="font-size:0.7rem;opacity:.6">{"상위 " + format(100 - rk, ".0f") + "%" if np.isfinite(rk) else "순위 없음"}</div></div>')
+                  f'{bar}<div style="font-size:0.7rem;opacity:.6">{_place(T[m], ticker, g)}</div></div>')
     st.markdown(CSS + f'<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px 14px;margin:2px 0 6px">{cells}</div>'
                 f'<div style="font-size:0.75rem;opacity:.6;margin-bottom:10px">막대가 길수록(초록) 업계에서 좋은 쪽입니다 — 배수는 낮을수록, 마진·성장·ROE는 높을수록 좋게 봅니다.</div>',
                 unsafe_allow_html=True)
