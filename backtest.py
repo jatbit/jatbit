@@ -1,5 +1,5 @@
 """포트폴리오 백테스트 탭
-- '포트폴리오 최적화' 탭에서 구한 비중(최대 샤프·최소 분산·동일 비중) 또는 직접 정한 비중을 과거 가격에 적용
+- '포트폴리오' 페이지에서 구한 비중(최대 샤프·최소 분산·동일 비중) 또는 직접 정한 비중을 과거 가격에 적용
 - 리밸런싱 주기·거래비용 반영, 벤치마크 비교
 - 지표: 누적 수익률, 연평균 수익률(CAGR), 변동성, 샤프·소르티노·칼마, 최대 낙폭(MDD), 월간 승률, 베타·알파, 정보비율, 회전율
 """
@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+
+import ui
 
 from options import mgrid
 
@@ -130,15 +132,14 @@ def _load_close(_load_prices, code: str, start: str, end: str) -> pd.Series:
 
 
 def render_backtest(load_prices, find_candidates, listing, risk_free_for) -> None:
-    st.caption("과거 가격에 비중을 적용해 '그때 이렇게 투자했다면'을 계산합니다. 배당은 Yahoo 수정주가를 쓰는 해외 종목만 일부 반영되고, "
-               "국내 종목은 가격 수익률 기준입니다. 원화·달러 자산을 섞으면 환율 변화는 반영되지 않습니다.")
+    st.caption("과거 가격에 비중을 적용해 '그때 이렇게 투자했다면'을 계산합니다. 국내 종목은 가격 수익률 기준, 환율 변화는 반영하지 않습니다.")
     res = st.session_state.get("pf_opt_result") or {}
     sets = dict(res.get("weight_sets") or {})
     if res.get("weights") and not sets:
         sets = {"최대 샤프 (최적)": res["weights"]}
     items = list(res.get("items") or [])
 
-    src_opts = (["포트폴리오 최적화 탭 결과"] if items else []) + ["직접 종목 입력"]
+    src_opts = (["포트폴리오 페이지 결과"] if items else []) + ["직접 종목 입력"]
     src = st.radio("종목 가져오기", src_opts, horizontal=True, key="bt_src")
     if src == "직접 종목 입력":
         raw = st.text_input("종목 (쉼표로 구분)", key="bt_codes", placeholder="예: 삼성전자, SK하이닉스, AAPL, SPY, 금 선물")
@@ -154,7 +155,7 @@ def render_backtest(load_prices, find_candidates, listing, risk_free_for) -> Non
         st.caption(f"최적화 기준일 {res.get('asof', '-')} · 최적화 구간 {res.get('start', '-')} ~ {res.get('asof', '-')}. "
                    "같은 구간을 백테스트하면 미래 정보를 쓴 결과(사후 최적화)라 실제보다 좋게 나옵니다. 최적화 구간 이후를 따로 보면 더 공정합니다.")
     if len(items) < 1:
-        st.info("'포트폴리오 최적화' 탭에서 최적화를 먼저 하거나, 위에서 종목을 직접 입력하세요.")
+        st.info("'포트폴리오' 페이지에서 최적화를 먼저 하거나, 위에서 종목을 직접 입력하세요.")
         return
     names = [it["name"] for it in items]
 
@@ -174,18 +175,22 @@ def render_backtest(load_prices, find_candidates, listing, risk_free_for) -> Non
 
     # ---- 조건
     today = date.today()
-    c1, c2, c3 = st.columns(3)
+    try:
+        c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1.3, 1.2, 1], vertical_alignment="bottom")
+    except TypeError:
+        c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1.3, 1.2, 1])
     start = c1.date_input("시작일", value=today - timedelta(days=365 * 5), min_value=date(1990, 1, 1), max_value=today, key="bt_start")
     end = c2.date_input("종료일", value=today, min_value=date(1990, 1, 2), max_value=today, key="bt_end")
     init = c3.number_input("초기 투자금", value=10_000_000, step=1_000_000, key="bt_init", format="%d")
-    c4, c5, c6 = st.columns(3)
     reb_name = c4.selectbox("리밸런싱", list(REBAL), index=2, key="bt_reb")
-    cost_bp = c5.number_input("거래비용 (bp, 매매금액 대비)", value=10.0, step=5.0, key="bt_cost",
-                              help="수수료+세금+슬리피지. 10bp = 0.1%")
     domestic_all = all(it["domestic"] for it in items)
     b_opts = {"S&P 500": "US500", "코스피 지수": "KS11", "코스닥 지수": "KQ11", "나스닥 종합": "IXIC", "없음": None}
-    bench_name = c6.selectbox("벤치마크", list(b_opts), index=1 if domestic_all else 0, key="bt_bench")
-    also_bh = st.checkbox("같은 비중의 '리밸런싱 안 함'도 함께 비교", value=REBAL[reb_name] is not None, key="bt_bh")
+    with c5:
+        with ui.popover("세부 조건", icon=":material/tune:"):
+            cost_bp = st.number_input("거래비용 (bp, 매매금액 대비)", value=10.0, step=5.0, key="bt_cost",
+                                      help="수수료+세금+슬리피지. 10bp = 0.1%")
+            bench_name = st.selectbox("벤치마크", list(b_opts), index=1 if domestic_all else 0, key="bt_bench")
+            also_bh = st.checkbox("같은 비중의 '리밸런싱 안 함'도 함께 비교", value=REBAL[reb_name] is not None, key="bt_bh")
     if start >= end:
         st.warning("시작일이 종료일보다 앞이어야 합니다.")
         return
@@ -235,18 +240,34 @@ def render_backtest(load_prices, find_candidates, listing, risk_free_for) -> Non
         M[f"벤치마크 ({bench_name})"] = metrics(bench, rf, None)
 
     # ---- 요약
-    st.markdown(f"##### 결과 · {P.index[0]:%Y-%m-%d} ~ {P.index[-1]:%Y-%m-%d} ({(P.index[-1] - P.index[0]).days / 365.25:.1f}년)")
+    ui.section("백테스트 결과", f"{P.index[0]:%Y-%m-%d} ~ {P.index[-1]:%Y-%m-%d} ({(P.index[-1] - P.index[0]).days / 365.25:.1f}년)")
     k0 = pick[0]
     m0, r0 = M[k0], runs[k0]
-    mgrid([("최종 평가액", f"{r0['value'].iloc[-1]:,.0f}", f"초기 {init:,.0f} · {k0}"),
-           ("누적 수익률", _pct(m0["tot"], True)), ("연평균 수익률(CAGR)", _pct(m0["cagr"], True)),
-           ("연 변동성", _pct(m0["vol"])), ("샤프 비율", _r(m0["sharpe"]), f"무위험수익률 {rf * 100:.2f}% ({rf_label})"),
-           ("최대 낙폭(MDD)", _pct(m0["mdd"]), f"{m0['peak']:%Y-%m-%d} → {m0['trough']:%Y-%m-%d}, "
-                                              + (f"{m0['recover']:%Y-%m-%d} 회복" if m0["recover"] is not None else "아직 회복 전")),
-           ("소르티노 비율", _r(m0["sortino"]), "하락 변동성만 위험으로 본 샤프 비율"),
-           ("칼마 비율", _r(m0["calmar"]), "CAGR ÷ |MDD|"),
-           ("월간 승률", _pct(m0["win_m"], nd=0)),
-           ("총 거래비용", f"{r0['cost']:,.0f}", f"리밸런싱 {r0['n_reb']}회 · 연 회전율 {r0['turnover_y'] * 100:.0f}%")], cols=5)
+    bm = M.get(f"벤치마크 ({bench_name})")
+    ui.cards([("최종 평가액", f"{r0['value'].iloc[-1]:,.0f}", f"초기 {init:,.0f} · {k0}", m0["tot"]),
+              ("누적 수익률", _pct(m0["tot"], True), f"벤치마크 {_pct(bm['tot'], True)}" if bm else "", m0["tot"]),
+              ("연평균 수익률(CAGR)", _pct(m0["cagr"], True), f"벤치마크 {_pct(bm['cagr'], True)}" if bm else "", m0["cagr"]),
+              ("최대 낙폭(MDD)", _pct(m0["mdd"]), f"{m0['peak']:%Y-%m-%d} → {m0['trough']:%Y-%m-%d}"),
+              ("연 변동성", _pct(m0["vol"]), f"벤치마크 {_pct(bm['vol'])}" if bm else ""),
+              ("샤프 비율", _r(m0["sharpe"]), f"무위험 {rf * 100:.2f}%"),
+              ("월간 승률", _pct(m0["win_m"], nd=0)),
+              ("총 거래비용", f"{r0['cost']:,.0f}", f"리밸런싱 {r0['n_reb']}회 · 연 회전율 {r0['turnover_y'] * 100:.0f}%")], cols=4)
+
+    # ---- 누적 가치 (바로 보여줌)
+    curves = {k: r["value"] for k, r in runs.items()}
+    if bench is not None and len(bench):
+        curves[f"벤치마크 ({bench_name})"] = bench
+    logy = st.toggle("로그 눈금", value=False, key="bt_log")
+    f = go.Figure()
+    for i, (k, v) in enumerate(curves.items()):
+        dash = "dot" if "보유만" in k else ("dash" if k.startswith("벤치마크") else None)
+        color = "#888" if k.startswith("벤치마크") else COLORS[(pick.index(k.split(" · ")[0]) if k.split(" · ")[0] in pick else i) % len(COLORS)]
+        f.add_trace(go.Scatter(x=v.index, y=v.values, name=k, line=dict(color=color, width=1.6, dash=dash),
+                               hovertemplate="%{x|%Y-%m-%d} " + k + " %{y:,.0f}<extra></extra>"))
+    f.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
+                    yaxis=dict(type="log" if logy else "linear", title="평가액"),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+    st.plotly_chart(f, use_container_width=True)
 
     rows = []
     for k, m in M.items():
@@ -257,79 +278,77 @@ def render_backtest(load_prices, find_candidates, listing, risk_free_for) -> Non
                      "추적오차": _pct(m.get("te", np.nan)), "정보비율": _r(m.get("ir", np.nan))})
     from glossary import col_help
 
-    tb = pd.DataFrame(rows)
-    st.dataframe(tb, use_container_width=True, hide_index=True, column_config=col_help(tb.columns))
+    exp, op = ui.more("전략별 지표 전체 더보기 · 소르티노 · 칼마 · 베타 · 알파 · 정보비율", key="bt_more_tbl")
+    if op:
+        with exp:
+            tb = pd.DataFrame(rows)
+            st.dataframe(tb, use_container_width=True, hide_index=True, column_config=col_help(tb.columns))
+            st.caption(f"무위험수익률 {rf * 100:.2f}% ({rf_label}). MDD 회복일: "
+                       + (f"{m0['recover']:%Y-%m-%d}" if m0["recover"] is not None else "아직 회복 전"))
 
     # ---- 그래프
-    t1, t2, t3, t4, t5, t6, t7 = st.tabs(["누적 가치", "낙폭", "연도별 수익률", "월별 수익률", "비중 변화", "스트레스 테스트", "VaR 검증"])
-    curves = {k: r["value"] for k, r in runs.items()}
-    if bench is not None and len(bench):
-        curves[f"벤치마크 ({bench_name})"] = bench
-    with t1:
-        logy = st.toggle("로그 눈금", value=False, key="bt_log")
-        f = go.Figure()
-        for i, (k, v) in enumerate(curves.items()):
-            dash = "dot" if "보유만" in k else ("dash" if k.startswith("벤치마크") else None)
-            color = "#888" if k.startswith("벤치마크") else COLORS[(pick.index(k.split(" · ")[0]) if k.split(" · ")[0] in pick else i) % len(COLORS)]
-            f.add_trace(go.Scatter(x=v.index, y=v.values, name=k, line=dict(color=color, width=1.6, dash=dash),
-                                   hovertemplate="%{x|%Y-%m-%d} " + k + " %{y:,.0f}<extra></extra>"))
-        f.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
-                        yaxis=dict(type="log" if logy else "linear", title="평가액"),
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-        st.plotly_chart(f, use_container_width=True)
-    with t2:
-        f = go.Figure()
-        for i, (k, v) in enumerate(curves.items()):
-            dd = (v / v.cummax() - 1) * 100
-            f.add_trace(go.Scatter(x=dd.index, y=dd.values, name=k, fill="tozeroy" if i == 0 else None,
-                                   line=dict(width=1.2, color="#888" if k.startswith("벤치마크") else COLORS[i % len(COLORS)]),
-                                   hovertemplate="%{x|%Y-%m-%d} %{y:.1f}%<extra>" + k + "</extra>"))
-        f.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
-                        yaxis=dict(title="고점 대비(%)", ticksuffix="%"), legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-        st.plotly_chart(f, use_container_width=True)
-    with t3:
-        f = go.Figure()
-        for i, (k, v) in enumerate(curves.items()):
-            y = v.groupby(v.index.year).last()
-            prev = pd.concat([pd.Series([v.iloc[0]], index=[y.index[0] - 1]), y.iloc[:-1]])
-            yr = (y.values / prev.values - 1) * 100
-            f.add_trace(go.Bar(x=[str(a) for a in y.index], y=yr, name=k,
-                               marker_color="#888" if k.startswith("벤치마크") else COLORS[i % len(COLORS)],
-                               hovertemplate="%{x} %{y:+.1f}%<extra>" + k + "</extra>"))
-        f.update_layout(barmode="group", height=320, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
-                        yaxis=dict(title="수익률(%)", ticksuffix="%"), legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-        st.plotly_chart(f, use_container_width=True)
-        st.caption("첫 해와 마지막 해는 일부 기간만 포함합니다.")
-    with t4:
-        k = st.selectbox("전략", list(curves), key="bt_mh")
-        v = curves[k]
-        mr = _month_end(v)
-        mr = pd.concat([pd.Series([v.iloc[0]], index=[v.index[0]]), mr]).pct_change().dropna()
-        tbl = pd.DataFrame({"y": mr.index.year, "m": mr.index.month, "r": mr.values * 100}).pivot(index="y", columns="m", values="r")
-        tbl = tbl.reindex(columns=range(1, 13))
-        z = tbl.values
-        hm = go.Figure(go.Heatmap(z=z, x=[f"{m}월" for m in range(1, 13)], y=[str(y) for y in tbl.index], colorscale="RdYlGn", zmid=0,
-                                  text=[[f"{x:+.1f}" if np.isfinite(x) else "" for x in row] for row in z], texttemplate="%{text}",
-                                  hovertemplate="%{y}년 %{x} %{z:+.2f}%<extra></extra>", showscale=False))
-        hm.update_layout(height=max(220, 28 * len(tbl) + 60), margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
-                         yaxis=dict(autorange="reversed", type="category"))
-        st.plotly_chart(hm, use_container_width=True)
-    with t5:
-        k = st.selectbox("전략", list(runs), key="bt_wk")
-        W = runs[k]["weights"]
-        f = go.Figure()
-        for i, c in enumerate(W.columns):
-            f.add_trace(go.Scatter(x=W.index, y=W[c] * 100, name=c, stackgroup="one", mode="lines", line=dict(width=0.5),
-                                   hovertemplate="%{x|%Y-%m-%d} " + c + " %{y:.1f}%<extra></extra>"))
-        f.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
-                        yaxis=dict(title="비중(%)", ticksuffix="%", range=[0, 100]), legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-        st.plotly_chart(f, use_container_width=True)
-        st.caption("리밸런싱 사이에는 가격 변화에 따라 비중이 흘러가고(드리프트), 리밸런싱 날 목표 비중으로 돌아옵니다.")
+    ui.section("자세히 보기")
+    (t2, t2_open), (t3, t3_open), (t4, t4_open), (t5, t5_open), (t6, t6_open), (t7, t7_open) = ui.lazy_tabs(
+        ["낙폭", "연도별 수익률", "월별 수익률", "비중 변화", "스트레스 테스트", "VaR 검증"], key="bt_tabs")
+    if t2_open:
+        with t2:
+            f = go.Figure()
+            for i, (k, v) in enumerate(curves.items()):
+                dd = (v / v.cummax() - 1) * 100
+                f.add_trace(go.Scatter(x=dd.index, y=dd.values, name=k, fill="tozeroy" if i == 0 else None,
+                                       line=dict(width=1.2, color="#888" if k.startswith("벤치마크") else COLORS[i % len(COLORS)]),
+                                       hovertemplate="%{x|%Y-%m-%d} %{y:.1f}%<extra>" + k + "</extra>"))
+            f.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
+                            yaxis=dict(title="고점 대비(%)", ticksuffix="%"), legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+            st.plotly_chart(f, use_container_width=True)
+    if t3_open:
+        with t3:
+            f = go.Figure()
+            for i, (k, v) in enumerate(curves.items()):
+                y = v.groupby(v.index.year).last()
+                prev = pd.concat([pd.Series([v.iloc[0]], index=[y.index[0] - 1]), y.iloc[:-1]])
+                yr = (y.values / prev.values - 1) * 100
+                f.add_trace(go.Bar(x=[str(a) for a in y.index], y=yr, name=k,
+                                   marker_color="#888" if k.startswith("벤치마크") else COLORS[i % len(COLORS)],
+                                   hovertemplate="%{x} %{y:+.1f}%<extra>" + k + "</extra>"))
+            f.update_layout(barmode="group", height=320, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
+                            yaxis=dict(title="수익률(%)", ticksuffix="%"), legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+            st.plotly_chart(f, use_container_width=True)
+            st.caption("첫 해와 마지막 해는 일부 기간만 포함합니다.")
+    if t4_open:
+        with t4:
+            k = st.selectbox("전략", list(curves), key="bt_mh")
+            v = curves[k]
+            mr = _month_end(v)
+            mr = pd.concat([pd.Series([v.iloc[0]], index=[v.index[0]]), mr]).pct_change().dropna()
+            tbl = pd.DataFrame({"y": mr.index.year, "m": mr.index.month, "r": mr.values * 100}).pivot(index="y", columns="m", values="r")
+            tbl = tbl.reindex(columns=range(1, 13))
+            z = tbl.values
+            hm = go.Figure(go.Heatmap(z=z, x=[f"{m}월" for m in range(1, 13)], y=[str(y) for y in tbl.index], colorscale="RdYlGn", zmid=0,
+                                      text=[[f"{x:+.1f}" if np.isfinite(x) else "" for x in row] for row in z], texttemplate="%{text}",
+                                      hovertemplate="%{y}년 %{x} %{z:+.2f}%<extra></extra>", showscale=False))
+            hm.update_layout(height=max(220, 28 * len(tbl) + 60), margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
+                             yaxis=dict(autorange="reversed", type="category"))
+            st.plotly_chart(hm, use_container_width=True)
+    if t5_open:
+        with t5:
+            k = st.selectbox("전략", list(runs), key="bt_wk")
+            W = runs[k]["weights"]
+            f = go.Figure()
+            for i, c in enumerate(W.columns):
+                f.add_trace(go.Scatter(x=W.index, y=W[c] * 100, name=c, stackgroup="one", mode="lines", line=dict(width=0.5),
+                                       hovertemplate="%{x|%Y-%m-%d} " + c + " %{y:.1f}%<extra></extra>"))
+            f.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
+                            yaxis=dict(title="비중(%)", ticksuffix="%", range=[0, 100]), legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+            st.plotly_chart(f, use_container_width=True)
+            st.caption("리밸런싱 사이에는 가격 변화에 따라 비중이 흘러가고(드리프트), 리밸런싱 날 목표 비중으로 돌아옵니다.")
     from risklab import render_stress, render_var_test
 
-    with t6:
-        k_s = st.selectbox("비중", pick, key="bt_st_k")
-        render_stress(items, names, sets[k_s], P[names], bench, b_opts[bench_name], bench_name,
-                      lambda c, a, b: _load_close(load_prices, c, a, b), float(runs[k_s]["value"].iloc[-1]), "bt_st")
-    with t7:
-        render_var_test(curves, "bt_var")
+    if t6_open:
+        with t6:
+            k_s = st.selectbox("비중", pick, key="bt_st_k")
+            render_stress(items, names, sets[k_s], P[names], bench, b_opts[bench_name], bench_name,
+                          lambda c, a, b: _load_close(load_prices, c, a, b), float(runs[k_s]["value"].iloc[-1]), "bt_st")
+    if t7_open:
+        with t7:
+            render_var_test(curves, "bt_var")

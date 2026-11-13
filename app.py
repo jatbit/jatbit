@@ -1,12 +1,10 @@
-"""주가 차트 조회 프로그램.
+"""주가 차트 · 시장 분석 앱.
 
-탭 1) 주가 조회: 종목 하나의 기간별 주가 차트
-탭 2) 수익률 비교: 여러 종목을 기간 시작일 = 0% 기준으로 겹쳐서 비교
-탭 3) 포트폴리오 최적화: 종목별 CAPM 수치 + 최대 샤프 포트폴리오와 그 CAPM
+상단 메뉴: 시장(첫 화면) · 주가 조회 · 기업 리서치 · 수익률 비교 · 포트폴리오 · 백테스트 · 옵션 · 채권.
+열린 페이지와 열린 탭만 계산해서 빠르게 보여주고, 자주 보는 지표를 먼저, 세부 지표는 '더보기'에 접어 둔다.
+수익률 비교와 포트폴리오의 종목·기간 입력은 서로 동기화된다.
 
-탭 2와 탭 3은 종목·기간 입력이 서로 동기화되고, 탭 1은 독립적입니다.
-
-데이터: FinanceDataReader (국내 KRX 전 종목 + 해외 티커 + 해외 선물). 일봉 기준이며 실시간 틱 데이터는 아닙니다.
+데이터: FinanceDataReader (국내 KRX 전 종목 + 해외 티커 + 해외 선물), Yahoo Finance. 일봉 기준이며 실시간 틱 데이터는 아닙니다.
 """
 
 import math
@@ -24,10 +22,7 @@ import autoreload  # GitHub에 올린 새 코드를 새로고침만으로 반영
 
 autoreload.refresh()
 from rates import add_rates, rate_controls
-from options import render_options  # 옵션 탭 (options.py, capm_opt.py, bsm.py)
-from research import render_research  # 기업 리서치 탭 (dcf.py, insider.py, credit.py)
-from backtest import render_backtest  # 백테스트 탭
-from bonds import render_bonds  # 채권 탭
+# 옵션·리서치·백테스트·채권·시장 모듈은 그 페이지를 열 때 불러온다 (첫 화면을 빠르게)
 
 LINE_COLOR = "#2B6CB0"
 UP_COLOR = "#D64545"      # 국내 관행: 상승 = 빨강
@@ -42,33 +37,12 @@ def series_color(i: int) -> str:
         return SERIES_COLORS[i]
     return f"hsl({(i * 47) % 360}, 60%, 45%)"
 
-st.set_page_config(page_title="주가 차트", layout="wide")
+st.set_page_config(page_title="주가 차트", page_icon="📈", layout="wide")
 
-# 글자 크기 축소
-st.markdown(
-    """
-    <style>
-    html, body, .stApp, .stMarkdown, label, input, textarea,
-    [data-baseweb="select"], [data-testid="stCaptionContainer"] { font-size: 0.85rem !important; }
-    h1 { font-size: 1.4rem !important; padding: 0.2rem 0 0.4rem 0 !important; }
-    h2, h3 { font-size: 1.05rem !important; padding: 0.2rem 0 !important; }
-    [data-testid="stMetricValue"] { font-size: 1.1rem !important; }
-    [data-testid="stMetricLabel"] p { font-size: 0.72rem !important; }
-    [data-testid="stMetricDelta"] { font-size: 0.72rem !important; }
-    button[data-baseweb="tab"] p { font-size: 0.9rem !important; }
-    .block-container { padding-top: 2.5rem !important; }
-    .mg { display: grid; gap: 0.5rem 0.6rem; margin: 0.4rem 0 0.8rem 0; }
-    .mg-cell { min-width: 0; }
-    .mg-label { font-size: 0.64rem; }
-    .mg-value { font-size: clamp(0.72rem, 2.6vw, 0.95rem); font-weight: 500; word-break: keep-all; }
-    .mg-delta { font-size: 0.64rem; }
-    .mg-delta.up { color: #E5534B; }
-    .mg-delta.down { color: #4C8DF6; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-st.title("주가 차트")
+import ui  # 화면 공통 요소 (ui.py)
+
+ui.apply_theme()
+ui.keep_state()  # 다른 페이지에 갔다 와도 입력값 유지
 
 
 @st.cache_data(ttl=60 * 60 * 24, show_spinner="종목 목록을 불러오는 중...")
@@ -84,25 +58,6 @@ def load_listing() -> pd.DataFrame:
         df["Market"] = "KRX"
     df["Code"] = df["Code"].astype(str)
     return df.reset_index(drop=True)
-
-
-@st.cache_data(ttl=300, show_spinner="주가 데이터를 불러오는 중...")
-def load_prices(code: str, start: str, end: str) -> pd.DataFrame:
-    """일시적인 네트워크 오류로 데이터가 빠지지 않도록 최대 3번까지 다시 시도한다. (성공한 결과만 캐시됨)"""
-    last_err = None
-    for attempt in range(3):
-        try:
-            d = _extend_back(code, start, fdr.DataReader(code, start, end))
-            if d is not None and "Close" in d.columns:
-                d = d[d["Close"] != 0].copy()  # 오래된 구간의 0원(거래정지 등) 행 제거
-                for _c in ("Open", "High", "Low"):
-                    if _c in d.columns:
-                        d[_c] = d[_c].where(d[_c] != 0, d["Close"])
-            return d
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-            time.sleep(1.5 * (attempt + 1))
-    raise last_err
 
 
 def _extend_back(code: str, start: str, d):
@@ -141,6 +96,25 @@ def _extend_back(code: str, start: str, d):
         return out[~out.index.duplicated(keep="last")].sort_index()
     except Exception:  # noqa: BLE001
         return d
+
+
+@st.cache_data(ttl=300, show_spinner="주가 데이터를 불러오는 중...")
+def load_prices(code: str, start: str, end: str) -> pd.DataFrame:
+    """일시적인 네트워크 오류로 데이터가 빠지지 않도록 최대 3번까지 다시 시도한다. (성공한 결과만 캐시됨)"""
+    last_err = None
+    for attempt in range(3):
+        try:
+            d = _extend_back(code, start, fdr.DataReader(code, start, end))
+            if d is not None and "Close" in d.columns:
+                d = d[d["Close"] != 0].copy()  # 오래된 구간의 0원(거래정지 등) 행 제거
+                for _c in ("Open", "High", "Low"):
+                    if _c in d.columns:
+                        d[_c] = d[_c].where(d[_c] != 0, d["Close"])
+            return d
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            time.sleep(1.5 * (attempt + 1))
+    raise last_err
 
 
 # 해외 선물: Yahoo 연속(근월물 이어붙인) 시세. 티커 → (표시 이름, 한글 별칭들). 목록에 없는 '=F' 심볼도 그대로 조회는 된다.
@@ -186,7 +160,7 @@ FUTURES = {
     "ZF=F": ("미국 5년 국채 선물", ["5년국채선물", "미국5년국채선물"]),
     "ZN=F": ("미국 10년 국채 선물", ["10년국채선물", "미국10년국채선물", "10년물선물"]),
     "ZB=F": ("미국 30년 국채 선물", ["30년국채선물", "미국30년국채선물", "30년물선물"]),
-    "DX-Y.NYB": ("달러인덱스(DXY, 지수)", ["달러인덱스선물", "달러지수선물", "달러인덱스"]),
+    "DX-Y.NYB": ("달러인덱스(DXY, 지수)", ["달러인덱스선물", "달러지수선물", "달러인덱스", "달러지수", "dxy"]),
     "BTC=F": ("비트코인 선물(CME)", ["비트코인선물", "비트코인"]),
     "ETH=F": ("이더리움 선물(CME)", ["이더리움선물", "이더리움"]),
 }
@@ -198,6 +172,7 @@ for _t, (_n, _al) in FUTURES.items():
         if len(_a) >= 2 or _a.endswith("선물"):
             _FUT_ALIAS[_a] = _t
     _FUT_ALIAS[_n.replace(" ", "").lower()] = _t
+
 
 FUT_OPTIONS = {f"{v[0]} ({t})": t for t, v in FUTURES.items()}  # 목록에서 골라 넣는 선물
 
@@ -246,24 +221,21 @@ def fmt_price(value: float, domestic: bool) -> str:
 
 
 def metric_grid(items: list[tuple], cols: int = 3) -> None:
-    """지표를 가로로 cols개씩 나열한다. 화면이 좁아도 세로로 쌓이지 않는다.
-    items: (라벨, 값, 변동 문구 또는 None, 상승 여부)"""
+    """지표 카드 격자. items: (라벨, 값, 변동 문구 또는 None, 상승 여부). 값에는 HTML(날짜 줄바꿈 등)을 쓸 수 있다."""
+    from glossary import CSS, icon, tip
+
     cells = ""
-    for label, value, delta, is_up in items:
+    for i, (label, value, delta, is_up) in enumerate(items):
         d = ""
         if delta:
             cls = "up" if is_up else "down"
             arrow = "▲" if is_up else "▼"
-            d = f'<div class="mg-delta {cls}">{arrow} {delta}</div>'
-        from glossary import icon, tip
-
-        cells += f'<div class="mg-cell"><div class="mg-label"><span style="opacity:.75">{label}</span>{icon(tip(label))}</div><div class="mg-value">{value}</div>{d}</div>'
-    from glossary import CSS
-
-    st.markdown(
-        CSS + f'<div class="mg" style="grid-template-columns: repeat({cols}, minmax(0, 1fr));">{cells}</div>',
-        unsafe_allow_html=True,
-    )
+            d = f'<div class="kc-d {cls}">{arrow} {delta}</div>'
+        right = " qr" if cols > 1 and (i % cols) >= cols / 2 else ""
+        cells += (f'<div class="kc-c{right}"><div class="kc-l"><span>{label}</span>{icon(tip(label))}</div>'
+                  f'<div class="kc-v">{value}</div>{d}</div>')
+    st.markdown(CSS + f'<div class="kc" style="grid-template-columns:repeat({cols},minmax(0,1fr))">{cells}</div>',
+                unsafe_allow_html=True)
 
 
 QUICK_RANGES = {"1개월": 1, "3개월": 3, "6개월": 6, "1년": 12, "5년": 60, "10년": 120, "20년": 240, "전체": 720}
@@ -335,20 +307,25 @@ def _preset(kind: str) -> None:
             st.session_state[k] = ", ".join(US_TOP5)
 
 
+def _row(spec):
+    try:
+        return st.columns(spec, vertical_alignment="bottom")
+    except TypeError:
+        return st.columns(spec)
+
+
 def period_input(key: str, mirror: str = None, presets: bool = False):
-    """빠른 기간 버튼(오늘 기준) + 직접 선택 달력. 종료일은 오늘이며, 데이터는 가장 최근 영업일까지 나온다.
-    mirror: 같은 기간을 공유할 다른 탭의 period_input 키."""
+    """빠른 기간 버튼(오늘 기준) + 직접 선택 달력을 한 줄에. 종료일은 오늘이며, 데이터는 가장 최근 영업일까지 나온다.
+    mirror: 같은 기간을 공유할 다른 페이지의 period_input 키."""
     today = kst_today()
+    cols = _row([3.4, 2.2] + ([1, 1] if presets else []))
     if hasattr(st, "pills"):
-        st.pills(
-            "빠른 기간 (오늘 기준 ~ 가장 최근 영업일)", list(QUICK_RANGES),
-            key=f"{key}_quick", on_change=_on_quick, args=(key, mirror),
-        )
-    if presets:
-        c1, c2, c3 = st.columns([6, 1.6, 1.6])
-    else:
-        c1 = st.container()
-    with c1:
+        with cols[0]:
+            st.pills(
+                "빠른 기간", list(QUICK_RANGES), key=f"{key}_quick", on_change=_on_quick, args=(key, mirror),
+                label_visibility="collapsed", help="오늘 기준 ~ 가장 최근 영업일",
+            )
+    with cols[1]:
         p = st.date_input(
             "기간",
             value=(today - timedelta(days=180), today),
@@ -358,13 +335,13 @@ def period_input(key: str, mirror: str = None, presets: bool = False):
             key=key,
             on_change=_on_date,
             args=(key, mirror),
+            label_visibility="collapsed",
         )
     if presets:
-        for col, kind, label in ((c2, "KR", "한국 Top5"), (c3, "US", "미국 Top5")):
+        for col, kind, label in ((cols[2], "KR", "한국 Top5"), (cols[3], "US", "미국 Top5")):
             with col:
-                st.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
                 st.button(label, key=f"{key}_preset_{kind}", on_click=_preset, args=(kind,),
-                          use_container_width=True, help="시가총액 상위 5개 종목을 한 번에 입력 (테스트용)")
+                          use_container_width=True, help="시가총액 상위 5개 종목을 한 번에 입력")
     if isinstance(p, (tuple, list)) and len(p) == 2:
         return p
     return None
@@ -620,18 +597,20 @@ def show_stats(df: pd.DataFrame, rf: float, rf_label: str, bench: tuple = None) 
 # 탭 1: 주가 조회
 # ======================================================================
 def render_single(listing: pd.DataFrame) -> None:
-    c1, c3, c4 = st.columns([3, 1.6, 1.6])
+    c1, c2 = _row([5, 1])
     query = c1.text_input(
-        "종목 검색", key="single_query",
+        "종목 검색", key="single_query", label_visibility="collapsed",
         placeholder="종목명 (예: 삼성전자) 또는 종목코드 / 해외 티커 (예: AAPL, 원유 선물)",
     )
-    chart_type = c3.radio("차트 종류", ["선", "캔들"], horizontal=True, key="single_type")
-    basis = c4.radio("표시 기준", ["주가", "수익률"], horizontal=True, key="single_basis")
+    with c2:
+        with ui.popover("차트 설정", icon=":material/tune:"):
+            chart_type = st.radio("차트 종류", ["선", "캔들"], horizontal=True, key="single_type")
+            basis = st.radio("표시 기준", ["주가", "수익률"], horizontal=True, key="single_basis")
+            rate_sel = rate_controls("single")
     period = period_input("single_period")
-    rate_sel = rate_controls("single")
 
     if not query.strip():
-        st.info("종목명을 입력하세요.")
+        st.info("종목명이나 코드를 입력하세요. 예: 삼성전자, 005930, AAPL, 원유 선물")
         return
     if period is None:
         st.info("기간의 시작일과 종료일을 모두 선택하세요.")
@@ -659,21 +638,47 @@ def render_single(listing: pd.DataFrame) -> None:
         return
 
     domestic = chosen["domestic"]
+    # 최근 1년(52주) 시세: 현재가·전일 대비·52주 범위용
+    today = kst_today()
+    y1 = df
+    if (pd.Timestamp(df.index[0]) > pd.Timestamp(today - timedelta(days=360))) or end_d < today:
+        try:
+            y1 = load_prices(chosen["code"], (today - timedelta(days=372)).isoformat(), today.isoformat())
+        except Exception:  # noqa: BLE001
+            y1 = df
+        if y1 is None or y1.empty:
+            y1 = df
+    y1 = y1[y1.index >= y1.index[-1] - pd.Timedelta(days=365)]
+    last = y1.iloc[-1]
+    px = float(last["Close"])
+    prev = float(y1["Close"].iloc[-2]) if len(y1) >= 2 else float("nan")
+    chg = px - prev
+    pct_d = chg / prev * 100 if prev == prev and prev else float("nan")
+    name_part = chosen["label"].split(" (")[0]
+    code_part = chosen["label"][len(name_part):].strip(" ()")
+    ui.quote_header(name_part, code_part, "", fmt_price(px, domestic), fmt_price(abs(chg), domestic) if chg == chg else None,
+                    pct_d, f"{y1.index[-1]:%Y-%m-%d} 종가")
+
     first_close = float(df["Close"].iloc[0])
-    last_close = float(df["Close"].iloc[-1])
-    change = last_close - first_close
-    pct = change / first_close * 100 if first_close else 0.0
-
-    st.subheader(chosen["label"])
-    metric_grid([
-        ("기간 시작 종가", fmt_price(first_close, domestic), None, True),
-        ("기간 마지막 종가", fmt_price(last_close, domestic), None, True),
-        ("기간 변동", fmt_price(change, domestic), f"{abs(pct):.2f}%", change >= 0),
-        ("기간 최고가", fmt_price(float(df["High"].max()), domestic), None, True),
-        ("기간 최저가", fmt_price(float(df["Low"].min()), domestic), None, True),
-    ], cols=3)
-
-    st.caption(f"조회 구간: {df.index[0]:%Y-%m-%d} ~ {df.index[-1]:%Y-%m-%d} (가장 최근 거래일 기준, {len(df):,}거래일)")
+    period_ret = float(df["Close"].iloc[-1]) / first_close - 1 if first_close else float("nan")
+    mdd = float((df["Close"] / df["Close"].cummax() - 1).min())
+    hi52, lo52 = float(y1["High"].max()), float(y1["Low"].min())
+    vol_txt, vol_sub = "-", ""
+    if "Volume" in y1.columns and float(last.get("Volume", 0) or 0) > 0:
+        v = float(last["Volume"])
+        avg20 = float(y1["Volume"].iloc[-21:-1].mean()) if len(y1) > 21 else float("nan")
+        vol_txt = f"{v:,.0f}"
+        vol_sub = f"20일 평균의 {v / avg20 * 100:.0f}%" if avg20 == avg20 and avg20 > 0 else ""
+    ui.cards([
+        ("시가", fmt_price(float(last["Open"]), domestic)),
+        ("고가", fmt_price(float(last["High"]), domestic)),
+        ("저가", fmt_price(float(last["Low"]), domestic)),
+        ("거래량", vol_txt, vol_sub),
+        ("52주 최고", fmt_price(hi52, domestic), f"현재가 대비 {(px / hi52 - 1) * 100:+.1f}%" if hi52 else ""),
+        ("52주 최저", fmt_price(lo52, domestic), f"현재가 대비 {(px / lo52 - 1) * 100:+.1f}%" if lo52 else ""),
+        ("기간 수익률", _pct(period_ret, True), f"{df.index[0]:%Y-%m-%d} ~ {df.index[-1]:%Y-%m-%d}", period_ret),
+        ("최대 낙폭(MDD)", _pct(mdd), "조회 기간 고점 대비 최대 하락"),
+    ], cols=4)
 
     # 캔들이 너무 많으면 주봉으로 묶어서 깨져 보이지 않게 한다
     plot_df = df
@@ -732,7 +737,7 @@ def render_single(listing: pd.DataFrame) -> None:
         fig.add_hline(y=0, row=1, col=1, line_width=1, line_dash="dot", line_color="#718096")
     fig.update_yaxes(title_text="거래량", row=2, col=1, tickformat=",")
     fig.update_layout(
-        height=430, showlegend=False, hovermode="x unified",
+        height=560, showlegend=False, hovermode="x unified",
         margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
         boxgap=box_gap, bargap=0.3 if n_bars <= 150 else 0.4,
     )
@@ -740,18 +745,26 @@ def render_single(listing: pd.DataFrame) -> None:
     if weekly:
         st.caption("기간이 길어 캔들을 주봉(1주 = 1개)으로 묶어서 표시합니다. 위 지표는 일별 데이터 기준입니다.")
 
-    st.subheader("기간 통계")
-    rf, rf_label = risk_free_for(domestic, df.index[-1].date())
-    show_stats(df, rf, rf_label, benchmark_for(chosen.get("market", ""), domestic))
-
-    with st.expander("데이터 표 보기"):
-        st.dataframe(df.sort_index(ascending=False), use_container_width=True)
-    st.download_button(
-        "CSV 내려받기",
-        df.to_csv().encode("utf-8-sig"),
-        file_name=f"{chosen['code']}_{start_d}_{end_d}.csv",
-        mime="text/csv",
-    )
+    exp, op = ui.more("상세 통계 더보기 · 변동성 · 샤프비율 · CAPM · VaR", key="single_more_stats")
+    if op:
+        with exp:
+            rf, rf_label = risk_free_for(domestic, df.index[-1].date())
+            show_stats(df, rf, rf_label, benchmark_for(chosen.get("market", ""), domestic))
+            r_d = df["Close"].dropna().pct_change().dropna()
+            if len(r_d) >= 20:
+                st.markdown("**VaR · ES (1일 손실률)**")
+                risk_grid(risk_metrics(r_d))
+                st.caption(RISK_NOTE)
+    exp2, op2 = ui.more("일별 시세 표 · CSV 내려받기", key="single_more_data")
+    if op2:
+        with exp2:
+            st.dataframe(df.sort_index(ascending=False), use_container_width=True)
+            st.download_button(
+                "CSV 내려받기",
+                df.to_csv().encode("utf-8-sig"),
+                file_name=f"{chosen['code']}_{start_d}_{end_d}.csv",
+                mime="text/csv",
+            )
 
 
 # ======================================================================
@@ -762,23 +775,25 @@ def render_compare(listing: pd.DataFrame) -> None:
     options = {f"{r.Name} ({r.Code})": r.Code for r in ordered.itertuples()}
     names = {r.Code: r.Name for r in ordered.itertuples()}
 
-    selected = st.multiselect(
-        "비교할 종목 (이름을 입력하면 검색됩니다)",
+    c1, c2, c3 = _row([3, 2, 1])
+    selected = c1.multiselect(
+        "국내 종목 (이름을 입력하면 검색됩니다)",
         list(options.keys()), key="cmp_selected",
         on_change=_mirror, args=("cmp_selected", "pf_selected"),
     )
-    fut_sel = st.multiselect(
-        "해외 선물 (목록에서 선택)", list(FUT_OPTIONS), key="cmp_fut",
-        on_change=_mirror, args=("cmp_fut", "pf_fut"),
-    )
-    period = period_input("cmp_period", mirror="pf_period", presets=True)
-    rate_sel = rate_controls("cmp")
-    extra = st.text_input(
-        "해외 티커 또는 종목 추가 (쉼표로 구분)", key="cmp_extra",
-        placeholder="예: AAPL, NVDA, 005930, 원유 선물, 금 선물",
+    extra = c2.text_input(
+        "해외 티커 · 선물 · 종목 추가 (쉼표로 구분)", key="cmp_extra",
+        placeholder="예: AAPL, NVDA, 원유 선물, 금 선물",
         on_change=_mirror, args=("cmp_extra", "pf_extra"),
     )
-    st.caption("종목·기간 입력은 '포트폴리오 최적화' 탭과 함께 바뀝니다. 해외 선물은 위 목록에서 고르거나, 아래 입력창에 이름(예: 원유 선물)을 쳐도 됩니다.")
+    with c3:
+        with ui.popover("설정", icon=":material/tune:"):
+            fut_sel = st.multiselect(
+                "해외 선물 (목록에서 선택)", list(FUT_OPTIONS), key="cmp_fut",
+                on_change=_mirror, args=("cmp_fut", "pf_fut"),
+            )
+            rate_sel = rate_controls("cmp")
+    period = period_input("cmp_period", mirror="pf_period", presets=True)
 
     # 선택 항목 정리 (중복 제거)
     items: list[dict] = []
@@ -832,14 +847,16 @@ def render_compare(listing: pd.DataFrame) -> None:
                 hovertemplate="%{y:+.2f}%<extra>" + it["name"] + "</extra>",
             )
         )
+        rd = s.pct_change().dropna()
         rows.append({
             "종목": it["name"],
-            "시작일": s.index[0].strftime("%Y-%m-%d"),
-            "시작 종가": fmt_price(base, it["domestic"]),
             "마지막 종가": fmt_price(float(s.iloc[-1]), it["domestic"]),
             "기간 수익률(%)": round(float(ret.iloc[-1]), 2),
+            "연 변동성(%)": round(float(rd.std(ddof=1)) * TRADING_DAYS ** 0.5 * 100, 1) if len(rd) > 2 else None,
+            "최대 낙폭(%)": round(float((s / s.cummax() - 1).min()) * 100, 1),
             "기간 내 최고(%)": round(float(ret.max()), 2),
             "기간 내 최저(%)": round(float(ret.min()), 2),
+            "시작일": s.index[0].strftime("%Y-%m-%d"),
         })
 
     if not rows:
@@ -851,15 +868,22 @@ def render_compare(listing: pd.DataFrame) -> None:
     if rate_sel:
         add_rates(fig, rate_sel, start_d, end_d, 2)
     fig.update_layout(
-        height=420, hovermode="x unified", font=dict(size=11),
+        height=520, hovermode="x unified", font=dict(size=11),
         margin=dict(l=10, r=10, t=10, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("기간 수익률 요약")
     summary = pd.DataFrame(rows).sort_values("기간 수익률(%)", ascending=False)
-    st.dataframe(summary, use_container_width=True, hide_index=True)
+    ui.section("기간 수익률 순위")
+    from glossary import col_help
+
+    cfg = col_help(summary.columns)
+    for c in ("기간 수익률(%)", "기간 내 최고(%)", "기간 내 최저(%)"):
+        cfg[c] = st.column_config.NumberColumn(c, format="%+.2f%%")
+    cfg["연 변동성(%)"] = st.column_config.NumberColumn("연 변동성(%)", format="%.1f%%")
+    cfg["최대 낙폭(%)"] = st.column_config.NumberColumn("최대 낙폭(%)", format="%.1f%%")
+    st.dataframe(summary, use_container_width=True, hide_index=True, column_config=cfg)
     st.caption("수익률은 각 종목의 기간 첫 거래일 종가를 0%로 놓고 계산한 값입니다. 배당은 반영하지 않은 가격 기준입니다.")
 
 
@@ -899,6 +923,7 @@ def _refine(w: np.ndarray, score_batch, cap: float) -> np.ndarray:
     return w
 
 
+@st.cache_data(show_spinner="최적 비중을 계산하는 중...", max_entries=30, ttl=60 * 60)
 def optimize_portfolios(mu: np.ndarray, cov: np.ndarray, rf: float, cap: float, seed: int = 42):
     """무작위 후보 + 비중 이동 탐색으로 최대 샤프 / 최소 분산 포트폴리오를 찾는다. (SciPy 없이 numpy만 사용)"""
     n = len(mu)
@@ -932,22 +957,26 @@ def render_portfolio(listing: pd.DataFrame) -> None:
     ordered = listing.sort_values("Name")
     options = {f"{r.Name} ({r.Code})": (r.Code, r.Name, str(r.Market)) for r in ordered.itertuples()}
 
-    selected = st.multiselect(
-        "포트폴리오에 넣을 종목 (2개 이상, 이름을 입력하면 검색됩니다)",
+    c1, c2, c3 = _row([3, 2, 1])
+    selected = c1.multiselect(
+        "국내 종목 (2개 이상, 이름을 입력하면 검색됩니다)",
         list(options.keys()), key="pf_selected",
         on_change=_mirror, args=("pf_selected", "cmp_selected"),
+        help="수익률 비교 페이지와 종목·기간 입력이 함께 바뀝니다",
     )
-    fut_sel = st.multiselect(
-        "해외 선물 (목록에서 선택)", list(FUT_OPTIONS), key="pf_fut",
-        on_change=_mirror, args=("pf_fut", "cmp_fut"),
-    )
-    period = period_input("pf_period", mirror="cmp_period", presets=True)
-    extra = st.text_input(
-        "해외 티커 또는 종목 추가 (쉼표로 구분)", key="pf_extra",
-        placeholder="예: AAPL, NVDA, 005930, 원유 선물, 금 선물",
+    extra = c2.text_input(
+        "해외 티커 · 선물 · 종목 추가 (쉼표로 구분)", key="pf_extra",
+        placeholder="예: AAPL, NVDA, 원유 선물, 금 선물",
         on_change=_mirror, args=("pf_extra", "cmp_extra"),
     )
-    st.caption("종목·기간 입력은 '수익률 비교' 탭과 함께 바뀝니다. 해외 선물은 위 목록에서 고르거나, 아래 입력창에 이름(예: 원유 선물)을 쳐도 됩니다.")
+    with c3:
+        with ui.popover("설정", icon=":material/tune:"):
+            fut_sel = st.multiselect(
+                "해외 선물 (목록에서 선택)", list(FUT_OPTIONS), key="pf_fut",
+                on_change=_mirror, args=("pf_fut", "cmp_fut"),
+            )
+            pf_set = st.container()
+    period = period_input("pf_period", mirror="cmp_period", presets=True)
 
     items: list[dict] = []
     seen: set[str] = set()
@@ -985,9 +1014,9 @@ def render_portfolio(listing: pd.DataFrame) -> None:
         default_bench = 1 if all(it["market"].upper().startswith("KOSDAQ") for it in items) else 0
     else:
         default_bench = 2
-    cc1, cc2 = st.columns(2)
-    bench_name = cc1.selectbox("CAPM 벤치마크(시장 지수)", list(bench_opts), index=default_bench)
-    cap_pct = cc2.slider("종목당 최대 비중 (%)", min_value=int(math.ceil(100 / n)), max_value=100, value=100, step=1)
+    with pf_set:
+        bench_name = st.selectbox("CAPM 벤치마크(시장 지수)", list(bench_opts), index=default_bench, key="pf_bench")
+        cap_pct = st.slider("종목당 최대 비중 (%)", min_value=int(math.ceil(100 / n)), max_value=100, value=100, step=1)
     cap = cap_pct / 100
     bench_code = bench_opts[bench_name]
 
@@ -1019,49 +1048,7 @@ def render_portfolio(listing: pd.DataFrame) -> None:
     mu = Rs.mean().values * TRADING_DAYS
     cov = Rs.cov().values * TRADING_DAYS
 
-    st.caption(
-        f"분석 구간: {P.index[0]:%Y-%m-%d} ~ {P.index[-1]:%Y-%m-%d} (모든 종목·지수가 함께 거래된 {len(R):,}일 수익률 기준, 통화 환산 없음)"
-    )
-
-    if n > len(R):
-        st.warning(
-            f"종목 수({n}개)가 공통 거래일 수({len(R)}일)보다 많아 공분산이 불안정합니다. "
-            "기간을 늘리거나 종목을 줄이면 결과가 더 믿을 만합니다."
-        )
-
-    # ---- 종목별 수치
-    st.subheader("종목별 수치")
-    rows = []
-    for nm in names:
-        r = Rs[nm]
-        c = capm_stats(r, m, rf)
-        rk = risk_metrics(r)
-        px = P[nm]
-        mdd = float((px / px.cummax() - 1).min())
-        sd = float(r.std(ddof=1)) * TRADING_DAYS ** 0.5
-        mean_a = float(r.mean()) * TRADING_DAYS
-        rows.append({
-            "종목": nm,
-            "기간 수익률": _pct(float(px.iloc[-1] / px.iloc[0] - 1), True),
-            "연환산 기대수익률": _pct(mean_a, True),
-            "연환산 표준편차": _pct(sd),
-            "샤프비율": f"{(mean_a - rf) / sd:.2f}" if sd > 0 else "-",
-            "베타": f"{c['beta']:.2f}",
-            "상관계수": f"{c['corr']:.2f}",
-            "R²": f"{c['r2']:.2f}",
-            "CAPM 기대수익률": _pct(c["capm"], True),
-            "젠센 알파": _pct(c["alpha"], True),
-            "트레이너": f"{c['treynor']:.3f}" if c["treynor"] == c["treynor"] else "-",
-            "MDD": _pct(mdd),
-            "VaR 95%(1일)": _pct(rk["var95"]),
-            "ES 95%(1일)": _pct(rk["es95"]),
-            "VaR 99%(1일)": _pct(rk["var99"]),
-            "ES 99%(1일)": _pct(rk["es99"]),
-        })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-    st.caption(f"무위험수익률: {rf_label}. 벤치마크: {bench_name}. VaR·ES는 1일 기준 과거 시뮬레이션 손실률입니다.")
-
-    # ---- 최적화
+    # ---- 최적화 (같은 입력이면 다시 계산하지 않음)
     res = optimize_portfolios(mu, cov, rf, cap)
     ports = {
         "최대 샤프 (최적)": res["max_sharpe"],
@@ -1078,90 +1065,143 @@ def render_portfolio(listing: pd.DataFrame) -> None:
         "asof": f"{P.index[-1]:%Y-%m-%d}",
     }
 
-    st.subheader("최적 투자비율")
-    wdf = pd.DataFrame({"종목": names, **{k: [f"{x * 100:.1f}%" for x in w] for k, w in ports.items()}})
-    st.dataframe(wdf, use_container_width=True, hide_index=True)
-
-    bar = go.Figure()
-    for (k, w), color in zip(ports.items(), [SERIES_COLORS[1], SERIES_COLORS[0], "#A0AEC0"]):
-        bar.add_trace(go.Bar(x=names, y=w * 100, name=k, marker_color=color,
-                             hovertemplate="%{x}<br>" + k + " %{y:.1f}%<extra></extra>"))
-    bar.update_layout(barmode="group", height=300, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
-                      yaxis=dict(title="비중(%)", ticksuffix="%"),
-                      legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0))
-    st.plotly_chart(bar, use_container_width=True)
-    st.caption(f"공매도 없이 비중 합 100%, 종목당 최대 {cap_pct}%. 기간이 짧으면 한두 종목에 비중이 쏠릴 수 있습니다.")
-
-    # ---- 포트폴리오 수치 비교
-    st.subheader("포트폴리오 비교")
-    prow = {}
-    pseries = {}
+    pseries, pstat = {}, {}
     for k, w in ports.items():
-        rp = Rs.values @ w
-        rp = pd.Series(rp, index=Rs.index)
+        rp = pd.Series(Rs.values @ w, index=Rs.index)
         pseries[k] = rp
         c = capm_stats(rp, m, rf)
-        rk = risk_metrics(rp)
-        mean_a, sd = c["mean_a"], c["std_a"]
         cum = (1 + rp).cumprod()
-        prow[k] = {
-            "기간 수익률": _pct(float(cum.iloc[-1] - 1), True),
-            "연환산 기대수익률": _pct(mean_a, True),
-            "연환산 표준편차": _pct(sd),
-            "샤프비율": f"{(mean_a - rf) / sd:.2f}" if sd > 0 else "-",
-            "MDD": _pct(float((cum / cum.cummax() - 1).min())),
-            "베타": f"{c['beta']:.2f}",
-            "상관계수": f"{c['corr']:.2f}",
-            "R²": f"{c['r2']:.2f}",
-            "CAPM 기대수익률": _pct(c["capm"], True),
-            "젠센 알파": _pct(c["alpha"], True),
-            "트레이너": f"{c['treynor']:.3f}" if c["treynor"] == c["treynor"] else "-",
-            "VaR 95% (1일, 과거)": _pct(rk["var95"]),
-            "ES 95% (1일, 과거)": _pct(rk["es95"]),
-            "VaR 99% (1일, 과거)": _pct(rk["var99"]),
-            "ES 99% (1일, 과거)": _pct(rk["es99"]),
-            "VaR 95% (1일, 정규)": _pct(rk["nvar95"]),
-            "VaR 99% (1일, 정규)": _pct(rk["nvar99"]),
-        }
-    st.dataframe(pd.DataFrame(prow), use_container_width=True)
-    st.caption("각 포트폴리오는 위 비중을 기간 내내 매일 유지(일별 리밸런싱)한다고 가정한 일별 수익률로 계산했습니다. 거래비용·세금은 반영하지 않았습니다.")
+        pstat[k] = {"c": c, "rk": risk_metrics(rp), "total": float(cum.iloc[-1] - 1),
+                    "mdd": float((cum / cum.cummax() - 1).min()),
+                    "sharpe": (c["mean_a"] - rf) / c["std_a"] if c["std_a"] > 0 else float("nan")}
 
-    # ---- 최적 포트폴리오 CAPM
-    st.subheader("최적 포트폴리오(최대 샤프)의 CAPM")
-    c_opt = capm_stats(pseries["최대 샤프 (최적)"], m, rf)
-    capm_grid(c_opt, bench_name)
-    st.caption(capm_note(bench_name))
+    # ---- 핵심 결과: 최대 샤프 포트폴리오
+    o, e = pstat["최대 샤프 (최적)"], pstat["동일 비중"]
+    ui.section("최적 포트폴리오 (최대 샤프)", f"{P.index[0]:%Y-%m-%d} ~ {P.index[-1]:%Y-%m-%d} · 공통 거래일 {len(R):,}일")
+    ui.cards([
+        ("연환산 기대수익률", _pct(o["c"]["mean_a"], True), f"동일 비중 {_pct(e['c']['mean_a'], True)}", o["c"]["mean_a"]),
+        ("연환산 표준편차", _pct(o["c"]["std_a"]), f"동일 비중 {_pct(e['c']['std_a'])}"),
+        ("샤프비율", f"{o['sharpe']:.2f}" if o["sharpe"] == o["sharpe"] else "-",
+         f"동일 비중 {e['sharpe']:.2f}" if e["sharpe"] == e["sharpe"] else ""),
+        ("최대 낙폭(MDD)", _pct(o["mdd"]), f"동일 비중 {_pct(e['mdd'])}"),
+        ("기간 수익률", _pct(o["total"], True), "매일 같은 비중 유지 가정", o["total"]),
+        ("베타 (β)", f"{o['c']['beta']:.2f}", bench_name),
+        ("젠센 알파 (연)", _pct(o["c"]["alpha"], True), "CAPM 대비 초과수익", o["c"]["alpha"]),
+        ("VaR 95% (1일, 과거)", _pct(o["rk"]["var95"]), "하루 손실이 이보다 클 확률 5%"),
+    ], cols=4)
 
-    st.subheader("최적 포트폴리오(최대 샤프)의 VaR · ES")
-    risk_grid(risk_metrics(pseries["최대 샤프 (최적)"]))
-    st.caption(RISK_NOTE)
+    if n > len(R):
+        st.warning(
+            f"종목 수({n}개)가 공통 거래일 수({len(R)}일)보다 많아 공분산이 불안정합니다. "
+            "기간을 늘리거나 종목을 줄이면 결과가 더 믿을 만합니다."
+        )
 
-    # ---- 효율적 투자선
-    st.subheader("위험-수익 평면")
-    vol_c, ret_c = res["cloud"]
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=vol_c * 100, y=ret_c * 100, mode="markers", name="무작위 포트폴리오",
-                             marker=dict(size=4, color="#CBD5E0", opacity=0.6), hoverinfo="skip"))
-    sd_i = np.sqrt(np.diag(cov))
-    fig.add_trace(go.Scatter(x=sd_i * 100, y=mu * 100, mode="markers+text", text=names, textposition="top center",
-                             name="개별 종목", marker=dict(size=9, symbol="diamond", color=SERIES_COLORS[2])))
-    markers = {"최대 샤프 (최적)": ("star", 16, SERIES_COLORS[1]), "최소 분산": ("circle", 11, SERIES_COLORS[0]),
-               "동일 비중": ("square", 9, "#718096")}
-    for k, w in ports.items():
-        sym, size, col = markers[k]
-        fig.add_trace(go.Scatter(x=[float(np.sqrt(w @ cov @ w)) * 100], y=[float(w @ mu) * 100], mode="markers", name=k,
-                                 marker=dict(size=size, symbol=sym, color=col, line=dict(width=1, color="white"))))
-    w_o = ports["최대 샤프 (최적)"]
-    s_o, r_o = float(np.sqrt(w_o @ cov @ w_o)), float(w_o @ mu)
-    x_max = max(float(vol_c.max()), float(sd_i.max())) * 1.1
-    if s_o > 0:
-        fig.add_trace(go.Scatter(x=[0, x_max * 100], y=[rf * 100, (rf + (r_o - rf) / s_o * x_max) * 100], mode="lines",
-                                 name="자본시장선(무위험 ↔ 최적)", line=dict(color=SERIES_COLORS[1], dash="dot", width=1)))
-    fig.update_xaxes(title_text="연환산 표준편차(%)", ticksuffix="%")
-    fig.update_yaxes(title_text="연환산 기대수익률(%)", ticksuffix="%")
-    fig.update_layout(height=460, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
-                      legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0))
-    st.plotly_chart(fig, use_container_width=True)
+    cw, cf = st.columns([1, 1.35])
+    with cw:
+        ui.section("투자 비중")
+        wdf = pd.DataFrame({"종목": names, **{k: [round(x * 100, 1) for x in w] for k, w in ports.items()}})
+        wdf = wdf.sort_values("최대 샤프 (최적)", ascending=False)
+        st.dataframe(wdf, use_container_width=True, hide_index=True,
+                     column_config={k: st.column_config.ProgressColumn(k, format="%.1f%%", min_value=0, max_value=100) if k == "최대 샤프 (최적)"
+                                    else st.column_config.NumberColumn(k, format="%.1f%%") for k in ports})
+        st.caption(f"공매도 없이 비중 합 100%, 종목당 최대 {cap_pct}%. 기간이 짧으면 한두 종목에 비중이 쏠릴 수 있습니다.")
+    with cf:
+        ui.section("위험-수익 평면")
+        vol_c, ret_c = res["cloud"]
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=vol_c * 100, y=ret_c * 100, mode="markers", name="무작위 포트폴리오",
+                                 marker=dict(size=4, color="#CBD5E0", opacity=0.6), hoverinfo="skip"))
+        sd_i = np.sqrt(np.diag(cov))
+        fig.add_trace(go.Scatter(x=sd_i * 100, y=mu * 100, mode="markers+text", text=names, textposition="top center",
+                                 name="개별 종목", marker=dict(size=9, symbol="diamond", color=SERIES_COLORS[2])))
+        markers = {"최대 샤프 (최적)": ("star", 16, SERIES_COLORS[1]), "최소 분산": ("circle", 11, SERIES_COLORS[0]),
+                   "동일 비중": ("square", 9, "#718096")}
+        for k, w in ports.items():
+            sym, size, col = markers[k]
+            fig.add_trace(go.Scatter(x=[float(np.sqrt(w @ cov @ w)) * 100], y=[float(w @ mu) * 100], mode="markers", name=k,
+                                     marker=dict(size=size, symbol=sym, color=col, line=dict(width=1, color="white"))))
+        w_o = ports["최대 샤프 (최적)"]
+        s_o, r_o = float(np.sqrt(w_o @ cov @ w_o)), float(w_o @ mu)
+        x_max = max(float(vol_c.max()), float(sd_i.max())) * 1.1
+        if s_o > 0:
+            fig.add_trace(go.Scatter(x=[0, x_max * 100], y=[rf * 100, (rf + (r_o - rf) / s_o * x_max) * 100], mode="lines",
+                                     name="자본시장선", line=dict(color=SERIES_COLORS[1], dash="dot", width=1)))
+        fig.update_xaxes(title_text="연환산 표준편차(%)", ticksuffix="%")
+        fig.update_yaxes(title_text="연환산 기대수익률(%)", ticksuffix="%")
+        fig.update_layout(height=400, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
+                          legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0))
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ---- 세부 (더보기)
+    exp, op = ui.more("포트폴리오 3종 비교 더보기 · CAPM · VaR · ES", key="pf_more_ports")
+    if op:
+        with exp:
+            prow = {}
+            for k, d in pstat.items():
+                c, rk = d["c"], d["rk"]
+                prow[k] = {
+                    "기간 수익률": _pct(d["total"], True),
+                    "연환산 기대수익률": _pct(c["mean_a"], True),
+                    "연환산 표준편차": _pct(c["std_a"]),
+                    "샤프비율": f"{d['sharpe']:.2f}" if d["sharpe"] == d["sharpe"] else "-",
+                    "MDD": _pct(d["mdd"]),
+                    "베타": f"{c['beta']:.2f}",
+                    "상관계수": f"{c['corr']:.2f}",
+                    "R²": f"{c['r2']:.2f}",
+                    "CAPM 기대수익률": _pct(c["capm"], True),
+                    "젠센 알파": _pct(c["alpha"], True),
+                    "트레이너": f"{c['treynor']:.3f}" if c["treynor"] == c["treynor"] else "-",
+                    "VaR 95% (1일, 과거)": _pct(rk["var95"]),
+                    "ES 95% (1일, 과거)": _pct(rk["es95"]),
+                    "VaR 99% (1일, 과거)": _pct(rk["var99"]),
+                    "ES 99% (1일, 과거)": _pct(rk["es99"]),
+                    "VaR 95% (1일, 정규)": _pct(rk["nvar95"]),
+                    "VaR 99% (1일, 정규)": _pct(rk["nvar99"]),
+                }
+            st.dataframe(pd.DataFrame(prow), use_container_width=True)
+            st.caption("각 포트폴리오는 위 비중을 기간 내내 매일 유지(일별 리밸런싱)한다고 가정했습니다. 거래비용·세금은 반영하지 않았습니다.")
+            st.markdown("**최적 포트폴리오(최대 샤프)의 CAPM**")
+            capm_grid(o["c"], bench_name)
+            st.caption(capm_note(bench_name))
+            st.markdown("**최적 포트폴리오(최대 샤프)의 VaR · ES**")
+            risk_grid(o["rk"])
+            st.caption(RISK_NOTE)
+
+    exp, op = ui.more("종목별 수치 더보기 · 수익률 · 변동성 · 베타 · 알파 · VaR", key="pf_more_items")
+    if op:
+        with exp:
+            rows = []
+            for nm in names:
+                r = Rs[nm]
+                c = capm_stats(r, m, rf)
+                rk = risk_metrics(r)
+                px = P[nm]
+                mdd = float((px / px.cummax() - 1).min())
+                sd = float(r.std(ddof=1)) * TRADING_DAYS ** 0.5
+                mean_a = float(r.mean()) * TRADING_DAYS
+                rows.append({
+                    "종목": nm,
+                    "기간 수익률": _pct(float(px.iloc[-1] / px.iloc[0] - 1), True),
+                    "연환산 기대수익률": _pct(mean_a, True),
+                    "연환산 표준편차": _pct(sd),
+                    "샤프비율": f"{(mean_a - rf) / sd:.2f}" if sd > 0 else "-",
+                    "베타": f"{c['beta']:.2f}",
+                    "상관계수": f"{c['corr']:.2f}",
+                    "R²": f"{c['r2']:.2f}",
+                    "CAPM 기대수익률": _pct(c["capm"], True),
+                    "젠센 알파": _pct(c["alpha"], True),
+                    "트레이너": f"{c['treynor']:.3f}" if c["treynor"] == c["treynor"] else "-",
+                    "MDD": _pct(mdd),
+                    "VaR 95%(1일)": _pct(rk["var95"]),
+                    "ES 95%(1일)": _pct(rk["es95"]),
+                    "VaR 99%(1일)": _pct(rk["var99"]),
+                    "ES 99%(1일)": _pct(rk["es99"]),
+                })
+            from glossary import col_help
+
+            tdf = pd.DataFrame(rows)
+            st.dataframe(tdf, use_container_width=True, hide_index=True, column_config=col_help(tdf.columns))
+            st.caption(f"무위험수익률: {rf_label}. 벤치마크: {bench_name}. VaR·ES는 1일 기준 과거 시뮬레이션 손실률입니다.")
 
 
 # ======================================================================
@@ -1174,21 +1214,77 @@ except Exception as e:  # noqa: BLE001
     st.error(f"종목 목록을 불러오지 못했습니다: {e}")
     st.stop()
 
-tab_single, tab_compare, tab_pf, tab_bt, tab_opt, tab_bd, tab_rs = st.tabs(
-    ["주가 조회", "수익률 비교", "포트폴리오 최적화", "백테스트", "옵션 조회", "채권", "기업 리서치"])
-with tab_single:
+
+
+def page_market():
+    from market import render_market
+
+    render_market()
+
+
+def page_single():
     render_single(LISTING)
-with tab_compare:
+
+
+def page_compare():
     render_compare(LISTING)
-with tab_pf:
+
+
+def page_portfolio():
     render_portfolio(LISTING)
-with tab_bt:
+
+
+def page_backtest():
+    from backtest import render_backtest
+
     render_backtest(load_prices, find_candidates, LISTING, risk_free_for)
-with tab_opt:
+
+
+def page_options():
+    from options import render_options
+
     render_options()
-with tab_bd:
+
+
+def page_bonds():
+    from bonds import render_bonds
+
     render_bonds()
-with tab_rs:
+
+
+def page_research():
+    from research import render_research
+
     render_research()
 
+
+PAGES = [
+    (page_market, "시장", ":material/monitoring:", "market"),
+    (page_single, "주가 조회", ":material/candlestick_chart:", "chart"),
+    (page_research, "기업 리서치", ":material/business_center:", "research"),
+    (page_compare, "수익률 비교", ":material/compare_arrows:", "compare"),
+    (page_portfolio, "포트폴리오", ":material/pie_chart:", "portfolio"),
+    (page_backtest, "백테스트", ":material/history:", "backtest"),
+    (page_options, "옵션", ":material/stacked_line_chart:", "options"),
+    (page_bonds, "채권", ":material/account_balance:", "bonds"),
+]
+
+
+def _run_pages() -> None:
+    """열린 페이지 하나만 실행한다 (예전엔 7개 탭을 매번 모두 계산해서 느렸음)."""
+    if hasattr(st, "navigation") and hasattr(st, "Page"):
+        pages = [st.Page(fn, title=t, icon=ic, url_path=u, default=(i == 0)) for i, (fn, t, ic, u) in enumerate(PAGES)]
+        try:
+            nav = st.navigation(pages, position="top")
+        except TypeError:
+            nav = st.navigation(pages)
+        nav.run()
+        return
+    labels = [t for _, t, _, _ in PAGES]  # 아주 오래된 Streamlit
+    pick = st.radio("메뉴", labels, horizontal=True, key="nav_fallback", label_visibility="collapsed")
+    PAGES[labels.index(pick)][0]()
+
+
+_run_pages()
+ui.snapshot_state()
 st.caption("일봉 기준 데이터이며 실시간 시세가 아닙니다. 장중에는 지연되거나 당일 값이 반영되지 않을 수 있습니다.")

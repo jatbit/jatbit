@@ -12,6 +12,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+import ui
+
 from options import mgrid
 
 try:
@@ -222,13 +224,15 @@ def render_insider(ticker: str, R: dict) -> None:
                           legend=dict(orientation="h", yanchor="bottom", y=-0.15, x=0))
         st.plotly_chart(pie, use_container_width=True)
         st.caption("기관 보유 비율은 13F 보고 시점(분기 말, 최대 45일 지연) 기준이며 일부 중복 집계로 100%를 넘을 수 있어 그림에서는 상한을 둡니다.")
-    t1, t2 = st.tabs(["상위 기관 보유자", "상위 펀드 보유자"])
-    with t1:
-        ti = _hold_table(H.get("inst"))
-        st.dataframe(ti, use_container_width=True, hide_index=True) if not ti.empty else st.caption("자료 없음")
-    with t2:
-        tf = _hold_table(H.get("fund"))
-        st.dataframe(tf, use_container_width=True, hide_index=True) if not tf.empty else st.caption("자료 없음")
+    (t1, t1_open), (t2, t2_open) = ui.lazy_tabs(["상위 기관 보유자", "상위 펀드 보유자"], key="ins_tabs")
+    if t1_open:
+        with t1:
+            ti = _hold_table(H.get("inst"))
+            st.dataframe(ti, use_container_width=True, hide_index=True) if not ti.empty else st.caption("자료 없음")
+    if t2_open:
+        with t2:
+            tf = _hold_table(H.get("fund"))
+            st.dataframe(tf, use_container_width=True, hide_index=True) if not tf.empty else st.caption("자료 없음")
 
     # ---- 내부자 거래
     st.markdown("##### 내부자 거래 (SEC Form 4)")

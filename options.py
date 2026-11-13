@@ -15,6 +15,8 @@ import FinanceDataReader as fdr
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+import ui
 import streamlit.components.v1 as components
 
 import bsm
@@ -351,10 +353,10 @@ def mgrid(items, cols: int = 4) -> None:
         if extra and not re.search(r"[÷×=√]| [+−] |N\(", extra):  # 계산식이 아닌 보조 정보(기준일 등)만 덧붙임
             t = f"{t} ({extra})" if t else extra
         right = " qr" if cols > 1 and (i % cols) >= cols / 2 else ""
-        cells += (f'<div style="min-width:0" class="mgc{right}"><div style="font-size:0.78rem"><span style="opacity:.7">{html.escape(lab)}</span>{icon(t)}</div>'
-                  f'<div style="font-size:1.12rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{html.escape(val)}</div></div>')
+        cells += (f'<div class="kc-c{right}"><div class="kc-l"><span>{html.escape(lab)}</span>{icon(t)}</div>'
+                  f'<div class="kc-v">{html.escape(val)}</div></div>')
     cells = cells.replace("$", "&#36;")  # 마크다운 수식($...$)으로 해석되지 않게
-    st.markdown(CSS + f'<div style="display:grid;grid-template-columns:repeat({cols},minmax(0,1fr));gap:6px 12px;margin:2px 0 12px">{cells}</div>',
+    st.markdown(CSS + f'<div class="kc" style="grid-template-columns:repeat({cols},minmax(0,1fr))">{cells}</div>',
                 unsafe_allow_html=True)
 
 
@@ -392,7 +394,7 @@ def render_chain() -> None:
         for c, tk in zip(cols, presets):
             c.button(tk, key=f"opt_preset_{tk}", use_container_width=True, on_click=_set_ticker, args=(tk,))
     if pf:
-        st.caption("앞쪽 버튼은 '포트폴리오 최적화' 탭에 들어 있는 미국 종목입니다.")
+        st.caption("앞쪽 버튼은 '포트폴리오' 페이지에 들어 있는 미국 종목입니다.")
     raw_t = st.text_input("미국 티커 (예: AAPL, TSLA, SPY)", key="opt_ticker", placeholder="AAPL")
     ticker = (raw_t or "").strip().upper()
     if not ticker:
@@ -537,9 +539,9 @@ def render_hedge() -> None:
     c3.button("최적 포트폴리오 불러오기", key="hedge_load_pf", use_container_width=True, disabled=not res,
               on_click=_load_from_pf, args=(amount, fx))
     if res:
-        st.caption(f"'포트폴리오 최적화' 탭의 최대 샤프(최적) 비중 × 투자 금액 ÷ 최근 종가({res.get('asof', '')})로 주식 수를 채웁니다. 표에서 직접 고쳐도 됩니다.")
+        st.caption(f"'포트폴리오' 페이지의 최대 샤프(최적) 비중 × 투자 금액 ÷ 최근 종가({res.get('asof', '')})로 주식 수를 채웁니다. 표에서 직접 고쳐도 됩니다.")
     else:
-        st.caption("'포트폴리오 최적화' 탭에서 종목을 고르고 계산하면 이 버튼이 켜집니다. 아래 표에 직접 입력해도 됩니다 (예: AAPL, 100).")
+        st.caption("'포트폴리오' 페이지에서 종목을 고르고 계산하면 이 버튼이 켜집니다. 아래 표에 직접 입력해도 됩니다 (예: AAPL, 100).")
 
     stocks_base = st.session_state.get("hedge_stocks_cur")
     if stocks_base is None:
@@ -758,14 +760,19 @@ def render_options() -> None:
 
     from american import render_american
 
-    t1, t4, t5, t2, t3 = st.tabs(["옵션 체인", "변동성·수급 분석", "아메리칸 옵션", "델타·감마 헷지", "옵션 포함 CAPM·손익"])
-    with t1:
-        render_chain()
-    with t4:
-        render_vol()
-    with t5:
-        render_american()
-    with t2:
-        render_hedge()
-    with t3:
-        render_capm_opt()
+    (t1, t1_open), (t4, t4_open), (t5, t5_open), (t2, t2_open), (t3, t3_open) = ui.lazy_tabs(["옵션 체인", "변동성·수급 분석", "아메리칸 옵션", "델타·감마 헷지", "옵션 포함 CAPM·손익"], key="opt_tabs")
+    if t1_open:
+        with t1:
+            render_chain()
+    if t4_open:
+        with t4:
+            render_vol()
+    if t5_open:
+        with t5:
+            render_american()
+    if t2_open:
+        with t2:
+            render_hedge()
+    if t3_open:
+        with t3:
+            render_capm_opt()

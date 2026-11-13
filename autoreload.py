@@ -10,8 +10,8 @@ import os
 import sys
 
 # 다른 모듈을 가져다 쓰는 모듈일수록 뒤에 둔다 (먼저 다시 불러온 모듈을 뒤의 모듈이 가져가도록)
-ORDER = ["bsm", "glossary", "money", "rates", "options", "volmodels", "capm_opt", "bonds", "news", "valuation", "kr", "dcf", "insider",
-         "credit", "optvol", "american", "risklab", "backtest", "peers", "earnings", "research"]
+ORDER = ["bsm", "glossary", "ui", "money", "rates", "options", "volmodels", "capm_opt", "bonds", "news", "valuation", "kr", "dcf", "insider",
+         "credit", "optvol", "american", "risklab", "backtest", "peers", "earnings", "research", "market"]
 _BASE = os.path.dirname(os.path.abspath(__file__))
 _SELF = os.path.abspath(__file__)
 _seen: dict = {}

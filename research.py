@@ -9,6 +9,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+import ui
+
 from options import OPT_PRESETS, is_us_ticker, mgrid
 
 try:
@@ -53,18 +55,26 @@ def load_research(ticker: str) -> dict:
     if not info or (not info.get("longName") and not info.get("shortName") and not info.get("quoteType")):
         raise RuntimeError("기업 정보를 찾지 못했습니다 (티커를 확인해 주세요)")
     out = {"info": info}
-    out["income"] = _safe(lambda: t.income_stmt, pd.DataFrame())
-    out["balance"] = _safe(lambda: t.balance_sheet, pd.DataFrame())
-    out["cashflow"] = _safe(lambda: t.cashflow, pd.DataFrame())
-    out["recs"] = _safe(lambda: t.recommendations, pd.DataFrame())
-    out["targets"] = _safe(lambda: dict(t.analyst_price_targets), {})
-    out["calendar"] = _safe(lambda: dict(t.calendar), {})
-    out["news"] = _safe(lambda: list(t.news), [])
-    out["qincome"] = _safe(lambda: t.quarterly_income_stmt, pd.DataFrame())
-    out["eps_est"] = _safe(lambda: t.earnings_estimate, pd.DataFrame())
-    out["edates"] = _safe(lambda: t.get_earnings_dates(limit=60), pd.DataFrame())
-    out["hist"] = _safe(lambda: t.history(period="10y", auto_adjust=False)["Close"].dropna(), pd.Series(dtype=float))
-    out["splits"] = _safe(lambda: t.splits, pd.Series(dtype=float))
+    jobs = {  # 서로 독립적인 요청이라 동시에 보낸다 (차례로 보내면 10초 넘게 걸리기도 함)
+        "income": (lambda: t.income_stmt, pd.DataFrame()),
+        "balance": (lambda: t.balance_sheet, pd.DataFrame()),
+        "cashflow": (lambda: t.cashflow, pd.DataFrame()),
+        "recs": (lambda: t.recommendations, pd.DataFrame()),
+        "targets": (lambda: dict(t.analyst_price_targets), {}),
+        "calendar": (lambda: dict(t.calendar), {}),
+        "news": (lambda: list(t.news), []),
+        "qincome": (lambda: t.quarterly_income_stmt, pd.DataFrame()),
+        "eps_est": (lambda: t.earnings_estimate, pd.DataFrame()),
+        "edates": (lambda: t.get_earnings_dates(limit=60), pd.DataFrame()),
+        "hist": (lambda: t.history(period="10y", auto_adjust=False)["Close"].dropna(), pd.Series(dtype=float)),
+        "splits": (lambda: t.splits, pd.Series(dtype=float)),
+    }
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futs = {k: ex.submit(_safe, fn, d) for k, (fn, d) in jobs.items()}
+        for k, f in futs.items():
+            out[k] = f.result()
     return out
 
 
@@ -620,14 +630,22 @@ def render_research() -> None:
     pf = [it["code"] if not it.get("domestic") else it["name"] for it in res.get("items", [])
           if (not it.get("domestic") and is_us_ticker(it["code"])) or (it.get("domestic") and re.fullmatch(r"\d{6}", str(it["code"])))]
     presets = list(dict.fromkeys(pf + OPT_PRESETS[:6] + ["삼성전자", "SK하이닉스"]))[:12]
+    try:
+        c1, c2 = st.columns([5, 1], vertical_alignment="bottom")
+    except TypeError:
+        c1, c2 = st.columns([5, 1])
+    raw = c1.text_input("종목 (미국 티커 또는 국내 종목명·코드)", key="rs_ticker", placeholder="AAPL, 삼성전자, 005930",
+                        label_visibility="collapsed")
+    with c2:
+        with ui.popover("설정", icon=":material/tune:"):
+            ko = st.toggle("한국어 번역 (Google 자동 번역)", value=True, key="rs_ko")
+            st.text_input("OpenDART API 키 (선택)", key="dart_key_input", type="password",
+                          help="opendart.fss.or.kr에서 무료로 발급. 국내 종목 10년 재무제표·지분 공시에 씁니다. "
+                               "계속 쓰려면 Streamlit 앱 설정의 Secrets에 DART_API_KEY로 넣으세요.")
+            st.caption("Secrets에 등록된 키가 있으면 비워 둬도 됩니다." if kr.dart_key() else "키가 없으면 Yahoo 재무제표(약 4년)를 씁니다.")
     if hasattr(st, "pills"):
-        st.pills("빠른 선택", presets, key="rs_pill",
+        st.pills("빠른 선택", presets, key="rs_pill", label_visibility="collapsed",
                  on_change=lambda: _set_research(st.session_state.get("rs_pill")) if st.session_state.get("rs_pill") else None)
-    raw = st.text_input("종목 (미국 티커 또는 국내 종목명·코드)", key="rs_ticker", placeholder="AAPL, 삼성전자, 005930")
-    with st.expander("OpenDART API 키 (국내 종목 10년 재무제표·지분 공시용, 선택)"):
-        st.text_input("API 키", key="dart_key_input", type="password",
-                      help="opendart.fss.or.kr에서 무료로 발급. 이 창을 닫으면 지워집니다. 계속 쓰려면 Streamlit 앱 설정의 Secrets에 DART_API_KEY로 넣으세요.")
-        st.caption("Streamlit Secrets에 등록된 키가 있으면 비워 둬도 됩니다." if kr.dart_key() else "키가 없으면 Yahoo 재무제표(약 4년)를 씁니다.")
     q = (raw or "").strip()
     if not q:
         st.info("티커나 종목명을 입력하거나 위에서 고르세요.")
@@ -672,61 +690,107 @@ def render_research() -> None:
     money.set_cur(ccy)
     cur = "$" if ccy == "USD" else ("₩" if ccy == "KRW" else "")
 
-    # ---- 1. 개요
+    # ---- 시세 헤더
     name = kname or info.get("longName") or info.get("shortName") or ticker
-    st.subheader(f"{name} ({code or ticker})")
     if domestic:
-        meta = [c.get("market"), c.get("sector") or info.get("sector"), c.get("industry") or info.get("industry"),
-                f"직원 {int(info['fullTimeEmployees']):,}명" if _num(info.get("fullTimeEmployees")) else None]
+        meta = [c.get("market"), c.get("sector") or info.get("sector"), c.get("industry") or info.get("industry")]
     else:
-        meta = [info.get("sector"), info.get("industry"), info.get("country"),
-                f"직원 {int(info['fullTimeEmployees']):,}명" if _num(info.get("fullTimeEmployees")) else None, info.get("exchange")]
-    meta = [x for x in meta if x]
-    st.caption(" · ".join(map(str, meta)) + (f" · [홈페이지]({info['website']})" if info.get("website") else ""))
-    ko = st.toggle("한국어 번역 (Google 자동 번역)", value=True, key="rs_ko")
-    summary = info.get("longBusinessSummary")
-    if summary:
-        tr = translate_ko(summary) if ko else None
-        with st.expander("사업 설명", expanded=True):
-            if tr:
-                st.write(tr.replace("$", "\\$"))
-            elif ko:
-                st.caption("번역에 실패해 영문 원문을 보여줍니다.")
-            if not tr:
-                st.write(summary.replace("$", "\\$"))
-        if tr:
-            with st.expander("사업 설명 (영문 원문)"):
-                st.write(summary.replace("$", "\\$"))
-    if not domestic:
-        st.button("이 종목을 '옵션 조회' 탭에 설정", key="rs_to_opt", on_click=_send_to_options, args=(ticker,))
-    from news import render_latest_news
-    render_latest_news(code or ticker, kname or info.get("shortName") or name, R.get("news") or [], ko, translate_ko,
-                       lang="ko" if domestic else "en")
+        meta = [info.get("exchange"), info.get("sector"), info.get("industry"), info.get("country")]
+    meta = [html.escape(str(x)) for x in meta if x]
+    if info.get("website"):
+        meta.append(f'<a href="{html.escape(info["website"], quote=True)}" target="_blank">홈페이지</a>')
+    px = _num(info.get("currentPrice")) or _num(info.get("regularMarketPrice"))
+    prev = _num(info.get("regularMarketPreviousClose")) or _num(info.get("previousClose"))
+    chg = (px - prev) if px and prev else None
+    ui.quote_header(name, code or ticker, " · ".join(meta), money.price(px) if px else "-",
+                    money.price(abs(chg)) if chg is not None else None, (chg / prev * 100) if chg is not None else None,
+                    "Yahoo 지연 시세")
+    _key_stats(R, info, cur, px)
 
-    F, src, ferr = _financials(ticker, R, domestic, code)
-    if src == "Yahoo" and ferr and not domestic:
-        st.caption("SEC 10개년 재무제표가 없어 Yahoo 재무제표(약 4년)를 씁니다.")
-    tabs = st.tabs(["개요·재무", "동종업계 비교", "실적·추정치", "DCF 가치평가", "신용위험·회사채", "내부자 거래·지분 구조"])
-    with tabs[0]:
-        _render_main(ticker, R, info, cur, ko, F, src, domestic)
-    with tabs[1]:
-        from peers import render_peers
-        render_peers(ticker, R, domestic, code)
-    with tabs[2]:
-        from earnings import render_earnings
-        render_earnings(ticker, R, domestic)
-    with tabs[3]:
-        from dcf import render_dcf
-        render_dcf(ticker, R, F, src, domestic)
-    with tabs[4]:
-        from credit import render_credit
-        render_credit(ticker, R, F, domestic)
-    with tabs[5]:
-        if domestic:
-            kr.render_kr_ownership(code, R)
-        else:
-            from insider import render_insider
-            render_insider(ticker, R)
+    tabs = ui.lazy_tabs(["재무·밸류에이션", "뉴스·기업 개요", "동종업계 비교", "실적·추정치", "DCF 가치평가", "신용위험·회사채", "지분 구조·내부자"],
+                        key="rs_tabs")
+    if tabs[0][1]:
+        with tabs[0][0]:
+            F, src, ferr = _financials(ticker, R, domestic, code)
+            if src == "Yahoo" and ferr and not domestic:
+                st.caption("SEC 10개년 재무제표가 없어 Yahoo 재무제표(약 4년)를 씁니다.")
+            _render_main(ticker, R, info, cur, ko, F, src, domestic)
+    if tabs[1][1]:
+        with tabs[1][0]:
+            summary = info.get("longBusinessSummary")
+            if summary:
+                tr = translate_ko(summary) if ko else None
+                ui.section("사업 설명")
+                if tr:
+                    st.write(tr.replace("$", "\\$"))
+                    with st.expander("영문 원문"):
+                        st.write(summary.replace("$", "\\$"))
+                else:
+                    if ko:
+                        st.caption("번역에 실패해 영문 원문을 보여줍니다.")
+                    st.write(summary.replace("$", "\\$"))
+            facts = []
+            if _num(info.get("fullTimeEmployees")):
+                facts.append(f"직원 {int(info['fullTimeEmployees']):,}명")
+            if info.get("city") or info.get("country"):
+                facts.append(" ".join(x for x in [info.get("city"), info.get("country")] if x))
+            if facts:
+                st.caption(" · ".join(facts))
+            if not domestic:
+                st.button("이 종목을 '옵션' 페이지에 설정", key="rs_to_opt", on_click=_send_to_options, args=(ticker,))
+            from news import render_latest_news
+            render_latest_news(code or ticker, kname or info.get("shortName") or name, R.get("news") or [], ko, translate_ko,
+                               lang="ko" if domestic else "en")
+            _render_yahoo_news(R, ko)
+    if tabs[2][1]:
+        with tabs[2][0]:
+            from peers import render_peers
+            render_peers(ticker, R, domestic, code)
+    if tabs[3][1]:
+        with tabs[3][0]:
+            from earnings import render_earnings
+            render_earnings(ticker, R, domestic)
+    if tabs[4][1]:
+        with tabs[4][0]:
+            F, src, _ = _financials(ticker, R, domestic, code)
+            from dcf import render_dcf
+            render_dcf(ticker, R, F, src, domestic)
+    if tabs[5][1]:
+        with tabs[5][0]:
+            F, src, _ = _financials(ticker, R, domestic, code)
+            from credit import render_credit
+            render_credit(ticker, R, F, domestic)
+    if tabs[6][1]:
+        with tabs[6][0]:
+            if domestic:
+                kr.render_kr_ownership(code, R)
+            else:
+                from insider import render_insider
+                render_insider(ticker, R)
+
+
+def _key_stats(R: dict, info: dict, cur: str, px) -> None:
+    """MTS·Yahoo 요약 화면처럼 가장 자주 보는 지표만 먼저."""
+    import money
+
+    lo52, hi52 = _num(info.get("fiftyTwoWeekLow")), _num(info.get("fiftyTwoWeekHigh"))
+    pos52 = (px - lo52) / (hi52 - lo52) if px and lo52 and hi52 and hi52 > lo52 else None
+    tg = R.get("targets") or {}
+    mean_t = _num(tg.get("mean")) or _num(info.get("targetMeanPrice"))
+    up = (mean_t / px - 1) if mean_t and px else None
+    rec = info.get("recommendationKey") or "none"
+    n_op = int(info["numberOfAnalystOpinions"]) if _num(info.get("numberOfAnalystOpinions")) else None
+    rng = (f"{lo52:,.0f} ~ {hi52:,.0f}" if cur == "₩" else f"{lo52:,.2f} ~ {hi52:,.2f}") if lo52 and hi52 else "-"
+    ui.cards([
+        ("시가총액", big(info.get("marketCap"), cur)),
+        ("PER (최근 12개월)", ratio(info.get("trailingPE"), 1), f"선행 {ratio(info.get('forwardPE'), 1)}" if _num(info.get("forwardPE")) else ""),
+        ("PBR", ratio(info.get("priceToBook"))),
+        ("배당수익률", pct(_div_yield(info), 2)),
+        ("ROE", pct(info.get("returnOnEquity")), f"영업이익률 {pct(info.get('operatingMargins'))}" if _num(info.get("operatingMargins")) is not None else ""),
+        ("52주 범위", rng, f"현재가는 범위의 {pos52 * 100:.0f}% 위치" if pos52 is not None else ""),
+        ("목표주가 평균", money.price(mean_t) if mean_t else "-", f"상승 여력 {pct(up)}" if up is not None else "", up),
+        ("투자의견", REC_KO.get(rec, "-") if rec != "none" else "-", f"애널리스트 {n_op}명" if n_op else ""),
+    ], cols=4)
 
 
 def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool, F=None, src: str = "SEC 10-K", domestic: bool = False) -> None:
@@ -837,8 +901,10 @@ def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool, F=None, s
         st.caption("재무제표를 불러오지 못했습니다 (ETF이거나 데이터 제공처 응답 지연).")
 
     # ---- 5-1. 재무비율·주가·PER 그래프 (직접 선택)
-    st.markdown("##### 재무비율 · 주가 · 밸류에이션 그래프 (직접 선택해서 겹쳐 보기)")
-    _combo_chart(sec, R, ticker, px, n_eps, src)
+    exp, op = ui.more("재무비율 · 주가 · 밸류에이션 그래프 더보기 (직접 골라서 겹쳐 보기)", key=f"rs_more_combo_{ticker}")
+    if op:
+        with exp:
+            _combo_chart(sec, R, ticker, px, n_eps, src)
 
 
     # ---- 6. 일정
@@ -858,7 +924,10 @@ def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool, F=None, s
         st.markdown("##### 주요 일정")
         mgrid(ev)
 
-    # ---- 7. 뉴스
+    st.caption("출처: Yahoo Finance. 지연·누락이 있을 수 있으며 투자 판단의 참고 자료로만 사용하세요.")
+
+
+def _render_yahoo_news(R: dict, ko: bool) -> None:
     news = R["news"] or []
     rows = []
     for n in news[:12]:
@@ -892,4 +961,3 @@ def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool, F=None, s
             lines.append(f'<div style="margin:0 0 10px">{link}{orig}<br><span style="font-size:0.8rem;opacity:.65">'
                          f'{html.escape(prov or "")} · {when}</span></div>')
         st.markdown("".join(lines).replace("$", "&#36;"), unsafe_allow_html=True)
-    st.caption("출처: Yahoo Finance. 지연·누락이 있을 수 있으며 투자 판단의 참고 자료로만 사용하세요.")

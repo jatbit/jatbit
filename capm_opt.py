@@ -197,7 +197,7 @@ def render_capm_opt() -> None:
 
     under, skipped = collect_positions(include_hedge)
     if skipped:
-        st.caption("옵션 데이터가 없어 제외: " + ", ".join(skipped) + " (국내 종목의 CAPM은 '포트폴리오 최적화' 탭 참고)")
+        st.caption("옵션 데이터가 없어 제외: " + ", ".join(skipped) + " (국내 종목의 CAPM은 '포트폴리오' 페이지 참고)")
     if not under:
         st.info("'델타·감마 헷지' 탭에서 미국 종목 주식이나 옵션 포지션을 입력하면 계산합니다.")
         return

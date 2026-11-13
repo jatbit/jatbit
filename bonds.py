@@ -15,6 +15,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+import ui
+
 TENORS = {  # FRED 시리즈: (표시 이름, 만기 연수)
     "DGS1MO": ("1개월", 1 / 12), "DGS3MO": ("3개월", 0.25), "DGS6MO": ("6개월", 0.5), "DGS1": ("1년", 1),
     "DGS2": ("2년", 2), "DGS3": ("3년", 3), "DGS5": ("5년", 5), "DGS7": ("7년", 7), "DGS10": ("10년", 10),
@@ -152,22 +154,50 @@ def _grid(items, cols=4):
 def render_bonds() -> None:
     st.caption("미국 국채 금리는 FRED(미 연준 경제 데이터) 일별 수익률 곡선 기준입니다. 개별 회사채·국내 채권 시세는 무료 데이터가 없어, "
                "직접 입력하는 채권 계산기와 채권 ETF로 대신합니다.")
-    t1, t2, t3, t4 = st.tabs(["국채 금리 곡선", "국채 조회 (듀레이션)", "채권 계산기", "채권 ETF"])
     try:
         ts = load_treasury()
     except Exception as e:  # noqa: BLE001
         ts = None
         st.error(f"국채 금리를 불러오지 못했습니다: {e}")
-    with t1:
-        if ts is not None:
-            _curve(ts)
-    with t2:
-        if ts is not None:
-            _treasury_lookup(ts)
-    with t3:
-        _calculator(ts)
-    with t4:
-        _etf(ts)
+    if ts is not None:
+        _summary(ts)
+    (t1, t1_open), (t2, t2_open), (t3, t3_open), (t4, t4_open) = ui.lazy_tabs(["국채 금리 곡선", "국채 조회 (듀레이션)", "채권 계산기", "채권 ETF"], key="bd_tabs")
+    if t1_open:
+        with t1:
+            if ts is not None:
+                _curve(ts)
+    if t2_open:
+        with t2:
+            if ts is not None:
+                _treasury_lookup(ts)
+    if t3_open:
+        with t3:
+            _calculator(ts)
+    if t4_open:
+        with t4:
+            _etf(ts)
+
+
+def _summary(ts: pd.DataFrame) -> None:
+    """가장 많이 보는 미국 국채 금리와 장단기 금리차 (전일 대비 bp)."""
+    d = ts.dropna(how="all").ffill()
+    if len(d) < 2:
+        return
+    last, prev = d.iloc[-1], d.iloc[-2]
+
+    def item(col, label):
+        v, p = last.get(col), prev.get(col)
+        if v is None or not np.isfinite(v):
+            return (label, "-")
+        ch = (v - p) * 1e4 if p is not None and np.isfinite(p) else np.nan
+        return (label, f"{v * 100:.2f}%", f"전일 대비 {ch:+.0f}bp" if np.isfinite(ch) else "", ch)
+
+    s_now = (last["DGS10"] - last["DGS2"]) * 1e4
+    s_prev = (prev["DGS10"] - prev["DGS2"]) * 1e4
+    ui.section("미국 국채 금리", f"FRED · {d.index[-1]:%Y-%m-%d} 기준")
+    ui.cards([item("DGS3MO", "3개월물"), item("DGS2", "2년물"), item("DGS10", "10년물"), item("DGS30", "30년물"),
+              ("10년−2년 금리차", f"{s_now:+.0f}bp", ("장단기 금리 역전" if s_now < 0 else "정상 (우상향 곡선)") + f" · 전일 {s_prev:+.0f}bp")],
+             cols=5)
 
 
 def _curve(ts: pd.DataFrame) -> None:

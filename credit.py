@@ -15,6 +15,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+import ui
+
 from bsm import ncdf
 from glossary import col_help
 from options import mgrid
@@ -399,182 +401,188 @@ def render_credit(ticker: str, R: dict, sec: pd.DataFrame | None, domestic: bool
     if financial:
         st.warning("금융회사는 부채가 영업의 일부라 이자보상배율·Altman Z·머튼 모형이 잘 맞지 않습니다. 추정 등급은 금융업 표를 썼지만 참고만 하세요.")
 
-    tabs = st.tabs(["회사채 시장 금리", "등급·부도확률", "CDS 프리미엄", "머튼 구조모형", "Altman Z-점수", "신용 지표 추이"])
-    with tabs[2]:
-        _render_cds(ticker, srt, sp_mkt, MT, D, r_in, r5, rec)
+    tabs = ui.lazy_tabs(["회사채 시장 금리", "등급·부도확률", "CDS 프리미엄", "머튼 구조모형", "Altman Z-점수", "신용 지표 추이"], key="cr_tabs")
+    if tabs[2][1]:
+        with tabs[2][0]:
+            _render_cds(ticker, srt, sp_mkt, MT, D, r_in, r5, rec)
     tabs = [tabs[0], tabs[1], tabs[3], tabs[4], tabs[5]]
-    with tabs[0]:
-        if M.empty:
-            st.info("시장 금리 자료가 없습니다.")
-        else:
+    if tabs[0][1]:
+        with tabs[0][0]:
+            if M.empty:
+                st.info("시장 금리 자료가 없습니다.")
+            else:
+                rows = []
+                for nm, (oas, ey) in ICE.items():
+                    s = M[oas].dropna() if oas in M else pd.Series(dtype=float)
+                    if s.empty:
+                        continue
+                    y1 = s[s.index <= s.index[-1] - pd.Timedelta(days=365)]
+                    rows.append({"등급": nm, "스프레드(OAS)": f"{s.iloc[-1] * 100:.2f}%",
+                                 "실효수익률": f"{last(ey) * 100:.2f}%" if np.isfinite(last(ey)) else "-",
+                                 "1년 전 스프레드": f"{y1.iloc[-1] * 100:.2f}%" if len(y1) else "-",
+                                 "3년 범위": f"{s.min() * 100:.2f}% ~ {s.max() * 100:.2f}%",
+                                 "내재 1년 부도확률": _pp(spread_pd(float(s.iloc[-1]), 1, rec)),
+                                 "내재 5년 부도확률": _pp(spread_pd(float(s.iloc[-1]), 5, rec)),
+                                 "역사적 1년 부도율": f"{SP_CUM['CCC/C' if nm == 'CCC 이하' else nm][0]:.2f}%",
+                                 "역사적 5년 부도율": f"{SP_CUM['CCC/C' if nm == 'CCC 이하' else nm][4]:.2f}%"})
+                asof = M.dropna(how="all").index[-1]
+                st.markdown(f"###### 미국 회사채 등급별 금리 ({asof:%Y-%m-%d})")
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, column_config=col_help(pd.DataFrame(rows).columns))
+                show = st.radio("그래프", ["등급별 스프레드", "등급별 실효수익률", "무디스 Aaa·Baa와 국채"], horizontal=True, key="cr_mk_show")
+                f = go.Figure()
+                if show == "무디스 Aaa·Baa와 국채":
+                    for c in ("DAAA", "DBAA", "DGS10", "DGS1"):
+                        if c in M:
+                            s = M[c].dropna()
+                            f.add_trace(go.Scatter(x=s.index, y=s * 100, name=OTHER[c], mode="lines",
+                                                   hovertemplate="%{x|%Y-%m-%d} %{y:.2f}%<extra>" + OTHER[c] + "</extra>"))
+                else:
+                    j = 0 if show == "등급별 스프레드" else 1
+                    for nm, pair in ICE.items():
+                        if pair[j] in M:
+                            s = M[pair[j]].dropna()
+                            f.add_trace(go.Scatter(x=s.index, y=s * 100, name=nm, mode="lines", line=dict(color=COLORS[nm], width=1.5),
+                                                   hovertemplate="%{x|%Y-%m-%d} %{y:.2f}%<extra>" + nm + "</extra>"))
+                if srt and show != "무디스 Aaa·Baa와 국채":
+                    f.add_annotation(text=f"{ticker} 추정 등급: {srt[0]}", xref="paper", yref="paper", x=0.01, y=0.98, showarrow=False,
+                                     font=dict(size=11), bgcolor="rgba(128,128,128,0.15)")
+                f.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
+                                yaxis=dict(ticksuffix="%", type="log" if show == "등급별 스프레드" else "linear"),
+                                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+                st.plotly_chart(f, use_container_width=True)
+                if show == "등급별 스프레드":
+                    st.caption("세로축은 로그 눈금입니다. ICE BofA 지수는 FRED에서 최근 몇 년치만 공개됩니다.")
+
+    if tabs[1][1]:
+        with tabs[1][0]:
+            tbl = DAMO_FIN if financial else DAMO_LARGE
             rows = []
-            for nm, (oas, ey) in ICE.items():
-                s = M[oas].dropna() if oas in M else pd.Series(dtype=float)
-                if s.empty:
-                    continue
-                y1 = s[s.index <= s.index[-1] - pd.Timedelta(days=365)]
-                rows.append({"등급": nm, "스프레드(OAS)": f"{s.iloc[-1] * 100:.2f}%",
-                             "실효수익률": f"{last(ey) * 100:.2f}%" if np.isfinite(last(ey)) else "-",
-                             "1년 전 스프레드": f"{y1.iloc[-1] * 100:.2f}%" if len(y1) else "-",
-                             "3년 범위": f"{s.min() * 100:.2f}% ~ {s.max() * 100:.2f}%",
-                             "내재 1년 부도확률": _pp(spread_pd(float(s.iloc[-1]), 1, rec)),
-                             "내재 5년 부도확률": _pp(spread_pd(float(s.iloc[-1]), 5, rec)),
-                             "역사적 1년 부도율": f"{SP_CUM['CCC/C' if nm == 'CCC 이하' else nm][0]:.2f}%",
-                             "역사적 5년 부도율": f"{SP_CUM['CCC/C' if nm == 'CCC 이하' else nm][4]:.2f}%"})
-            asof = M.dropna(how="all").index[-1]
-            st.markdown(f"###### 미국 회사채 등급별 금리 ({asof:%Y-%m-%d})")
+            for i, (lo, rt, sp) in enumerate(tbl):
+                if i == 0:
+                    rng = f"{lo:g} 초과"
+                elif lo < -1e8:
+                    rng = f"{tbl[i - 1][0]:g} 이하"
+                else:
+                    rng = f"{lo:g} 초과 ~ {tbl[i - 1][0]:g} 이하"
+                rows.append({"이자보상배율": rng, "등급": rt, "스프레드": f"{sp * 100:.2f}%", "세전 차입금리": f"{(rf10 + sp) * 100:.2f}%",
+                             "역사적 1년 부도율": f"{SP_CUM[bucket(rt)][0]:.2f}%", "역사적 5년 부도율": f"{SP_CUM[bucket(rt)][4]:.2f}%",
+                             "": "◀ 이 회사" if srt and rt == srt[0] else ""})
+            st.markdown("###### 이자보상배율 → 추정 등급 (Damodaran, 2026년 1월)")
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, column_config=col_help(pd.DataFrame(rows).columns))
-            show = st.radio("그래프", ["등급별 스프레드", "등급별 실효수익률", "무디스 Aaa·Baa와 국채"], horizontal=True, key="cr_mk_show")
             f = go.Figure()
-            if show == "무디스 Aaa·Baa와 국채":
-                for c in ("DAAA", "DBAA", "DGS10", "DGS1"):
-                    if c in M:
-                        s = M[c].dropna()
-                        f.add_trace(go.Scatter(x=s.index, y=s * 100, name=OTHER[c], mode="lines",
-                                               hovertemplate="%{x|%Y-%m-%d} %{y:.2f}%<extra>" + OTHER[c] + "</extra>"))
-            else:
-                j = 0 if show == "등급별 스프레드" else 1
-                for nm, pair in ICE.items():
-                    if pair[j] in M:
-                        s = M[pair[j]].dropna()
-                        f.add_trace(go.Scatter(x=s.index, y=s * 100, name=nm, mode="lines", line=dict(color=COLORS[nm], width=1.5),
-                                               hovertemplate="%{x|%Y-%m-%d} %{y:.2f}%<extra>" + nm + "</extra>"))
-            if srt and show != "무디스 Aaa·Baa와 국채":
-                f.add_annotation(text=f"{ticker} 추정 등급: {srt[0]}", xref="paper", yref="paper", x=0.01, y=0.98, showarrow=False,
-                                 font=dict(size=11), bgcolor="rgba(128,128,128,0.15)")
-            f.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
-                            yaxis=dict(ticksuffix="%", type="log" if show == "등급별 스프레드" else "linear"),
+            yrs = list(range(1, 16))
+            for nm, v in SP_CUM.items():
+                f.add_trace(go.Scatter(x=yrs, y=v, name=nm, mode="lines+markers", marker=dict(size=4),
+                                       line=dict(width=3 if srt and bucket(srt[0]) == nm else 1.3),
+                                       hovertemplate="%{x}년 누적 %{y:.2f}%<extra>" + nm + "</extra>"))
+            f.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
+                            xaxis=dict(title="기간(년)"), yaxis=dict(title="누적 부도율(%)", type="log", ticksuffix="%"),
                             legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
             st.plotly_chart(f, use_container_width=True)
-            if show == "등급별 스프레드":
-                st.caption("세로축은 로그 눈금입니다. ICE BofA 지수는 FRED에서 최근 몇 년치만 공개됩니다.")
+            st.caption("출처: S&P Global Ratings 2024 부도·등급 전이 연구 (전 세계 기업 1981–2024 평균)")
 
-    with tabs[1]:
-        tbl = DAMO_FIN if financial else DAMO_LARGE
-        rows = []
-        for i, (lo, rt, sp) in enumerate(tbl):
-            if i == 0:
-                rng = f"{lo:g} 초과"
-            elif lo < -1e8:
-                rng = f"{tbl[i - 1][0]:g} 이하"
+    if tabs[2][1]:
+        with tabs[2][0]:
+            if not MT.get("ok"):
+                st.info("시가총액·주가 변동성·부채 자료가 부족해 계산하지 못했습니다. 위 '머튼 모형 가정 바꾸기'에서 직접 넣어 보세요.")
             else:
-                rng = f"{lo:g} 초과 ~ {tbl[i - 1][0]:g} 이하"
-            rows.append({"이자보상배율": rng, "등급": rt, "스프레드": f"{sp * 100:.2f}%", "세전 차입금리": f"{(rf10 + sp) * 100:.2f}%",
-                         "역사적 1년 부도율": f"{SP_CUM[bucket(rt)][0]:.2f}%", "역사적 5년 부도율": f"{SP_CUM[bucket(rt)][4]:.2f}%",
-                         "": "◀ 이 회사" if srt and rt == srt[0] else ""})
-        st.markdown("###### 이자보상배율 → 추정 등급 (Damodaran, 2026년 1월)")
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, column_config=col_help(pd.DataFrame(rows).columns))
-        f = go.Figure()
-        yrs = list(range(1, 16))
-        for nm, v in SP_CUM.items():
-            f.add_trace(go.Scatter(x=yrs, y=v, name=nm, mode="lines+markers", marker=dict(size=4),
-                                   line=dict(width=3 if srt and bucket(srt[0]) == nm else 1.3),
-                                   hovertemplate="%{x}년 누적 %{y:.2f}%<extra>" + nm + "</extra>"))
-        f.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
-                        xaxis=dict(title="기간(년)"), yaxis=dict(title="누적 부도율(%)", type="log", ticksuffix="%"),
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-        st.plotly_chart(f, use_container_width=True)
-        st.caption("출처: S&P Global Ratings 2024 부도·등급 전이 연구 (전 세계 기업 1981–2024 평균)")
-
-    with tabs[2]:
-        if not MT.get("ok"):
-            st.info("시가총액·주가 변동성·부채 자료가 부족해 계산하지 못했습니다. 위 '머튼 모형 가정 바꾸기'에서 직접 넣어 보세요.")
-        else:
-            mgrid([("자기자본 시장가치 E", _big(E)), ("부도점 D", _big(D), f"단기 {_big(st_in)} + {lt_w:g} × 장기 {_big(lt_in)}"),
-                   ("자산가치 V (추정)", _big(MT["V"])), ("자산 변동성 σV", _pp(MT["sigV"], 1), f"주가 변동성 {sig_in * 100:.1f}%"),
-                   ("레버리지 D/V", _pp(MT["lev"], 1)), ("부도거리 DD", f"{MT['DD']:.2f}σ"),
-                   ("부도확률 (위험중립)", _pp(MT["PD"], 4)), ("부도확률 (실제 기대수익률)", _pp(MT["PD_p"], 4)),
-                   ("부채 시장가치", _big(MT["debt_val"]), "V − E"), ("내재 신용스프레드", _pp(MT["spread"], 3))], cols=5)
-            # 주가 변동성 민감도
-            sigs = np.linspace(max(0.05, sig_in * 0.4), sig_in * 2.5, 30)
-            pds, dds = [], []
-            for s_ in sigs:
-                m = merton(E, s_, D, r_in, T, mu)
-                pds.append(m["PD"] * 100 if m.get("ok") else np.nan)
-                dds.append(m["DD"] if m.get("ok") else np.nan)
-            f = go.Figure()
-            f.add_trace(go.Scatter(x=sigs * 100, y=pds, name="부도확률(%)", mode="lines", line=dict(color="#E5534B"),
-                                   hovertemplate="주가 변동성 %{x:.0f}% → 부도확률 %{y:.4f}%<extra></extra>"))
-            f.add_trace(go.Scatter(x=sigs * 100, y=dds, name="부도거리(σ)", mode="lines", yaxis="y2", line=dict(color="#4C9BE8"),
-                                   hovertemplate="주가 변동성 %{x:.0f}% → DD %{y:.2f}σ<extra></extra>"))
-            f.add_vline(x=sig_in * 100, line_dash="dot", line_color="#888", annotation_text="현재")
-            f.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
-                            xaxis=dict(title="주가 변동성(%)"), yaxis=dict(title="부도확률(%)"),
-                            yaxis2=dict(title="부도거리(σ)", overlaying="y", side="right", showgrid=False),
-                            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-            st.plotly_chart(f, use_container_width=True)
-
-    with tabs[3]:
-        if A.empty:
-            st.info("재무상태표 자료가 없습니다.")
-        else:
-            fac = None
-            if "_filed_희석주식수" in A.index:
-                from research import _split_factor
-                fac = _split_factor(A.loc["_filed_희석주식수"], R.get("splits")).reindex(A.columns).fillna(1.0)
-            zr = {}
-            for d in A.columns:
-                ta, tl, eq = A.loc["총자산", d], A.loc["총부채", d], A.loc["자기자본", d]
-                if not np.isfinite(tl) and np.isfinite(ta) and np.isfinite(eq):
-                    tl = ta - eq
-                mve = np.nan
-                if d == A.columns[-1] and E:
-                    mve = E
-                elif "희석주식수" in A.index and np.isfinite(A.loc["희석주식수", d]):
-                    mve = _price_at(hist, d) * A.loc["희석주식수", d] * (fac[d] if fac is not None else 1.0)
-                vals = [A.loc["유동자산", d] - A.loc["유동부채", d], A.loc["이익잉여금", d], A.loc["영업이익", d], mve,
-                        A.loc["매출", d], ta, tl, eq]
-                if all(np.isfinite(v) for v in vals) and ta > 0 and tl > 0:
-                    zr[d] = altman(*vals)
-            if not zr:
-                st.info("Altman Z를 계산할 항목(유동자산·유동부채·이익잉여금·영업이익·매출·총자산·총부채)이 부족합니다.")
-            else:
-                Zd = pd.DataFrame(zr).T
-                xs = [d.strftime("%Y-%m") for d in Zd.index]
+                mgrid([("자기자본 시장가치 E", _big(E)), ("부도점 D", _big(D), f"단기 {_big(st_in)} + {lt_w:g} × 장기 {_big(lt_in)}"),
+                       ("자산가치 V (추정)", _big(MT["V"])), ("자산 변동성 σV", _pp(MT["sigV"], 1), f"주가 변동성 {sig_in * 100:.1f}%"),
+                       ("레버리지 D/V", _pp(MT["lev"], 1)), ("부도거리 DD", f"{MT['DD']:.2f}σ"),
+                       ("부도확률 (위험중립)", _pp(MT["PD"], 4)), ("부도확률 (실제 기대수익률)", _pp(MT["PD_p"], 4)),
+                       ("부채 시장가치", _big(MT["debt_val"]), "V − E"), ("내재 신용스프레드", _pp(MT["spread"], 3))], cols=5)
+                # 주가 변동성 민감도
+                sigs = np.linspace(max(0.05, sig_in * 0.4), sig_in * 2.5, 30)
+                pds, dds = [], []
+                for s_ in sigs:
+                    m = merton(E, s_, D, r_in, T, mu)
+                    pds.append(m["PD"] * 100 if m.get("ok") else np.nan)
+                    dds.append(m["DD"] if m.get("ok") else np.nan)
                 f = go.Figure()
-                f.add_trace(go.Scatter(x=xs, y=Zd["Z"], name="Z (제조업)", mode="lines+markers", line=dict(color="#4C9BE8", width=2)))
-                f.add_trace(go.Scatter(x=xs, y=Zd["Z2"], name="Z'' (비제조업)", mode="lines+markers", line=dict(color="#9B6FD6", width=2, dash="dot")))
-                for y, c, t in ((2.99, "#1B9E4B", "Z 안전 2.99"), (1.81, "#E5534B", "Z 부실 1.81"), (2.60, "#1B9E4B", "Z'' 안전 2.60"),
-                                (1.10, "#E5534B", "Z'' 부실 1.10")):
-                    f.add_hline(y=y, line_dash="dash" if "Z''" not in t else "dot", line_color=c, line_width=1,
-                                annotation_text=t, annotation_font_size=9)
-                f.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
-                                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-                st.plotly_chart(f, use_container_width=True)
-                tbl = Zd[["X1", "X2", "X3", "X4", "X5", "X4b", "Z", "Z2"]].T
-                tbl.columns = xs
-                tbl.index = ["X1 운전자본/총자산", "X2 이익잉여금/총자산", "X3 영업이익/총자산", "X4 시가총액/총부채", "X5 매출/총자산",
-                             "X4'' 장부 자기자본/총부채", "Altman Z (제조업)", "Altman Z'' (비제조업)"]
-                st.dataframe(tbl.map(lambda v: f"{v:.3f}") if hasattr(tbl, "map") else tbl.applymap(lambda v: f"{v:.3f}"),
-                             use_container_width=True)
-
-    with tabs[4]:
-        if A.empty:
-            st.info("재무제표 자료가 없습니다.")
-        else:
-            debt = g("단기차입금").fillna(0) + g("장기차입금").fillna(0)
-            ebitda = g("영업이익") + g("감가상각비").fillna(0)
-            cash = g("현금성자산")
-            ratios = {"이자보상배율(배)": g("영업이익") / g("이자비용"), "EBITDA/이자비용(배)": ebitda / g("이자비용"),
-                      "총차입금/EBITDA(배)": (debt / ebitda).where(ebitda > 0), "순차입금/EBITDA(배)": ((debt - cash) / ebitda).where(ebitda > 0),
-                      "영업현금흐름/총차입금(%)": (g("영업현금흐름") / debt * 100).where(debt > 0),
-                      "부채비율(%)": g("총부채") / g("자기자본") * 100, "유동비율(%)": g("유동자산") / g("유동부채") * 100,
-                      "실효 이자율(%)": (g("이자비용") / debt * 100).where(debt > 0)}
-            Rt = pd.DataFrame(ratios).T
-            Rt = Rt.loc[:, Rt.notna().any()]
-            Rt.columns = [pd.Timestamp(c).strftime("%Y-%m") for c in Rt.columns]
-            pick = st.multiselect("그래프로 볼 지표", list(Rt.index), default=["이자보상배율(배)", "순차입금/EBITDA(배)"], key="cr_ratio_pick")
-            if pick:
-                f = go.Figure()
-                for nm in pick:
-                    f.add_trace(go.Scatter(x=list(Rt.columns), y=Rt.loc[nm], name=nm, mode="lines+markers",
-                                           yaxis="y2" if nm.endswith("(%)") else "y"))
+                f.add_trace(go.Scatter(x=sigs * 100, y=pds, name="부도확률(%)", mode="lines", line=dict(color="#E5534B"),
+                                       hovertemplate="주가 변동성 %{x:.0f}% → 부도확률 %{y:.4f}%<extra></extra>"))
+                f.add_trace(go.Scatter(x=sigs * 100, y=dds, name="부도거리(σ)", mode="lines", yaxis="y2", line=dict(color="#4C9BE8"),
+                                       hovertemplate="주가 변동성 %{x:.0f}% → DD %{y:.2f}σ<extra></extra>"))
+                f.add_vline(x=sig_in * 100, line_dash="dot", line_color="#888", annotation_text="현재")
                 f.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
-                                yaxis=dict(title="배"), yaxis2=dict(title="%", overlaying="y", side="right", showgrid=False),
+                                xaxis=dict(title="주가 변동성(%)"), yaxis=dict(title="부도확률(%)"),
+                                yaxis2=dict(title="부도거리(σ)", overlaying="y", side="right", showgrid=False),
                                 legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
                 st.plotly_chart(f, use_container_width=True)
-            st.dataframe(Rt.map(lambda v: f"{v:,.2f}" if np.isfinite(v) else "-") if hasattr(Rt, "map")
-                         else Rt.applymap(lambda v: f"{v:,.2f}" if np.isfinite(v) else "-"), use_container_width=True)
+
+    if tabs[3][1]:
+        with tabs[3][0]:
+            if A.empty:
+                st.info("재무상태표 자료가 없습니다.")
+            else:
+                fac = None
+                if "_filed_희석주식수" in A.index:
+                    from research import _split_factor
+                    fac = _split_factor(A.loc["_filed_희석주식수"], R.get("splits")).reindex(A.columns).fillna(1.0)
+                zr = {}
+                for d in A.columns:
+                    ta, tl, eq = A.loc["총자산", d], A.loc["총부채", d], A.loc["자기자본", d]
+                    if not np.isfinite(tl) and np.isfinite(ta) and np.isfinite(eq):
+                        tl = ta - eq
+                    mve = np.nan
+                    if d == A.columns[-1] and E:
+                        mve = E
+                    elif "희석주식수" in A.index and np.isfinite(A.loc["희석주식수", d]):
+                        mve = _price_at(hist, d) * A.loc["희석주식수", d] * (fac[d] if fac is not None else 1.0)
+                    vals = [A.loc["유동자산", d] - A.loc["유동부채", d], A.loc["이익잉여금", d], A.loc["영업이익", d], mve,
+                            A.loc["매출", d], ta, tl, eq]
+                    if all(np.isfinite(v) for v in vals) and ta > 0 and tl > 0:
+                        zr[d] = altman(*vals)
+                if not zr:
+                    st.info("Altman Z를 계산할 항목(유동자산·유동부채·이익잉여금·영업이익·매출·총자산·총부채)이 부족합니다.")
+                else:
+                    Zd = pd.DataFrame(zr).T
+                    xs = [d.strftime("%Y-%m") for d in Zd.index]
+                    f = go.Figure()
+                    f.add_trace(go.Scatter(x=xs, y=Zd["Z"], name="Z (제조업)", mode="lines+markers", line=dict(color="#4C9BE8", width=2)))
+                    f.add_trace(go.Scatter(x=xs, y=Zd["Z2"], name="Z'' (비제조업)", mode="lines+markers", line=dict(color="#9B6FD6", width=2, dash="dot")))
+                    for y, c, t in ((2.99, "#1B9E4B", "Z 안전 2.99"), (1.81, "#E5534B", "Z 부실 1.81"), (2.60, "#1B9E4B", "Z'' 안전 2.60"),
+                                    (1.10, "#E5534B", "Z'' 부실 1.10")):
+                        f.add_hline(y=y, line_dash="dash" if "Z''" not in t else "dot", line_color=c, line_width=1,
+                                    annotation_text=t, annotation_font_size=9)
+                    f.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
+                                    legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+                    st.plotly_chart(f, use_container_width=True)
+                    tbl = Zd[["X1", "X2", "X3", "X4", "X5", "X4b", "Z", "Z2"]].T
+                    tbl.columns = xs
+                    tbl.index = ["X1 운전자본/총자산", "X2 이익잉여금/총자산", "X3 영업이익/총자산", "X4 시가총액/총부채", "X5 매출/총자산",
+                                 "X4'' 장부 자기자본/총부채", "Altman Z (제조업)", "Altman Z'' (비제조업)"]
+                    st.dataframe(tbl.map(lambda v: f"{v:.3f}") if hasattr(tbl, "map") else tbl.applymap(lambda v: f"{v:.3f}"),
+                                 use_container_width=True)
+
+    if tabs[4][1]:
+        with tabs[4][0]:
+            if A.empty:
+                st.info("재무제표 자료가 없습니다.")
+            else:
+                debt = g("단기차입금").fillna(0) + g("장기차입금").fillna(0)
+                ebitda = g("영업이익") + g("감가상각비").fillna(0)
+                cash = g("현금성자산")
+                ratios = {"이자보상배율(배)": g("영업이익") / g("이자비용"), "EBITDA/이자비용(배)": ebitda / g("이자비용"),
+                          "총차입금/EBITDA(배)": (debt / ebitda).where(ebitda > 0), "순차입금/EBITDA(배)": ((debt - cash) / ebitda).where(ebitda > 0),
+                          "영업현금흐름/총차입금(%)": (g("영업현금흐름") / debt * 100).where(debt > 0),
+                          "부채비율(%)": g("총부채") / g("자기자본") * 100, "유동비율(%)": g("유동자산") / g("유동부채") * 100,
+                          "실효 이자율(%)": (g("이자비용") / debt * 100).where(debt > 0)}
+                Rt = pd.DataFrame(ratios).T
+                Rt = Rt.loc[:, Rt.notna().any()]
+                Rt.columns = [pd.Timestamp(c).strftime("%Y-%m") for c in Rt.columns]
+                pick = st.multiselect("그래프로 볼 지표", list(Rt.index), default=["이자보상배율(배)", "순차입금/EBITDA(배)"], key="cr_ratio_pick")
+                if pick:
+                    f = go.Figure()
+                    for nm in pick:
+                        f.add_trace(go.Scatter(x=list(Rt.columns), y=Rt.loc[nm], name=nm, mode="lines+markers",
+                                               yaxis="y2" if nm.endswith("(%)") else "y"))
+                    f.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
+                                    yaxis=dict(title="배"), yaxis2=dict(title="%", overlaying="y", side="right", showgrid=False),
+                                    legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+                    st.plotly_chart(f, use_container_width=True)
+                st.dataframe(Rt.map(lambda v: f"{v:,.2f}" if np.isfinite(v) else "-") if hasattr(Rt, "map")
+                             else Rt.applymap(lambda v: f"{v:,.2f}" if np.isfinite(v) else "-"), use_container_width=True)
 
 
 def _render_cds(ticker, srt, sp_mkt, MT, D, r1, r5, rec) -> None:
