@@ -52,11 +52,9 @@ def _safe(fn, default=None):
 @st.cache_data(ttl=60 * 60, show_spinner="기업 정보를 불러오는 중... (Yahoo 응답이 느리면 다시 시도합니다)")
 def load_research(ticker: str) -> dict:
     t = yf.Ticker(ticker)
-    info = _try(lambda: t.info) or {}
-    if not info or (not info.get("longName") and not info.get("shortName") and not info.get("quoteType")):
-        raise RuntimeError("기업 정보를 찾지 못했습니다 (티커를 확인해 주세요)")
-    out = {"info": info}
-    jobs = {  # 서로 독립적인 요청이라 동시에 보낸다 (차례로 보내면 10초 넘게 걸리기도 함)
+    out = {}
+    jobs = {  # 서로 독립적인 요청이라 기업 정보(info)까지 전부 동시에 보낸다 (차례로 보내면 10초 넘게 걸리기도 함)
+        "info": (lambda: _try(lambda: t.info) or {}, {}),
         "income": (lambda: t.income_stmt, pd.DataFrame()),
         "balance": (lambda: t.balance_sheet, pd.DataFrame()),
         "cashflow": (lambda: t.cashflow, pd.DataFrame()),
@@ -73,11 +71,47 @@ def load_research(ticker: str) -> dict:
     }
     from concurrent.futures import ThreadPoolExecutor
 
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
         futs = {k: ex.submit(_safe, fn, d) for k, (fn, d) in jobs.items()}
         for k, f in futs.items():
             out[k] = f.result()
+    info = out.get("info") or {}
+    if not info or (not info.get("longName") and not info.get("shortName") and not info.get("quoteType")):
+        raise RuntimeError("기업 정보를 찾지 못했습니다 (티커를 확인해 주세요)")
     return out
+
+
+_PREFETCH = None
+_PF_SEEN = {}
+
+
+def prefetch(ticker: str, domestic: bool = False, code: str | None = None) -> None:
+    """Yahoo 데이터를 받는 동안 연간 재무제표(SEC·DART)와 일별 밸류에이션용 분기 공시도 미리 받아 둔다.
+    (모두 캐시 함수라 나중에 화면에서 부르면 이미 받아 둔 값을 바로 쓰거나, 받는 중이면 그것을 기다린다.)"""
+    global _PREFETCH
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor
+
+    key = (ticker, domestic, code)
+    if _PF_SEEN.get(key, 0) > _time.time() - 600:
+        return
+    _PF_SEEN[key] = _time.time()
+    if _PREFETCH is None:
+        _PREFETCH = ThreadPoolExecutor(max_workers=4)
+    if domestic:
+        import kr
+
+        k = kr.dart_key()
+        if k and code:
+            _PREFETCH.submit(_safe, lambda: kr.load_dart_financials(code, k))
+    else:
+        _PREFETCH.submit(_safe, lambda: load_sec_financials(ticker))
+        try:
+            from valuation import load_quarterly
+
+            _PREFETCH.submit(_safe, lambda: load_quarterly(ticker))
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ----------------------------------------------------------------------
@@ -116,12 +150,23 @@ SEC_SHOW = ["매출", "매출총이익", "영업이익", "순이익", "희석 EP
 
 
 def _sec_json(url: str):
+    import gzip
     import json
     import urllib.request
 
-    req = urllib.request.Request(url, headers={"User-Agent": SEC_UA, "Accept": "application/json"})
+    # gzip으로 받으면 전송량이 1/5~1/10 (기업 공시 JSON은 수 MB)
+    req = urllib.request.Request(url, headers={"User-Agent": SEC_UA, "Accept": "application/json", "Accept-Encoding": "gzip"})
     with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        raw = resp.read()
+        if resp.headers.get("Content-Encoding", "").lower() == "gzip" or raw[:2] == b"\x1f\x8b":
+            raw = gzip.decompress(raw)
+    return json.loads(raw.decode("utf-8"))
+
+
+@st.cache_resource(ttl=6 * 60 * 60, show_spinner=False, max_entries=3)
+def sec_facts(cik: int) -> dict:
+    """SEC companyfacts 원본. 연간 재무제표와 일별 밸류에이션이 같은 파일을 쓰므로 한 번만 받는다 (읽기 전용)."""
+    return _try(lambda: _sec_json(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{int(cik):010d}.json"), tries=3)
 
 
 @st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
@@ -174,7 +219,7 @@ def load_sec_financials(ticker: str, years: int = 10) -> pd.DataFrame:
     cik = _sec_cik_map().get(ticker.upper()) or _sec_cik_map().get(ticker.upper().replace(".", "-"))
     if not cik:
         raise RuntimeError("SEC에 등록된 미국 공시 기업이 아닙니다")
-    facts = _try(lambda: _sec_json(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"), tries=3)
+    facts = sec_facts(cik)
     rows = {name: _sec_series(facts, tags, unit, dur) for name, tags, unit, dur in SEC_ITEMS}
     for name, tags, unit, dur in SEC_ITEMS:  # 주당 값·주식 수는 제출일을 같이 저장(액면분할 보정용)
         if name in ("희석 EPS", "희석주식수"):
@@ -280,15 +325,11 @@ except Exception:  # noqa: BLE001
 
 
 _PER_LABEL = {  # 목록에 보이는 이름 (안쪽 키는 그대로)
-    "PER (직전 사업연도 EPS)": "PER · 일별 (그날 주가 ÷ 그때 이미 발표된 직전 사업연도 EPS)",
-    "12M 트레일링 PER": "12M PER · 일별 (그날 주가 ÷ 그때까지 발표된 최근 4개 분기 EPS 합)",
-    "PER (시가총액 ÷ 순이익 TTM)": "PER · 일별 (그날 시가총액 ÷ 그때까지 발표된 1년치 순이익)",
-    "12M 선행 PER (사후 실현 EPS)": "선행 PER · 일별 (그날 주가 ÷ 그 뒤 1년 동안 실제로 나온 EPS)",
-    "트레일링 PER 평균 ±1σ 밴드": "PER 평균 ±1σ 밴드",
-    "현재 12M 선행 PER (컨센서스)": "오늘 선행 PER (애널리스트 예상 EPS 기준, 점 하나)",
-    "12M 선행 PER (컨센서스 추이)": "12M 선행 PER · 일별 (그날 주가 ÷ 그때 애널리스트가 예상한 향후 4개 분기 EPS 합)",
+    "PER (직전 사업연도 EPS)": "PER",
+    "12M 선행 PER (컨센서스 추이)": "12M PER",
+    "PER (시가총액 ÷ 순이익 TTM)": "PER",
 }
-_PER_TRACE = {"12M 선행 PER (컨센서스 추이)": "12M 선행 PER", "12M 트레일링 PER": "12M PER", "PER (시가총액 ÷ 순이익 TTM)": "PER", "12M 선행 PER (사후 실현 EPS)": "선행 PER(사후)"}
+_PER_TRACE = {"12M 선행 PER (컨센서스 추이)": "12M PER", "PER (시가총액 ÷ 순이익 TTM)": "PER"}
 
 
 @st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner="한국어로 번역하는 중...")
