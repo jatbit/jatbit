@@ -124,7 +124,7 @@ def check_annual_eps(sec, splits) -> list:
     return out
 
 
-def check_quarterly(edates) -> list:
+def check_quarterly(edates, since=None) -> list:
     """분기 실적: 발표 간격이 너무 벌어지면(분기 누락) 12M EPS가 4개 분기가 아닐 수 있다."""
     if not isinstance(edates, pd.DataFrame) or edates.empty or "Reported EPS" not in edates:
         return []
@@ -134,10 +134,14 @@ def check_quarterly(edates) -> list:
         return []
     out = []
     gaps = pd.Series(e.index[1:] - e.index[:-1], index=e.index[1:]).dt.days
-    for t, g in gaps[gaps > 135].items():
-        out.append(dict(level="warn", title=f"{_d(t)} 앞 분기 실적이 {g}일 비어 있음",
-                        detail="분기 실적 하나가 빠진 것으로 보입니다. 이 뒤 1년 동안의 12M EPS는 다른 시기의 네 분기를 더한 값이라 12M PER이 어긋날 수 있습니다.",
-                        fix=""))
+    if since is not None:  # 그래프에 그리는 기간만 본다
+        gaps = gaps[gaps.index >= pd.Timestamp(since)]
+    miss = gaps[gaps > 135]
+    if len(miss):
+        ds = ", ".join(f"{_d(t)}({g}일)" for t, g in list(miss.items())[:4]) + (" 외" if len(miss) > 4 else "")
+        out.append(dict(level="warn", title=f"분기 실적 누락 {len(miss)}곳",
+                        detail=f"발표 간격이 4.5개월을 넘는 곳: {ds}. 그 뒤 1년은 최근 4개 분기가 아닌 값을 더하게 됩니다.",
+                        fix="4개 분기가 400일 넘게 흩어진 구간의 12M PER은 비웠습니다."))
     for t, g in gaps[gaps < 45].items():
         out.append(dict(level="warn", title=f"{_d(t)} 분기 실적 발표가 {g}일 만에 또 있음",
                         detail="같은 분기가 두 번 들어갔거나(정정 발표) 날짜가 잘못됐을 수 있습니다. 12M EPS에 같은 분기가 두 번 더해질 수 있습니다.",
@@ -155,6 +159,9 @@ def check_quarterly(edates) -> list:
 
 def check_eps_consistency(sec, splits, edates) -> list:
     """연간 EPS ≈ 그 해 4개 분기 EPS 합 인지 대조. 비율이 분할 비율과 같으면 분할 보정 오류."""
+    known = set()
+    if splits is not None and len(splits):  # 실제로 있었던 분할 비율만 '분할 오류'로 본다 (2배 차이는 GAAP·조정 EPS 차이로도 흔함)
+        known = {int(round(f if f >= 1 else 1 / f)) for f in np.asarray(splits, dtype=float) if np.isfinite(f) and f > 0}
     tb = annual_eps_table(sec, splits)
     if tb is None or not isinstance(edates, pd.DataFrame) or edates.empty or "Reported EPS" not in edates:
         return []
@@ -171,7 +178,7 @@ def check_eps_consistency(sec, splits, edates) -> list:
             continue
         r = float(row["EPS"]) / float(after.iloc[0])
         k = _near_split_ratio(r, tol=0.15)  # 분기 합은 조정 EPS라 조금 다를 수 있어 여유를 둔다
-        if k and k > 1:
+        if k and k > 1 and k in known:
             out.append(dict(level="error", title=f"{_d(fy)} 연간 EPS와 4개 분기 합이 {k}배 차이",
                             detail=f"연간 {row['EPS']:.3f} vs 분기 합 {after.iloc[0]:.3f}. 차이가 {k}:1 분할 비율과 같아 한쪽이 분할 보정이 안 된 것으로 보입니다.",
                             fix="직전 사업연도 PER과 12M PER 중 한쪽이 그만큼 틀립니다."))
@@ -260,7 +267,7 @@ def check_outliers(series: dict) -> list:
 
 def run_checks(hist, sec, splits, edates, ann=None, trail=None, ann_dates=None, trail_dates=None) -> list:
     issues = []
-    for fn in (lambda: check_prices(hist, splits), lambda: check_annual_eps(sec, splits), lambda: check_quarterly(edates),
+    for fn in (lambda: check_prices(hist, splits), lambda: check_annual_eps(sec, splits), lambda: check_quarterly(edates, since=_naive(hist).index[0] if hist is not None and len(hist) else None),
                lambda: check_eps_consistency(sec, splits, edates), lambda: check_per_gap(ann, trail, hist, ann_dates, trail_dates),
                lambda: check_outliers({"직전 사업연도 PER": ann, "12M PER": trail})):
         try:
