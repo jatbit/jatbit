@@ -279,12 +279,13 @@ def run_checks(hist, sec, splits, edates, ann=None, trail=None, ann_dates=None, 
 
 
 def render_checks(issues: list, key: str = "") -> None:
+    issues = [i for i in issues if i.get("level") in ("error", "warn")]  # 해석용 참고(PER 괴리 등)는 표시하지 않음
     n_err = sum(i["level"] == "error" for i in issues)
     n_warn = sum(i["level"] == "warn" for i in issues)
     if not issues:
         st.caption("✅ 데이터 점검: 공시일·액면분할·분기 누락·극단값에서 이상을 찾지 못했습니다.")
         return
-    head = f"데이터 점검 — 오류 {n_err} · 주의 {n_warn} · 참고 {len(issues) - n_err - n_warn}"
+    head = f"데이터 점검 — 오류 {n_err} · 주의 {n_warn}"
     with st.expander(head, expanded=bool(n_err)):
         for i in issues:
             body = f"{LEVEL_ICON.get(i['level'], '')} **{i['title']}**  \n{i['detail']}"
