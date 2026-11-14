@@ -44,7 +44,7 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
             elif sec is not None:  # 국내·SEC 미등록 종목: 연간 재무제표를 공시 시점부터 반영 (다음 연간 공시까지 유지)
                 from kr import annual_quarterly_dict
                 info = R.get("info") or {}
-                dv = daily_valuation(annual_quarterly_dict(sec, _num(info.get("sharesOutstanding"))), hist, R.get("splits"), stale=470)
+                dv = daily_valuation(annual_quarterly_dict(sec, _num(info.get("sharesOutstanding")), R.get("splits")), hist, R.get("splits"), stale=470)
             else:
                 raise RuntimeError("재무제표 없음")
             d_avail += [k for k in _VAL if k in dv and dv[k].notna().sum() > 20]
