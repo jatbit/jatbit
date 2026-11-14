@@ -1,0 +1,10 @@
+# 화면 테마: 검정 바탕 + 금색 강조. 상승 빨강·하락 파랑은 그대로 (금색과 겹치지 않음).
+[theme]
+base = "dark"
+primaryColor = "#C9A44C"
+backgroundColor = "#0C0C0D"
+secondaryBackgroundColor = "#1A1918"
+textColor = "#ECE6D8"
+linkColor = "#D9B85E"
+borderColor = "#2E2A22"
+baseRadius = "6px"
