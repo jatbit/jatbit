@@ -384,8 +384,11 @@ def _div_yield(info: dict):
 # ----------------------------------------------------------------------
 # 화면
 # ----------------------------------------------------------------------
-def _annual_eps_points(sec, splits):
-    """연간 재무제표의 희석 EPS를 '공시된 날' 기준으로 늘어놓는다 (액면분할 반영). (공시일 → EPS)."""
+STALE_EPS_DAYS = 490  # 회계연도 말에서 이만큼 지난 EPS로는 PER을 내지 않는다 (다음 연간 공시가 늦어도 보통 15개월 안)
+
+
+def annual_eps_table(sec, splits):
+    """연간 희석 EPS 표: 공시일(그 숫자를 처음 알 수 있게 된 날) 순서, 열 = EPS(액면분할 반영)·회계연도 말·분할계수."""
     if not isinstance(sec, pd.DataFrame) or "희석 EPS" not in sec.index:
         return None
     eps = pd.to_numeric(sec.loc["희석 EPS"], errors="coerce")
@@ -399,16 +402,25 @@ def _annual_eps_points(sec, splits):
     avail = filed
     if "_avail_희석 EPS" in sec.index:  # 처음 공시된 날부터 그 EPS를 쓴다 (나중에 다시 실린 날이 아니라)
         avail = pd.to_numeric(sec.loc["_avail_희석 EPS"], errors="coerce").fillna(filed)
-    pts = pd.Series(eps.values, index=[pd.Timestamp.fromordinal(int(f)) for f in avail.values]).dropna()
-    pts = pts[~pts.index.duplicated(keep="last")].sort_index()
-    return pts if len(pts) else None
+    tb = pd.DataFrame({"EPS": eps.values, "회계연도말": pd.to_datetime(list(sec.columns)), "분할계수": fac.values},
+                      index=[pd.Timestamp.fromordinal(int(f)) for f in avail.values]).dropna(subset=["EPS"])
+    tb = tb[~tb.index.duplicated(keep="last")].sort_index()
+    return tb if len(tb) else None
 
 
-def annual_per_series(hist, sec, splits):
-    """일별 PER = 그날 주가 ÷ 그날까지 공시된 가장 최근 사업연도 EPS (적자면 비움)."""
-    pts = _annual_eps_points(sec, splits)
-    if pts is None or not isinstance(hist, pd.Series) or not len(hist):
+def _annual_eps_points(sec, splits):
+    """연간 재무제표의 희석 EPS를 '공시된 날' 기준으로 늘어놓는다 (액면분할 반영). (공시일 → EPS)."""
+    tb = annual_eps_table(sec, splits)
+    return None if tb is None else tb["EPS"]
+
+
+def annual_per_series(hist, sec, splits, max_age: int = STALE_EPS_DAYS):
+    """일별 PER = 그날 주가 ÷ 그날까지 공시된 가장 최근 사업연도 EPS (적자면 비움).
+    그날 쓰는 EPS의 회계연도 말이 max_age일보다 오래됐으면(공시일 오류·자료 누락) 틀린 값 대신 비운다."""
+    tb = annual_eps_table(sec, splits)
+    if tb is None or not isinstance(hist, pd.Series) or not len(hist):
         return None
+    pts = tb["EPS"]
     h = hist.copy()
     h.index = pd.to_datetime(h.index)
     if h.index.tz is not None:
@@ -418,19 +430,24 @@ def annual_per_series(hist, sec, splits):
         return None
     pos = np.searchsorted(pts.index.values, h.index.values, side="right") - 1
     e = np.where(pos >= 0, pts.values[np.clip(pos, 0, None)], np.nan)
+    fy = tb["회계연도말"].values[np.clip(pos, 0, None)]
+    stale = (h.index.values - fy) > np.timedelta64(int(max_age), "D")
+    e = np.where(stale, np.nan, e)
     out = pd.Series(np.where(e > 0, h.values / e, np.nan), index=h.index)
     return out if out.notna().sum() > 5 else None
 
 
 def annual_pe_now(px, sec, splits):
     """오늘 PER (오늘 주가 ÷ 이미 공시된 직전 사업연도 EPS)."""
-    pts = _annual_eps_points(sec, splits)
-    if pts is None or not px:
+    tb = annual_eps_table(sec, splits)
+    if tb is None or not px:
         return None
-    pts = pts[pts.index <= pd.Timestamp.today()]
-    if not len(pts) or not pts.iloc[-1] > 0:
+    tb = tb[tb.index <= pd.Timestamp.today()]
+    if not len(tb) or not tb["EPS"].iloc[-1] > 0:
         return None
-    return px / float(pts.iloc[-1])
+    if (pd.Timestamp.today() - tb["회계연도말"].iloc[-1]).days > STALE_EPS_DAYS:  # 너무 오래된 EPS → 12M PER로 대신
+        return None
+    return px / float(tb["EPS"].iloc[-1])
 
 
 def per_series(hist: pd.Series, edates: pd.DataFrame):
