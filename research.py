@@ -77,6 +77,10 @@ def render_research() -> None:
             st.warning("미국 티커 또는 국내 종목명·6자리 코드를 입력해 주세요.")
             return
     try:
+        prefetch(ticker, domestic, code)  # 재무제표·분기 공시를 Yahoo 데이터와 동시에 받기 시작
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         R = load_research(ticker)
     except Exception as e:  # noqa: BLE001
         if domestic and ticker.endswith(".KS"):  # 코스피·코스닥 구분이 틀린 경우 다른 쪽으로 다시 시도
@@ -192,8 +196,8 @@ def _key_stats(R: dict, info: dict, cur: str, px) -> None:
     rng = (f"{lo52:,.0f} ~ {hi52:,.0f}" if cur == "₩" else f"{lo52:,.2f} ~ {hi52:,.2f}") if lo52 and hi52 else "-"
     pe, pb = _pe_pb(info, px, R.get("_F"), R)
     pe_a = annual_pe_now(px, R.get("_F"), R.get("splits"))
-    sub = " · ".join(x for x in ([f"12M {ratio(pe, 1)}"] if pe_a and pe else []) +
-                     ([f"선행 {ratio(info.get('forwardPE'), 1)}"] if _num(info.get("forwardPE")) else []))
+    n_eps, _ = ntm_eps(info, R.get("eps_est"))
+    sub = f"12M {ratio(px / n_eps, 1)}" if px and n_eps and n_eps > 0 else ""
     ui.cards([
         ("시가총액", big(info.get("marketCap"), cur)),
         ("PER", ratio(pe_a or pe, 1), sub),
@@ -216,21 +220,13 @@ def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool, F=None, s
     st.markdown("##### 주가 · 밸류에이션")
     pe_now, pb_now = _pe_pb(info, px, F, R)
     n_eps, n_info = ntm_eps(info, R.get("eps_est"))
-    fwd_eps = _num(info.get("forwardEps"))
-    fwd_note = "Yahoo 'Forward P/E' = 현재가 ÷ forwardEps"
-    if n_info:
-        e0, e1, w, fy_end = n_info
-        which = min(((abs((fwd_eps or 0) - e0), "이번 회계연도"), (abs((fwd_eps or 0) - e1), "다음 회계연도")))[1] if fwd_eps else "?"
-        fwd_note += f" ({fwd_eps:.2f}, {which} 추정치 기준)" if fwd_eps else ""
     mgrid([("현재가", money.price(px) if px else "-"),
            ("시가총액", big(info.get("marketCap"), cur)),
            ("기업가치(EV)", big(info.get("enterpriseValue"), cur)),
            ("52주 범위", (f"{lo52:,.0f} ~ {hi52:,.0f}" if cur == "₩" else f"{lo52:,.2f} ~ {hi52:,.2f}") if lo52 and hi52 else "-",
             f"현재가는 52주 범위의 {pos52 * 100:.0f}% 위치" if pos52 is not None else ""),
-           ("PER", ratio(annual_pe_now(px, F, R.get("splits")) or pe_now, 1), "직전 사업연도 EPS 기준"),
-           ("12M PER", ratio(pe_now, 1), "최근 4개 분기 EPS 합 기준"),
-           ("선행 PER (Yahoo)", ratio(info.get("forwardPE"), 1), f"{which} 추정치 기준" if n_info and fwd_eps else ""),
-           ("12M 선행 PER (NTM)", ratio(px / n_eps, 1) if px and n_eps and n_eps > 0 else "-"),
+           ("PER", ratio(annual_pe_now(px, F, R.get("splits")) or pe_now, 1)),
+           ("12M PER", ratio(px / n_eps, 1) if px and n_eps and n_eps > 0 else "-"),
            ("PBR", ratio(pb_now)),
            ("EV/EBITDA", ratio(info.get("enterpriseToEbitda"), 1)),
            ("PEG", ratio(info.get("trailingPegRatio") or info.get("pegRatio"))),
