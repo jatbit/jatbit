@@ -259,15 +259,15 @@ def _amt(x):
         return np.nan
 
 
-def parse_dart_year(lst: list) -> dict:
-    """fnlttSinglAcntAll 한 해 응답 → {행 이름: 값}."""
+def parse_dart_year(lst: list, col: str = "thstrm_amount") -> dict:
+    """fnlttSinglAcntAll 한 해 응답 → {행 이름: 값}. col="frmtrm_amount"면 같은 보고서에 다시 실린 전기(직전 연도) 값."""
     out = {}
     for nm, sjs, ids, names, absval in D_MAP:
         val = np.nan
         for want in ids:
             for e in lst:
                 if e.get("sj_div") in sjs and e.get("account_id") == want:
-                    val = _amt(e.get("thstrm_amount"))
+                    val = _amt(e.get(col))
                     if np.isfinite(val):
                         break
             if np.isfinite(val):
@@ -275,7 +275,7 @@ def parse_dart_year(lst: list) -> dict:
         if not np.isfinite(val):
             for e in lst:
                 if e.get("sj_div") in sjs and str(e.get("account_nm", "")).replace(" ", "") in [n.replace(" ", "") for n in names]:
-                    val = _amt(e.get("thstrm_amount"))
+                    val = _amt(e.get(col))
                     if np.isfinite(val):
                         break
         if np.isfinite(val):
@@ -284,12 +284,12 @@ def parse_dart_year(lst: list) -> dict:
         for e in lst:
             if e.get("sj_div") in ("IS", "CIS") and (e.get("account_id") == "ifrs-full_FinanceCosts" or
                                                      str(e.get("account_nm", "")).replace(" ", "") in ("금융비용", "금융원가")):
-                v = _amt(e.get("thstrm_amount"))
+                v = _amt(e.get(col))
                 if np.isfinite(v):
                     out["이자비용"] = abs(v)
                     break
     for nm, ids in (("단기차입금", DEBT_ST), ("장기차입금", DEBT_LT)):
-        vals = [_amt(e.get("thstrm_amount")) for e in lst if e.get("sj_div") == "BS" and e.get("account_id") in ids]
+        vals = [_amt(e.get(col)) for e in lst if e.get("sj_div") == "BS" and e.get("account_id") in ids]
         vals = [v for v in vals if np.isfinite(v)]
         if vals:
             out[nm] = float(np.sum(vals))
@@ -312,7 +312,9 @@ def load_dart_financials(code: str, key: str, years: int = 10) -> pd.DataFrame:
                 try:
                     j = _dart_json("fnlttSinglAcntAll", {"corp_code": corp, "bsns_year": str(y), "reprt_code": "11011", "fs_div": fs}, key)
                     if j.get("status") == "000" and j.get("list"):
-                        return y, parse_dart_year(j["list"])
+                        d = parse_dart_year(j["list"])
+                        d["_prev"] = parse_dart_year(j["list"], "frmtrm_amount")  # 다음 해 보고서에 다시 실린(수정된) 전년도 값
+                        return y, d
                     if j.get("status") in ("010", "011", "012", "020", "901"):  # 키 오류·사용 한도
                         raise RuntimeError(j.get("message"))
                     break
@@ -324,7 +326,8 @@ def load_dart_financials(code: str, key: str, years: int = 10) -> pd.DataFrame:
 
     with ThreadPoolExecutor(max_workers=5) as ex:
         res = list(ex.map(one, yrs))
-    cols, data, filed = [], {}, {}
+    cols, data, filed, avail = [], {}, {}, {}
+    by_year = {y: d for y, d in res if d}
     for y, d in res:
         if not d:
             continue
@@ -332,7 +335,24 @@ def load_dart_financials(code: str, key: str, years: int = 10) -> pd.DataFrame:
         cols.append(end)
         data[end] = d
         rc = d.get("_rcept")
-        filed[end] = float(pd.Timestamp(rc[:8]).toordinal()) if rc and len(rc) >= 8 else float((end + pd.Timedelta(days=90)).toordinal())
+        rdate = pd.Timestamp(rc[:8]) if rc and len(rc) >= 8 else end + pd.Timedelta(days=90)
+        filed[end] = float(rdate.toordinal())
+        # 정정 사업보고서면 접수일이 늦어지므로, '처음 알 수 있던 날'은 제출 기한(회계연도 말 + 90일) 안으로 본다
+        avail[end] = float(min(rdate, end + pd.Timedelta(days=100)).toordinal())
+        # 다음 해 보고서에 전기 값이 다시 실려 있으면(소급 수정·액면분할 반영) 그 값을 쓴다. 값의 기준일은 다음 해 보고서 접수일.
+        nxt = by_year.get(y + 1)
+        if nxt and isinstance(nxt.get("_prev"), dict):
+            changed = False
+            for k, v in nxt["_prev"].items():
+                if k.startswith("_") or v is None or not np.isfinite(v):
+                    continue
+                if k not in d or not np.isfinite(d[k]) or abs(v - d[k]) > 1e-9 * max(1.0, abs(v)):
+                    changed = True
+                d[k] = v
+            rc2 = nxt.get("_rcept")
+            if rc2 and len(rc2) >= 8 and "희석 EPS" in nxt["_prev"]:
+                filed[end] = float(pd.Timestamp(rc2[:8]).toordinal())
+            d["_restated"] = changed
     if not cols:
         raise RuntimeError("DART 사업보고서 재무제표가 없습니다")
     rows = [r[0] for r in D_MAP] + ["단기차입금", "장기차입금"]
@@ -350,14 +370,17 @@ def load_dart_financials(code: str, key: str, years: int = 10) -> pd.DataFrame:
     fl = pd.Series(filed).reindex(df.columns)
     df.loc["_filed_희석 EPS"] = fl
     df.loc["_filed_희석주식수"] = fl
+    df.loc["_avail_희석 EPS"] = pd.Series(avail).reindex(df.columns)
     return df.dropna(how="all")
 
 
-def annual_quarterly_dict(F: pd.DataFrame, shares_now: float | None = None) -> dict:
-    """연간 재무제표 → valuation.daily_valuation에 넣을 형식(항목별 값·공시일). 연간 값을 그대로 최근 12개월 값으로 쓴다."""
+def annual_quarterly_dict(F: pd.DataFrame, shares_now: float | None = None, splits=None) -> dict:
+    """연간 재무제표 → valuation.daily_valuation에 넣을 형식(항목별 값·공시일). 연간 값을 그대로 최근 12개월 값으로 쓴다.
+    값은 나중에 수정된 값을 쓰되, 반영 시점은 그 해 숫자가 처음 공시된 날(_avail_)로 잡는다."""
     out = {}
-    filed = F.loc["_filed_희석 EPS"] if "_filed_희석 EPS" in F.index else pd.Series(
+    basis = F.loc["_filed_희석 EPS"] if "_filed_희석 EPS" in F.index else pd.Series(
         [float((c + pd.Timedelta(days=90)).toordinal()) for c in F.columns], index=F.columns)
+    filed = pd.to_numeric(F.loc["_avail_희석 EPS"], errors="coerce").fillna(basis) if "_avail_희석 EPS" in F.index else basis
 
     def mk(nm):
         if nm not in F.index:
@@ -375,6 +398,13 @@ def annual_quarterly_dict(F: pd.DataFrame, shares_now: float | None = None) -> d
         out["설비투자"] = pd.DataFrame(columns=["val", "filed"])
     out["단기투자"] = pd.DataFrame(columns=["val", "filed"])
     sh = mk("희석주식수")
+    if len(sh) and splits is not None and len(splits):
+        # 주식 수는 값의 기준일(수정된 보고서 접수일) 기준이다. daily_valuation은 반영일(처음 공시일) 뒤 분할만 곱하므로
+        # 두 날 사이에 있었던 분할만큼 미리 나눠 둔다 (예: 분할 전 해의 주식 수가 다음 해 보고서에 분할 반영값으로 다시 실린 경우).
+        from research_data import _split_factor
+        fb = _split_factor(basis.reindex(sh.index), splits).reindex(sh.index).fillna(1.0)
+        fa = _split_factor(filed.reindex(sh.index), splits).reindex(sh.index).fillna(1.0)
+        sh["val"] = sh["val"].values * (fb / fa).values
     if shares_now and np.isfinite(shares_now):
         today = pd.Timestamp.now().normalize()
         sh = pd.concat([sh, pd.DataFrame({"val": [float(shares_now)], "filed": [today - pd.Timedelta(days=1)]}, index=[today - pd.Timedelta(days=1)])])
