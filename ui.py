@@ -266,3 +266,10 @@ def popover(label: str, icon: str | None = None, help: str | None = None):
             except TypeError:
                 continue
     return st.expander(label)
+
+
+try:  # 날짜 축 차트를 트레이딩뷰처럼 (끌어서 이동·휠 확대·세로축 자동 맞춤·스크롤바)
+    import tvchart as _tvchart
+    _tvchart.install()
+except Exception:  # noqa: BLE001
+    pass
