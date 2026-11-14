@@ -33,6 +33,13 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
     ann = annual_per_series(hist, sec, R.get("splits"))
     if ann is not None:
         d_avail.insert(1 if d_avail[:1] == ["주가"] else 0, "PER (직전 사업연도 EPS)")
+    fc = None
+    try:
+        fc = fwd_consensus_series(hist, R.get("edates"), R.get("eps_trend"), R.get("info") or {}, n_eps)
+    except Exception:  # noqa: BLE001
+        fc = None
+    if fc is not None:
+        d_avail.insert(min(len(d_avail), (1 if "주가" in d_avail else 0) + (1 if ann is not None else 0)), "12M 선행 PER (컨센서스 추이)")
     if px and n_eps and n_eps > 0:
         d_avail.append("현재 12M 선행 PER (컨센서스)")
     dv, dv_err = None, None
@@ -71,7 +78,8 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
 
     chosen = st.multiselect("그래프에 그릴 항목 (주가·밸류에이션은 일별, 나머지 재무비율은 연간)", options,
                             default=(["주가"] if "주가" in options else [])
-                            + [k for k in ("PER (직전 사업연도 EPS)", "12M 트레일링 PER", "PER (시가총액 ÷ 순이익 TTM)") if k in options][:1],
+                            + [k for k in ("PER (직전 사업연도 EPS)", "12M 트레일링 PER", "PER (시가총액 ÷ 순이익 TTM)") if k in options][:1]
+                            + [k for k in ("12M 선행 PER (컨센서스 추이)",) if k in options],
                             key=f"rs_combo_{ticker}",
                             format_func=_label)
     sel = [k for k in chosen if k in a_avail]
@@ -162,6 +170,12 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
             fig.add_trace(go.Scatter(x=sr.index, y=sr.values, name="PER", mode="lines", yaxis=ax, line=dict(color=color, width=1.4),
                                      hovertemplate="%{x|%Y-%m-%d} PER %{y:.1f}배<extra></extra>"))
             x_vals.append(sr.values)
+        elif k == "12M 선행 PER (컨센서스 추이)":
+            sr = _clip(fc[0]).dropna()
+            fig.add_trace(go.Scatter(x=sr.index, y=sr.values, name="12M 선행 PER", mode="lines", yaxis=ax,
+                                     line=dict(color=color, width=1.4),
+                                     hovertemplate="%{x|%Y-%m-%d} 12M 선행 PER %{y:.1f}배<extra></extra>"))
+            x_vals.append(sr.values)
         elif k == "현재 12M 선행 PER (컨센서스)":
             now = pd.Timestamp(hist.index[-1]).tz_localize(None) if getattr(hist.index, "tz", None) is not None else pd.Timestamp(hist.index[-1])
             fig.add_trace(go.Scatter(x=[now], y=[px / n_eps], name=f"오늘 선행 PER {px / n_eps:.1f}배", mode="markers", yaxis=ax,
@@ -193,6 +207,11 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
     st.plotly_chart(fig, use_container_width=True)
     axes_txt = ", ".join(f"{title_of[u]} → {'왼쪽' if i == 0 else ('오른쪽' if i == 1 else '오른쪽 바깥')} 축" for i, u in enumerate(order))
     st.caption(f"축: {axes_txt}")
+    if fc is not None and "12M 선행 PER (컨센서스 추이)" in dsel:
+        ex = fc[1]
+        st.caption("12M 선행 PER: 그날 주가 ÷ 앞으로 4개 분기 예상 EPS(애널리스트 컨센서스, 일회성 항목을 뺀 조정 EPS) 합. "
+                   + (f"{ex:%Y-%m-%d} 이후는 실제 컨센서스 추이(현재·7·30·60·90일 전)이고, 그 이전은 " if ex is not None else "")
+                   + "각 분기 실적 발표 직전 컨센서스를 4개 분기씩 더한 근사치입니다 (먼 분기의 그때 예상치는 무료 데이터에 없음).")
     try:  # 통계적 이상(공시일·분할·분기 누락·극단값) 점검
         import data_check
         tb = annual_eps_table(sec, R.get("splits"))
