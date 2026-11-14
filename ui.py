@@ -12,7 +12,7 @@ from datetime import date
 
 import streamlit as st
 
-UP, DOWN, FLAT = "#EF5350", "#4D8DF7", "#8C877C"  # 국내 관행: 상승 빨강, 하락 파랑
+UP, DOWN, FLAT = "#E5484D", "#3B82F6", "#8C877C"  # 국내 관행: 상승 빨강, 하락 파랑
 
 
 def _has_param(fn, name: str) -> bool:
@@ -32,7 +32,7 @@ THEME_CSS = """
 @import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css");
 @import url("https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@600;700;900&display=swap");
 :root { --paper:#0C0C0D; --card:#141413; --ink:#ECE6D8; --ink2:#9A9488; --rule:#2E2A22; --accent:#C9A44C; --gold:#D9B85E;
-        --up:#EF5350; --down:#4D8DF7; --serif:"Noto Serif KR", "Nanum Myeongjo", serif;
+        --up:#E5484D; --down:#3B82F6; --serif:"Noto Serif KR", "Nanum Myeongjo", serif;
         --sans:"Pretendard Variable", Pretendard, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; }
 html, body, .stApp, .stMarkdown, label, input, textarea, button,
 [data-baseweb="select"], [data-testid="stCaptionContainer"] { font-family: var(--sans); font-size: 0.88rem; }
