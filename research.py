@@ -1,5 +1,6 @@
 """기업 리서치 탭 (해외 종목): Yahoo Finance(yfinance)에서 기업 개요·밸류에이션·수익성·재무제표·애널리스트 의견·일정·뉴스를 모아 보여준다."""
 # 파일 구성: research_data.py(데이터·계산) · research_chart.py(겹쳐 그리기 그래프) · 이 파일(화면)
+# PER은 두 가지만: PER(직전 사업연도 EPS 기준) · 12M PER(향후 12개월 예상 EPS 기준)
 import html
 import re
 import time
