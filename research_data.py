@@ -469,6 +469,10 @@ def per_series(hist: pd.Series, edates: pd.DataFrame):
     h = h[h.index >= e.index[3]]
     ttm = e.rolling(4).sum()                       # 발표일 기준 최근 4분기 합
     fwd = e[::-1].rolling(4).sum()[::-1].shift(-1)  # 다음 발표부터 4분기 합
+    # 분기 실적이 빠져 '4개 분기'가 1년 넘게 흩어져 있으면 12M EPS가 아니므로 비운다 (보통 첫·넷째 발표 간격 ≈ 270일)
+    span = pd.Series(e.index, index=e.index).diff(3).dt.days
+    ttm[span > 400] = np.nan
+    fwd[span.shift(-4) > 400] = np.nan
     pos = np.searchsorted(e.index.values, h.index.values, side="right") - 1
     t_eps = np.where(pos >= 0, ttm.values[np.clip(pos, 0, None)], np.nan)
     f_eps = np.where(pos >= 0, fwd.values[np.clip(pos, 0, None)], np.nan)
