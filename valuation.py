@@ -129,12 +129,12 @@ def instant(facts: dict, tags: list, ns: str = "us-gaap", unit: str = "USD", sum
 
 @st.cache_data(ttl=24 * 60 * 60, show_spinner="SEC 분기 공시로 일별 밸류에이션을 계산하는 중...")
 def load_quarterly(ticker: str) -> dict:
-    from research import _sec_cik_map, _sec_json, _try
+    from research_data import _sec_cik_map, sec_facts
 
     cik = _sec_cik_map().get(ticker.upper()) or _sec_cik_map().get(ticker.upper().replace(".", "-"))
     if not cik:
         raise RuntimeError("SEC 등록 기업이 아닙니다")
-    facts = _try(lambda: _sec_json(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"), tries=3)
+    facts = sec_facts(cik)
     out = {}
     for k, tags in DUR.items():
         out[k] = ttm(quarterly_flow(facts, tags))
