@@ -12,10 +12,10 @@ import autoreload  # GitHub에 올린 새 코드를 새로고침만으로 반영
 
 autoreload.refresh()
 
-st.set_page_config(page_title="주가 차트", page_icon="📈", layout="wide")if getattr(autoreload, "ERRORS", None):
+st.set_page_config(page_title="주가 차트", page_icon="📈", layout="wide")
+if getattr(autoreload, "ERRORS", None):
     st.warning("새로 올린 코드 일부를 적용하지 못해 이전 코드로 실행 중입니다 — "
                + " · ".join(f"{k}.py: {v}" for k, v in autoreload.ERRORS.items()))
-
 
 import ui  # 화면 공통 요소 (ui.py)
 
