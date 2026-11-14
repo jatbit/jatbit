@@ -159,9 +159,7 @@ def check_quarterly(edates, since=None) -> list:
 
 def check_eps_consistency(sec, splits, edates) -> list:
     """연간 EPS ≈ 그 해 4개 분기 EPS 합 인지 대조. 비율이 분할 비율과 같으면 분할 보정 오류."""
-    known = set()
-    if splits is not None and len(splits):  # 실제로 있었던 분할 비율만 '분할 오류'로 본다 (2배 차이는 GAAP·조정 EPS 차이로도 흔함)
-        known = {int(round(f if f >= 1 else 1 / f)) for f in np.asarray(splits, dtype=float) if np.isfinite(f) and f > 0}
+    sp = _naive(splits) if splits is not None and len(splits) else pd.Series(dtype=float)
     tb = annual_eps_table(sec, splits)
     if tb is None or not isinstance(edates, pd.DataFrame) or edates.empty or "Reported EPS" not in edates:
         return []
@@ -178,6 +176,9 @@ def check_eps_consistency(sec, splits, edates) -> list:
             continue
         r = float(row["EPS"]) / float(after.iloc[0])
         k = _near_split_ratio(r, tol=0.15)  # 분기 합은 조정 EPS라 조금 다를 수 있어 여유를 둔다
+        # 그 회계연도 뒤에 실제로 있었던 분할 비율만 '분할 오류'로 본다 (2배 차이는 GAAP·조정 EPS 차이로도 흔함)
+        later = sp[sp.index > fy - pd.Timedelta(days=30)]
+        known = {int(round(f if f >= 1 else 1 / f)) for f in later.values if np.isfinite(f) and f > 0}
         if k and k > 1 and k in known:
             out.append(dict(level="error", title=f"{_d(fy)} 연간 EPS와 4개 분기 합이 {k}배 차이",
                             detail=f"연간 {row['EPS']:.3f} vs 분기 합 {after.iloc[0]:.3f}. 차이가 {k}:1 분할 비율과 같아 한쪽이 분할 보정이 안 된 것으로 보입니다.",
