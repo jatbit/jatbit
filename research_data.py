@@ -130,9 +130,13 @@ def _sec_cik_map() -> dict:
 
 
 def _sec_series(facts: dict, tags: list, unit: str, duration: bool, with_filed: bool = False):
-    """10-K에 실린 연간 값. 회계연도 말 날짜별로, 앞 순위 태그를 우선·같은 태그는 가장 최근 제출값(정정 반영)."""
+    """10-K에 실린 연간 값. 회계연도 말 날짜별로, 앞 순위 태그를 우선·같은 태그는 가장 최근 제출값(정정 반영).
+    with_filed=True면 (값, 그 값의 제출일, 그 해 숫자가 처음 공시된 날)을 돌려준다.
+    한 해의 EPS는 그 뒤 2~3년치 10-K에 다시 실리는데(액면분할 뒤엔 분할 반영값으로), 값은 최신 제출본을 쓰되
+    '그 숫자를 언제부터 알 수 있었나'는 처음 공시된 날로 따져야 일별 PER이 맞다."""
     gaap = facts.get("facts", {}).get("us-gaap", {})
     out = {}
+    first = {}
     for tag in tags:
         arr = gaap.get(tag, {}).get("units", {}).get(unit, [])
         for e in arr:
@@ -150,13 +154,18 @@ def _sec_series(facts: dict, tags: list, unit: str, duration: bool, with_filed: 
             prev = out.get(end)
             if prev is None or (prev[0] == tag and e.get("filed", "") > prev[2]):
                 out[end] = (tag, e.get("val"), e.get("filed", ""))
+            f0 = e.get("filed", "")
+            if f0 and (first.get((end, tag)) is None or f0 < first[(end, tag)]):
+                first[(end, tag)] = f0
     if not out:
-        return (pd.Series(dtype=float), pd.Series(dtype=float)) if with_filed else pd.Series(dtype=float)
+        return (pd.Series(dtype=float), pd.Series(dtype=float), pd.Series(dtype=float)) if with_filed else pd.Series(dtype=float)
     vals = pd.Series({pd.Timestamp(k): float(v[1]) for k, v in out.items()}).sort_index()
     if not with_filed:
         return vals
     filed = pd.Series({pd.Timestamp(k): float(pd.Timestamp(v[2] or k).toordinal()) for k, v in out.items()}).sort_index()
-    return vals, filed
+    avail = pd.Series({pd.Timestamp(k): float(pd.Timestamp(first.get((k, v[0])) or v[2] or k).toordinal())
+                       for k, v in out.items()}).sort_index()
+    return vals, filed, avail
 
 
 @st.cache_data(ttl=24 * 60 * 60, show_spinner="SEC 공시에서 10개년 재무제표를 불러오는 중...")
@@ -168,7 +177,9 @@ def load_sec_financials(ticker: str, years: int = 10) -> pd.DataFrame:
     rows = {name: _sec_series(facts, tags, unit, dur) for name, tags, unit, dur in SEC_ITEMS}
     for name, tags, unit, dur in SEC_ITEMS:  # 주당 값·주식 수는 제출일을 같이 저장(액면분할 보정용)
         if name in ("희석 EPS", "희석주식수"):
-            rows[name], rows["_filed_" + name] = _sec_series(facts, tags, unit, dur, with_filed=True)
+            rows[name], rows["_filed_" + name], av = _sec_series(facts, tags, unit, dur, with_filed=True)
+            if name == "희석 EPS":
+                rows["_avail_" + name] = av  # 그 해 EPS가 처음 공시된 날 (일별 PER에서 '언제부터 쓰나')
     base = rows["매출"] if len(rows["매출"]) else rows["순이익"]
     if len(base) == 0:
         raise RuntimeError("연간 재무 데이터(us-gaap)가 없습니다")
@@ -383,9 +394,12 @@ def _annual_eps_points(sec, splits):
     else:
         filed = pd.Series([float((pd.Timestamp(c) + pd.Timedelta(days=90)).toordinal()) for c in sec.columns], index=sec.columns)
     filed = filed.fillna(pd.Series([float((pd.Timestamp(c) + pd.Timedelta(days=90)).toordinal()) for c in sec.columns], index=sec.columns))
-    fac = _split_factor(filed, splits).reindex(sec.columns).fillna(1.0)
+    fac = _split_factor(filed, splits).reindex(sec.columns).fillna(1.0)  # 값의 기준(최신 제출일) 뒤 액면분할만 보정
     eps = eps / fac
-    pts = pd.Series(eps.values, index=[pd.Timestamp.fromordinal(int(f)) for f in filed.values]).dropna()
+    avail = filed
+    if "_avail_희석 EPS" in sec.index:  # 처음 공시된 날부터 그 EPS를 쓴다 (나중에 다시 실린 날이 아니라)
+        avail = pd.to_numeric(sec.loc["_avail_희석 EPS"], errors="coerce").fillna(filed)
+    pts = pd.Series(eps.values, index=[pd.Timestamp.fromordinal(int(f)) for f in avail.values]).dropna()
     pts = pts[~pts.index.duplicated(keep="last")].sort_index()
     return pts if len(pts) else None
 
