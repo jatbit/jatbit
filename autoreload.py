@@ -17,6 +17,7 @@ ORDER = ["bsm", "glossary", "tvchart", "ui", "ta", "money", "rates", "data_load"
 _BASE = os.path.dirname(os.path.abspath(__file__))
 _SELF = os.path.abspath(__file__)
 _seen: dict = {}
+ERRORS: dict = {}  # 다시 불러오다 실패한 모듈 → 오류 (앱 상단에 표시)
 
 
 def _sig(path: str):
@@ -61,6 +62,7 @@ def refresh(force: bool = False) -> list:
             if name in sys.modules:
                 changed.append(name)
     if changed:
+        ERRORS.clear()
         importlib.invalidate_caches()
         for name in ORDER:
             mod = sys.modules.get(name)
@@ -75,6 +77,7 @@ def refresh(force: bool = False) -> list:
                 importlib.reload(mod)
                 if os.path.exists(p):
                     _seen[name] = _sig(p)
-            except Exception:  # noqa: BLE001  (새 코드에 오류가 있으면 이전 모듈을 그대로 쓴다)
-                pass
+            except Exception as e:  # noqa: BLE001  (새 코드에 오류가 있으면 이전 모듈을 그대로 쓰고, 다음 실행 때 다시 시도)
+                ERRORS[name] = f"{type(e).__name__}: {e}"
+                _seen[name] = (0, 0)
     return changed
