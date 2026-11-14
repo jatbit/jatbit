@@ -25,23 +25,19 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
     """연간 재무비율(SEC)과 일별 주가·PER 지표를 골라서 한 그래프에 겹쳐 그린다."""
     rt = compute_ratios(sec, R.get("hist"), R.get("splits")) if sec is not None else None
     avail = [k for k in RATIOS if rt is not None and k in rt.index and rt.loc[k].notna().sum() >= 2]
-    per = per_series(R.get("hist"), R.get("edates"))
+    per = None  # PER 그래프는 'PER'(직전 사업연도 EPS)과 '12M PER'(향후 12개월 예상 EPS) 두 가지만
     hist = R.get("hist")
     d_avail = ["주가"] if isinstance(hist, pd.Series) and len(hist) else []
-    if per is not None:
-        d_avail += ["12M 트레일링 PER", "12M 선행 PER (사후 실현 EPS)", "트레일링 PER 평균 ±1σ 밴드"]
     ann = annual_per_series(hist, sec, R.get("splits"))
     if ann is not None:
-        d_avail.insert(1 if d_avail[:1] == ["주가"] else 0, "PER (직전 사업연도 EPS)")
+        d_avail.append("PER (직전 사업연도 EPS)")
     fc = None
     try:
         fc = fwd_consensus_series(hist, R.get("edates"), R.get("eps_trend"), R.get("info") or {}, n_eps)
     except Exception:  # noqa: BLE001
         fc = None
     if fc is not None:
-        d_avail.insert(min(len(d_avail), (1 if "주가" in d_avail else 0) + (1 if ann is not None else 0)), "12M 선행 PER (컨센서스 추이)")
-    if px and n_eps and n_eps > 0:
-        d_avail.append("현재 12M 선행 PER (컨센서스)")
+        d_avail.append("12M 선행 PER (컨센서스 추이)")
     dv, dv_err = None, None
     if isinstance(hist, pd.Series) and len(hist) and _VAL:
         try:
@@ -60,7 +56,7 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
 
     # 일별로 계산되는 지표가 있으면 같은 이름의 연간 밸류에이션 비율(PER·PBR·PSR)은 빼고, 시가총액 기준 PER은
     # EPS 기준 12M 트레일링 PER과 겹치므로 EPS 기준이 있을 때는 뺀다.
-    if (per is not None or ann is not None) and "PER (시가총액 ÷ 순이익 TTM)" in d_avail:
+    if ann is not None and "PER (시가총액 ÷ 순이익 TTM)" in d_avail:
         d_avail.remove("PER (시가총액 ÷ 순이익 TTM)")
     daily_names = set(d_avail) | ({"PER"} if per is not None else set())
     a_avail = [k for k in avail if k not in daily_names]
@@ -68,17 +64,11 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
     options = (["주가"] if "주가" in d_avail else []) + val_daily + a_avail
 
     def _label(k):
-        if k in a_avail:
-            return f"{k} · 연간 ({RATIOS[k][1]}, {RATIOS[k][0]})"
-        if k in _PER_LABEL:
-            return _PER_LABEL[k]
-        if k in _VAL:
-            return f"{k} · 일별 ({DAILY[k]})"
-        return _PER_LABEL.get(k) or (k if k == "주가" else f"{k} · 일별")
+        return _PER_LABEL.get(k, k)
 
-    chosen = st.multiselect("그래프에 그릴 항목 (주가·밸류에이션은 일별, 나머지 재무비율은 연간)", options,
+    chosen = st.multiselect("그래프 항목", options,
                             default=(["주가"] if "주가" in options else [])
-                            + [k for k in ("PER (직전 사업연도 EPS)", "12M 트레일링 PER", "PER (시가총액 ÷ 순이익 TTM)") if k in options][:1]
+                            + [k for k in ("PER (직전 사업연도 EPS)", "PER (시가총액 ÷ 순이익 TTM)") if k in options][:1]
                             + [k for k in ("12M 선행 PER (컨센서스 추이)",) if k in options],
                             key=f"rs_combo_{ticker}",
                             format_func=_label)
@@ -137,7 +127,7 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
         if k in _VAL and dv is not None:
             sr = _clip(dv[k]).dropna()
             unit = DAILY[k]
-            fig.add_trace(go.Scatter(x=sr.index, y=sr.values, name=_PER_TRACE.get(k, f"{k} (일별)"), mode="lines", yaxis=ax, line=dict(color=color, width=1.3),
+            fig.add_trace(go.Scatter(x=sr.index, y=sr.values, name=_PER_TRACE.get(k, k), mode="lines", yaxis=ax, line=dict(color=color, width=1.3),
                                      hovertemplate="%{x|%Y-%m-%d} " + k + (" %{y:.2f}%" if unit == "%" else " %{y:.2f}배") + "<extra></extra>"))
             if unit != "%":
                 x_vals.append(sr.values)
@@ -149,22 +139,6 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
             h = _clip(hist)
             fig.add_trace(go.Scatter(x=h.index, y=h.values, name="주가", mode="lines", yaxis=ax, line=dict(color=color, width=1.4),
                                      hovertemplate="%{x|%Y-%m-%d} 주가 %{y:,.2f}<extra></extra>"))
-        elif k == "12M 트레일링 PER":
-            fig.add_trace(go.Scatter(x=trail.index, y=trail.values, name="12M PER", mode="lines", yaxis=ax, line=dict(color=color, width=1.4),
-                                     hovertemplate="%{x|%Y-%m-%d} 12M PER %{y:.1f}배<extra></extra>"))
-        elif k == "12M 선행 PER (사후 실현 EPS)":
-            fig.add_trace(go.Scatter(x=fwd_r.index, y=fwd_r.values, name="선행 PER(사후)", mode="lines", yaxis=ax,
-                                     line=dict(color=color, width=1.4, dash="dash"),
-                                     hovertemplate="%{x|%Y-%m-%d} 선행 PER(사후) %{y:.1f}배<extra></extra>"))
-        elif k == "트레일링 PER 평균 ±1σ 밴드":
-            tv = trail.dropna()
-            if len(tv):
-                m, sd = float(tv.mean()), float(tv.std())
-                x0, x1 = tv.index[0], tv.index[-1]
-                for yv, nm, dash in ((m + sd, f"평균+1σ {m + sd:.1f}배", "dot"), (m, f"PER 평균 {m:.1f}배", "dash"),
-                                     (m - sd, f"평균−1σ {m - sd:.1f}배", "dot")):
-                    fig.add_trace(go.Scatter(x=[x0, x1], y=[yv, yv], name=nm, mode="lines", yaxis=ax,
-                                             line=dict(color="#888", width=1, dash=dash), hoverinfo="skip"))
         elif k == "PER (직전 사업연도 EPS)":
             sr = _clip(ann).dropna()
             fig.add_trace(go.Scatter(x=sr.index, y=sr.values, name="PER", mode="lines", yaxis=ax, line=dict(color=color, width=1.4),
@@ -172,15 +146,10 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
             x_vals.append(sr.values)
         elif k == "12M 선행 PER (컨센서스 추이)":
             sr = _clip(fc[0]).dropna()
-            fig.add_trace(go.Scatter(x=sr.index, y=sr.values, name="12M 선행 PER", mode="lines", yaxis=ax,
+            fig.add_trace(go.Scatter(x=sr.index, y=sr.values, name="12M PER", mode="lines", yaxis=ax,
                                      line=dict(color=color, width=1.4),
-                                     hovertemplate="%{x|%Y-%m-%d} 12M 선행 PER %{y:.1f}배<extra></extra>"))
+                                     hovertemplate="%{x|%Y-%m-%d} 12M PER %{y:.1f}배<extra></extra>"))
             x_vals.append(sr.values)
-        elif k == "현재 12M 선행 PER (컨센서스)":
-            now = pd.Timestamp(hist.index[-1]).tz_localize(None) if getattr(hist.index, "tz", None) is not None else pd.Timestamp(hist.index[-1])
-            fig.add_trace(go.Scatter(x=[now], y=[px / n_eps], name=f"오늘 선행 PER {px / n_eps:.1f}배", mode="markers", yaxis=ax,
-                                     marker=dict(size=14, symbol="star", color="#E5534B"),
-                                     hovertemplate=f"현재 12M 선행(NTM) PER {px / n_eps:.1f}배<extra></extra>"))
         ci += 1
 
     multi = len(order)
@@ -207,18 +176,12 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
     st.plotly_chart(fig, use_container_width=True)
     axes_txt = ", ".join(f"{title_of[u]} → {'왼쪽' if i == 0 else ('오른쪽' if i == 1 else '오른쪽 바깥')} 축" for i, u in enumerate(order))
     st.caption(f"축: {axes_txt}")
-    if fc is not None and "12M 선행 PER (컨센서스 추이)" in dsel:
-        ex = fc[1]
-        st.caption("12M 선행 PER: 그날 주가 ÷ 앞으로 4개 분기 예상 EPS(애널리스트 컨센서스, 일회성 항목을 뺀 조정 EPS) 합. "
-                   + (f"{ex:%Y-%m-%d} 이후는 실제 컨센서스 추이(현재·7·30·60·90일 전)이고, 그 이전은 " if ex is not None else "")
-                   + "각 분기 실적 발표 직전 컨센서스를 4개 분기씩 더한 근사치입니다 (먼 분기의 그때 예상치는 무료 데이터에 없음).")
     try:  # 통계적 이상(공시일·분할·분기 누락·극단값) 점검
         import data_check
         tb = annual_eps_table(sec, R.get("splits"))
         ed = R.get("edates")
-        issues = data_check.run_checks(hist, sec, R.get("splits"), ed, ann=ann, trail=per[0] if per is not None else None,
-                                       ann_dates=None if tb is None else tb.index,
-                                       trail_dates=per[2].index if per is not None else None)
+        issues = data_check.run_checks(hist, sec, R.get("splits"), ed, ann=ann, trail=None,
+                                       ann_dates=None if tb is None else tb.index, trail_dates=None)
         data_check.render_checks(issues, key=ticker)
     except Exception as e:  # noqa: BLE001
         st.caption(f"데이터 점검을 실행하지 못했습니다 ({e}).")
