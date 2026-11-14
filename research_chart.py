@@ -193,6 +193,16 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
     st.plotly_chart(fig, use_container_width=True)
     axes_txt = ", ".join(f"{title_of[u]} → {'왼쪽' if i == 0 else ('오른쪽' if i == 1 else '오른쪽 바깥')} 축" for i, u in enumerate(order))
     st.caption(f"축: {axes_txt}")
+    try:  # 통계적 이상(공시일·분할·분기 누락·극단값) 점검
+        import data_check
+        tb = annual_eps_table(sec, R.get("splits"))
+        ed = R.get("edates")
+        issues = data_check.run_checks(hist, sec, R.get("splits"), ed, ann=ann, trail=per[0] if per is not None else None,
+                                       ann_dates=None if tb is None else tb.index,
+                                       trail_dates=per[2].index if per is not None else None)
+        data_check.render_checks(issues, key=ticker)
+    except Exception as e:  # noqa: BLE001
+        st.caption(f"데이터 점검을 실행하지 못했습니다 ({e}).")
 
     if dv is not None:
         from valuation import summary_table
