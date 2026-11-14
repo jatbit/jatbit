@@ -66,6 +66,7 @@ def load_research(ticker: str) -> dict:
         "news": (lambda: list(t.news), []),
         "qincome": (lambda: t.quarterly_income_stmt, pd.DataFrame()),
         "eps_est": (lambda: t.earnings_estimate, pd.DataFrame()),
+        "eps_trend": (lambda: t.eps_trend, pd.DataFrame()),
         "edates": (lambda: t.get_earnings_dates(limit=60), pd.DataFrame()),
         "hist": (lambda: t.history(period="10y", auto_adjust=False)["Close"].dropna(), pd.Series(dtype=float)),
         "splits": (lambda: t.splits, pd.Series(dtype=float)),
@@ -269,6 +270,7 @@ def compute_ratios(sec: pd.DataFrame, hist: pd.Series, splits) -> pd.DataFrame:
 DAILY = {  # 이름: 단위
     "주가": "$", "12M 트레일링 PER": "배", "12M 선행 PER (사후 실현 EPS)": "배",
     "현재 12M 선행 PER (컨센서스)": "배", "트레일링 PER 평균 ±1σ 밴드": "배", "PER (직전 사업연도 EPS)": "배",
+    "12M 선행 PER (컨센서스 추이)": "배",
 }
 try:  # 일별 밸류에이션 배수 (valuation.py, SEC 분기 공시 기준)
     from valuation import VAL as _VAL
@@ -284,8 +286,9 @@ _PER_LABEL = {  # 목록에 보이는 이름 (안쪽 키는 그대로)
     "12M 선행 PER (사후 실현 EPS)": "선행 PER · 일별 (그날 주가 ÷ 그 뒤 1년 동안 실제로 나온 EPS)",
     "트레일링 PER 평균 ±1σ 밴드": "PER 평균 ±1σ 밴드",
     "현재 12M 선행 PER (컨센서스)": "오늘 선행 PER (애널리스트 예상 EPS 기준, 점 하나)",
+    "12M 선행 PER (컨센서스 추이)": "12M 선행 PER · 일별 (그날 주가 ÷ 그때 애널리스트가 예상한 향후 4개 분기 EPS 합)",
 }
-_PER_TRACE = {"12M 트레일링 PER": "12M PER", "PER (시가총액 ÷ 순이익 TTM)": "PER", "12M 선행 PER (사후 실현 EPS)": "선행 PER(사후)"}
+_PER_TRACE = {"12M 선행 PER (컨센서스 추이)": "12M 선행 PER", "12M 트레일링 PER": "12M PER", "PER (시가총액 ÷ 순이익 TTM)": "PER", "12M 선행 PER (사후 실현 EPS)": "선행 PER(사후)"}
 
 
 @st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner="한국어로 번역하는 중...")
@@ -479,6 +482,80 @@ def per_series(hist: pd.Series, edates: pd.DataFrame):
     trail = pd.Series(np.where(t_eps > 0, h.values / t_eps, np.nan), index=h.index)
     fwd_r = pd.Series(np.where(f_eps > 0, h.values / f_eps, np.nan), index=h.index)
     return trail, fwd_r, e
+
+
+def _naive_idx(x):
+    idx = pd.to_datetime(x.index)
+    x = x.copy()
+    x.index = idx.tz_localize(None) if idx.tz is not None else idx
+    return x[~x.index.duplicated(keep="last")].sort_index()
+
+
+def _trend_ntm_points(trend, info):
+    """Yahoo eps_trend(이번·다음 회계연도 컨센서스의 현재·7·30·60·90일 전 값) → (날짜, 그날의 NTM EPS) 목록."""
+    if not isinstance(trend, pd.DataFrame) or trend.empty or "0y" not in trend.index or "+1y" not in trend.index:
+        return []
+    fye = _num((info or {}).get("nextFiscalYearEnd")) or _num((info or {}).get("lastFiscalYearEnd"))
+    if not fye:
+        return []
+    today = pd.Timestamp.now().normalize()
+    end = pd.Timestamp(int(fye), unit="s").normalize()
+    while end < today:
+        end += pd.DateOffset(years=1)
+    pts = []
+    for col, lag in (("90daysAgo", 90), ("60daysAgo", 60), ("30daysAgo", 30), ("7daysAgo", 7), ("current", 0)):
+        if col not in trend.columns:
+            continue
+        e0, e1 = _num(trend.loc["0y", col]), _num(trend.loc["+1y", col])
+        if e0 is None or e1 is None:
+            continue
+        t = today - pd.Timedelta(days=lag)
+        w = min(max((end - t).days / 365.0, 0.0), 1.0)  # 그날 기준 이번 회계연도에 남은 비중
+        pts.append((t, w * e0 + (1 - w) * e1))
+    return pts
+
+
+def fwd_consensus_series(hist, edates, trend=None, info=None, n_eps=None):
+    """일별 12M 선행 PER (컨센서스) = 그날 주가 ÷ 그날 기준 '앞으로 4개 분기' 예상 EPS 합.
+    - 최근 90일: Yahoo 컨센서스 추이(eps_trend: 현재·7·30·60·90일 전)로 계산한 NTM EPS를 날짜별로 이어 붙인 값 (실제 컨센서스).
+    - 그 이전: 각 분기 실적 발표 직전의 컨센서스(EPS Estimate)를 다음 4개 분기만큼 더한 근사치.
+      아직 컨센서스가 없는 먼 분기는 오늘의 NTM EPS ÷ 4로 채운다.
+    돌려주는 값: (PER 시리즈, 실제 컨센서스 구간 시작일 또는 None)."""
+    if not isinstance(hist, pd.Series) or not len(hist):
+        return None
+    h = _naive_idx(hist.dropna().astype(float))
+    today = pd.Timestamp.now().normalize()
+    ntm = pd.Series(np.nan, index=h.index)
+    if isinstance(edates, pd.DataFrame) and not edates.empty and "EPS Estimate" in edates:
+        est = _naive_idx(pd.to_numeric(edates["EPS Estimate"], errors="coerce"))
+        est.index = est.index.normalize()
+        est = est[~est.index.duplicated(keep="last")]
+        if len(est) >= 4:
+            fill = (n_eps / 4.0) if n_eps and n_eps > 0 else np.nan
+            est[(est.index > today) & est.isna()] = fill
+            last = est.index[-1]
+            extra = pd.Series(fill, index=[last + pd.Timedelta(days=91 * k) for k in range(1, 5)])
+            q = pd.concat([est, extra])
+            nxt4 = q[::-1].rolling(4).sum()[::-1].shift(-1)  # 각 발표일 다음부터 4개 분기 예상 합
+            dates = pd.Series(q.index, index=q.index)
+            span = (dates.shift(-4) - dates.shift(-1)).dt.days
+            nxt4[span > 400] = np.nan  # 분기가 빠져 1년 넘게 흩어진 경우
+            pos = np.searchsorted(q.index.values, h.index.values, side="right") - 1
+            v = np.where(pos >= 0, nxt4.values[np.clip(pos, 0, None)], np.nan)
+            ntm = pd.Series(v, index=h.index)
+    exact_from = None
+    pts = _trend_ntm_points(trend, info)
+    if len(pts) >= 2:
+        xs = np.array([p[0].toordinal() for p in pts], dtype=float)
+        ys = np.array([p[1] for p in pts], dtype=float)
+        m = h.index >= pts[0][0]
+        if m.any():
+            ntm[m] = np.interp(np.array([d.toordinal() for d in h.index[m]], dtype=float), xs, ys)
+            exact_from = pts[0][0]
+    out = pd.Series(np.where(ntm > 0, h.values / ntm.values, np.nan), index=h.index)
+    if out.notna().sum() < 20:
+        return None
+    return out, exact_from
 
 
 def _set_research(tk):
