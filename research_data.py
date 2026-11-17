@@ -623,6 +623,9 @@ def fwd_consensus_series(hist, edates, trend=None, info=None, n_eps=None):
         est = est[~est.index.duplicated(keep="last")]
         if len(est) >= 4:
             fill = (n_eps / 4.0) if n_eps and n_eps > 0 else np.nan
+            if not np.isfinite(fill):  # 컨센서스(NTM)를 못 받았으면 가장 최근 분기 예상 EPS로 남은 분기를 채운다 (근사)
+                known = est.dropna()
+                fill = float(known.iloc[-1]) if len(known) and known.iloc[-1] > 0 else np.nan
             est[(est.index > today) & est.isna()] = fill
             last = est.index[-1]
             extra = pd.Series(fill, index=[last + pd.Timedelta(days=91 * k) for k in range(1, 5)])
