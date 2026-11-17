@@ -49,12 +49,41 @@ def _safe(fn, default=None):
         return default
 
 
-@st.cache_data(ttl=60 * 60, show_spinner="기업 정보를 불러오는 중... (Yahoo 응답이 느리면 다시 시도합니다)")
+def _info_ok(info) -> bool:
+    return bool(info) and bool(info.get("longName") or info.get("shortName") or info.get("quoteType"))
+
+
+class _InfoBlocked(RuntimeError):
+    pass
+
+
 def load_research(ticker: str) -> dict:
+    """정상일 때는 1시간 캐시. Yahoo가 기업 정보만 막으면 시세 정보로 채운 결과를 5분만 캐시한다 (풀리면 곧 다시 받음)."""
+    try:
+        return _load_research_full(ticker)
+    except _InfoBlocked:
+        return _load_research_partial(ticker)
+
+
+@st.cache_data(ttl=60 * 60, show_spinner="기업 정보를 불러오는 중... (Yahoo 응답이 느리면 다시 시도합니다)")
+def _load_research_full(ticker: str) -> dict:
     t = yf.Ticker(ticker)
-    info = _try(lambda: t.info) or {}  # 기업 정보는 먼저 (Yahoo 인증값을 여기서 받아 두어야 뒤의 동시 요청이 거절되지 않음)
-    if not info or (not info.get("longName") and not info.get("shortName") and not info.get("quoteType")):
+    info = _safe(lambda: _try(lambda: t.info, tries=2) or {}, {})  # 기업 정보는 먼저 (Yahoo 인증값을 여기서 받아 두어야 뒤의 동시 요청이 거절되지 않음)
+    if not _info_ok(info):
+        raise _InfoBlocked("기업 정보 요청이 거절됨")
+    return _research_rest(t, info)
+
+
+@st.cache_data(ttl=5 * 60, show_spinner="Yahoo 기업 정보가 막혀 시세 정보로 대신 불러오는 중...")
+def _load_research_partial(ticker: str) -> dict:
+    t = yf.Ticker(ticker)
+    info = _basic_info(t)  # 시세 쪽 정보로 이름·가격·52주 범위라도 채운다
+    if not _info_ok(info):
         raise RuntimeError("기업 정보를 찾지 못했습니다 (티커를 확인해 주세요)")
+    return _research_rest(t, info)
+
+
+def _research_rest(t, info: dict) -> dict:
     out = {"info": info}
     jobs = {  # 나머지는 서로 독립적인 요청이라 동시에 보낸다 (차례로 보내면 10초 넘게 걸리기도 함)
         "income": (lambda: t.income_stmt, pd.DataFrame()),
@@ -78,6 +107,28 @@ def load_research(ticker: str) -> dict:
         for k, f in futs.items():
             out[k] = f.result()
     return out
+
+
+def _basic_info(t) -> dict:
+    """시세(chart) 응답에 딸려 오는 메타데이터로 만든 최소한의 기업 정보. '_partial' 표시를 붙인다."""
+    try:
+        t.history(period="5d", auto_adjust=False)
+        hm = dict(getattr(t, "history_metadata", None) or t.get_history_metadata() or {})
+    except Exception:  # noqa: BLE001
+        return {}
+    if not hm:
+        return {}
+    out = {"longName": hm.get("longName"), "shortName": hm.get("shortName") or hm.get("symbol"),
+           "quoteType": hm.get("instrumentType"), "currency": hm.get("currency"), "exchange": hm.get("exchangeName"),
+           "currentPrice": hm.get("regularMarketPrice"), "regularMarketPrice": hm.get("regularMarketPrice"),
+           "previousClose": hm.get("chartPreviousClose") or hm.get("previousClose"),
+           "fiftyTwoWeekHigh": hm.get("fiftyTwoWeekHigh"), "fiftyTwoWeekLow": hm.get("fiftyTwoWeekLow"), "_partial": True}
+    try:
+        fi = t.fast_info
+        out["marketCap"] = float(fi["marketCap"])
+    except Exception:  # noqa: BLE001
+        pass
+    return {k: v for k, v in out.items() if v is not None}
 
 
 _PREFETCH = None
