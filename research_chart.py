@@ -230,4 +230,104 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
         from glossary import table_html
         st.markdown(table_html([[k] + list(r) for k, r in zip(tbl.index, tbl.values.tolist())], ["재무비율"] + cols), unsafe_allow_html=True)
 
+def _default_combo(options):
+    return ((["주가"] if "주가" in options else [])
+            + [k for k in ("PER (직전 사업연도 EPS)", "PER (시가총액 ÷ 순이익 TTM)") if k in options][:1]
+            + [k for k in ("12M 선행 PER (컨센서스 추이)",) if k in options])
+
+
+def render_score_gauges(sec, R: dict, ticker: str, n_eps, src: str = "SEC 10-K") -> None:
+    """기업 리서치: 재무비율 그래프 섹션 바로 위의 원형 점수 3개 (CAPM 미포함 · 업종 평균 대비 · CAPM 대비)."""
+    import outlook
+
+    hist = R.get("hist")
+    if sec is None or not isinstance(hist, pd.Series) or not len(hist):
+        return
+    domestic = "_ksec" in R
+    info = R.get("info") or {}
+    # 업종 유형 (아래 판단 섹션에서 바꾼 값이 있으면 그것)
+    det = outlook.classify(info.get("sector"), info.get("industry"), R.get("_ksec"))
+    if det == "general" and not R.get("_ksec") and not info.get("sector"):
+        try:
+            det = outlook.classify_sic(outlook.sec_sic(ticker)[0])
+        except Exception:  # noqa: BLE001
+            pass
+    prof = st.session_state.get(f"rs_prof_{ticker}") if st.session_state.get(f"rs_prof_{ticker}") in outlook.PROFILES else det
+    # 고른 지표 (아래 '그래프 항목'과 같은 값, 고르기 전이면 그 기본값)
+    rt = compute_ratios(sec, hist, R.get("splits"))
+    ann_ok = [k for k in RATIOS if k in rt.index and rt.loc[k].notna().sum() >= 2]
+    chosen = st.session_state.get(f"rs_combo_{ticker}")
+    if chosen is None:
+        chosen = _default_combo(["주가", "PER (직전 사업연도 EPS)", "12M 선행 PER (컨센서스 추이)"])
+    daily_keys = [k for k in chosen if k in ("PER (직전 사업연도 EPS)", "12M 선행 PER (컨센서스 추이)") or k in _VAL]
+    if "PER (직전 사업연도 EPS)" in daily_keys and "PER (시가총액 ÷ 순이익 TTM)" in daily_keys:
+        daily_keys.remove("PER (시가총액 ÷ 순이익 TTM)")
+    sel = [k for k in chosen if k in ann_ok and k not in daily_keys and k not in _VAL]
+
+    def build():
+        out = {}
+        if "PER (직전 사업연도 EPS)" in daily_keys:
+            ann = annual_per_series(hist, sec, R.get("splits"))
+            if ann is not None:
+                out["PER"] = (ann, "배")
+        if "12M 선행 PER (컨센서스 추이)" in daily_keys:
+            try:
+                fc = fwd_consensus_series(hist, R.get("edates"), R.get("eps_trend"), info, n_eps)
+                if fc is not None:
+                    out["12M PER"] = (fc[0], "배")
+            except Exception:  # noqa: BLE001
+                pass
+        vk = [k for k in daily_keys if k in _VAL]
+        if vk:
+            try:
+                from valuation import daily_valuation, load_quarterly
+                if src == "SEC 10-K":
+                    dv = daily_valuation(load_quarterly(ticker), hist, R.get("splits"))
+                else:
+                    from kr import annual_quarterly_dict
+                    dv = daily_valuation(annual_quarterly_dict(sec, _num(info.get("sharesOutstanding")), R.get("splits")), hist,
+                                         R.get("splits"), stale=470)
+                for k in vk:
+                    if k in dv:
+                        out[_PER_TRACE.get(k, k)] = (dv[k], DAILY[k])
+            except Exception:  # noqa: BLE001
+                pass
+        return out
+
+    ss = st.session_state
+    opts = dict(quarterly=ss.get(f"rs_o_q_{ticker}", not domestic) and not domestic, momentum=ss.get(f"rs_o_m_{ticker}", True),
+                surprise=ss.get(f"rs_o_s_{ticker}", True), peers=False, flags=ss.get(f"rs_o_f_{ticker}", True))
+    st.markdown("##### 매수·매도 점수 (6개월)")
+    st.markdown('<div style="font-size:11px;opacity:.6;margin-top:-8px">투자 권유 아님 · 과거 데이터로 계산한 모델 점수</div>',
+                unsafe_allow_html=True)
+    try:
+        with st.spinner("과거 시점마다 다시 판정해 점수를 계산하는 중..."):
+            res = outlook.summary_scores(sec, R, ticker, sel, daily_keys, build, opts, prof, domestic)
+    except Exception as e:  # noqa: BLE001
+        st.caption(f"점수를 계산하지 못했습니다 ({e}).")
+        return
+    if not res:
+        st.caption("고른 지표로는 점수를 낼 수 없습니다. 아래 그래프 항목에서 재무비율이나 PER을 골라 주세요.")
+        return
+    S = res["scores"]
+
+    def sub(m, what):
+        d = S[m][0]
+        return f"과거 비슷한 {d['n']}곳 중 {d['k']}곳이 {what}"
+
+    items = [("CAPM 미포함", S["abs"][0], S["abs"][1], sub("abs", "플러스")),
+             ("업종 평균 대비", S["ind"][0], S["ind"][1], sub("ind", "업종보다 높음")),
+             ("CAPM 대비", S["capm"][0], S["capm"][1], sub("capm", "CAPM 초과"))]
+    st.markdown(outlook.gauges_html(items), unsafe_allow_html=True)
+    names = {"PER (직전 사업연도 EPS)": "PER", "12M 선행 PER (컨센서스 추이)": "12M PER"}
+    used = [names.get(k, _PER_TRACE.get(k, k)) for k in chosen if k != "주가"]
+    extra = [x for x, on in (("모멘텀", opts["momentum"]), ("실적 서프라이즈", opts["surprise"])) if on]
+    st.caption(f"판정 근거: {', '.join(used + extra) or '-'} · {outlook.PROFILES[prof]['name']} 기준 · 업종 평균 = {res['sname'] or '-'}"
+               + (f" · 위험 신호: {', '.join(res['flags'])} (50점 상한)" if res["flags"] else "")
+               + ". 점수 = 지금과 판정 점수가 비슷했던 과거 시점들 가운데 이후 6개월 수익률이 0 · 업종 평균 · CAPM 기대수익률을 넘은 비율 "
+               "(겹치는 기간만큼 사례를 줄이고 50점 쪽으로 당김). 80% 구간이 20점보다 넓으면 범위로 표시합니다. "
+               + ("같은 업종 대표 종목 사례 포함. " if res["pooled"] else "")
+               + "지표는 아래 그래프 항목에서 바꿀 수 있습니다.")
+
+
 __all__ = [n for n in dir() if not n.startswith("__")]  # 밑줄로 시작하는 도우미도 다른 모듈에서 쓸 수 있게
