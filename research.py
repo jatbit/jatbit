@@ -20,6 +20,7 @@ try:
 except Exception:  # noqa: BLE001
     yf = None
 
+from period import period_input
 from research_data import *  # noqa: F401,F403
 from research_chart import *  # noqa: F401,F403
 
@@ -127,6 +128,7 @@ def render_research() -> None:
                         key="rs_tabs")
     if tabs[0][1]:
         with tabs[0][0]:
+            R["_period"] = period_input("rs_period", default_days=3652)  # 재무제표·그래프에 쓸 기간 (기본 10년)
             F, src, ferr = _financials(ticker, R, domestic, code)
             if src == "Yahoo" and ferr and not domestic:
                 st.caption("SEC 10개년 재무제표가 없어 Yahoo 재무제표(약 4년)를 씁니다.")
@@ -283,8 +285,9 @@ def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool, F=None, s
     # ---- 5. 연간 재무제표
     sec = F if F is not None and F.shape[1] >= 2 else None
     if sec is not None:
-        st.markdown(f"##### 연간 재무제표 (최근 {sec.shape[1]}개 회계연도 · {src})")
-        fs = sec.loc[[r for r in SEC_SHOW if r in sec.index]].copy()
+        secv = in_period(sec, R.get("_period"))
+        st.markdown(f"##### 연간 재무제표 ({pd.Timestamp(secv.columns[0]):%Y}~{pd.Timestamp(secv.columns[-1]):%Y} 회계연도 · {src})")
+        fs = secv.loc[[r for r in SEC_SHOW if r in secv.index]].copy()
         fs.columns = [pd.Timestamp(c).strftime("%Y-%m") for c in fs.columns]
         show = fs.copy().astype(object)
         for k in show.index:
