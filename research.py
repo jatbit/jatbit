@@ -320,6 +320,10 @@ def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool, F=None, s
         st.caption("재무제표를 불러오지 못했습니다 (ETF이거나 데이터 제공처 응답 지연).")
 
     # ---- 5-1. 재무비율·주가·PER 그래프 (직접 선택)
+    try:  # 매수·매도 원형 점수 3개 (재무비율 그래프 섹션 바로 위)
+        render_score_gauges(sec, R, ticker, n_eps, src)
+    except Exception as e:  # noqa: BLE001
+        st.caption(f"매수·매도 점수를 계산하지 못했습니다 ({e}).")
     exp, op = ui.more("재무비율 · 주가 · 밸류에이션 그래프 더보기 (직접 골라서 겹쳐 보기)", key=f"rs_more_combo_{ticker}")
     if op:
         with exp:
