@@ -205,6 +205,36 @@ def classify(sector, industry, kr_sector=None) -> str:
     return "general"
 
 
+@st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False)
+def sec_sic(ticker: str):
+    """SEC 등록 업종 코드(SIC)와 설명 — Yahoo 기업 정보가 막혔을 때 업종 판별용."""
+    from research_data import _sec_cik_map, _sec_json
+
+    m = _sec_cik_map()
+    cik = m.get(ticker.upper()) or m.get(ticker.upper().replace(".", "-"))
+    if not cik:
+        return 0, ""
+    j = _sec_json(f"https://data.sec.gov/submissions/CIK{int(cik):010d}.json")
+    return int(j.get("sic") or 0), str(j.get("sicDescription") or "")
+
+
+def classify_sic(sic: int) -> str:
+    if not sic:
+        return "general"
+    if sic == 6798 or 6500 <= sic <= 6599:
+        return "reit"
+    if 6000 <= sic <= 6799:
+        return "financial"
+    if sic == 3674 or 1000 <= sic <= 1799 or 2800 <= sic <= 2829 or 2900 <= sic <= 3399 or 3500 <= sic <= 3569 \
+            or 3710 <= sic <= 3716 or 4400 <= sic <= 4599:
+        return "cyclical"
+    if 7370 <= sic <= 7379 or sic in (2836, 5961, 7812) or 3570 <= sic <= 3579 or 3841 <= sic <= 3851 or 3661 <= sic <= 3669:
+        return "growth"
+    if 4900 <= sic <= 4999 or 4810 <= sic <= 4819 or 2000 <= sic <= 2199 or sic == 2834:
+        return "defensive"
+    return "general"
+
+
 # ----------------------------------------------------------------------
 # 신호 계산
 # ----------------------------------------------------------------------
@@ -371,12 +401,20 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
     # ---- 업종 유형
     info = R.get("info") or {}
     det = classify(info.get("sector"), info.get("industry"), R.get("_ksec"))
+    sic_txt = ""
+    if det == "general" and not R.get("_ksec") and not info.get("sector"):  # Yahoo가 막혔으면 SEC 업종 코드로
+        try:
+            sic, sic_txt = sec_sic(ticker)
+            det = classify_sic(sic)
+            sic_txt = f"SEC 업종 코드 {sic} {sic_txt}".strip() if sic else ""
+        except Exception:  # noqa: BLE001
+            sic_txt = ""
     keys = list(PROFILES)
     c1, c2 = st.columns([2, 3])
     prof = c1.selectbox("업종 유형", keys, index=keys.index(det), key=f"rs_prof_{ticker}",
                         format_func=lambda k: PROFILES[k]["name"] + (" (자동 판별)" if k == det else ""))
     P = PROFILES[prof]
-    src = " · ".join(x for x in (info.get("sector"), info.get("industry"), R.get("_ksec")) if x)
+    src = " · ".join(x for x in (info.get("sector"), info.get("industry"), R.get("_ksec"), sic_txt) if x)
     c2.caption((f"업종: {src}. " if src else "") + P["why"])
     if options is not None and ms_key:
         rec = [k for k in P["rec"] if k in options]
