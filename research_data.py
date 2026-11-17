@@ -97,7 +97,7 @@ def _research_rest(t, info: dict) -> dict:
         "eps_est": (lambda: t.earnings_estimate, pd.DataFrame()),
         "eps_trend": (lambda: t.eps_trend, pd.DataFrame()),
         "edates": (lambda: t.get_earnings_dates(limit=60), pd.DataFrame()),
-        "hist": (lambda: t.history(period="10y", auto_adjust=False)["Close"].dropna(), pd.Series(dtype=float)),
+        "hist": (lambda: t.history(period="max", auto_adjust=False)["Close"].dropna(), pd.Series(dtype=float)),
         "splits": (lambda: t.splits, pd.Series(dtype=float)),
     }
     from concurrent.futures import ThreadPoolExecutor
@@ -265,7 +265,7 @@ def _sec_series(facts: dict, tags: list, unit: str, duration: bool, with_filed: 
 
 
 @st.cache_data(ttl=24 * 60 * 60, show_spinner="SEC 공시에서 10개년 재무제표를 불러오는 중...")
-def load_sec_financials(ticker: str, years: int = 10) -> pd.DataFrame:
+def load_sec_financials(ticker: str, years: int = 20) -> pd.DataFrame:
     cik = _sec_cik_map().get(ticker.upper()) or _sec_cik_map().get(ticker.upper().replace(".", "-"))
     if not cik:
         raise RuntimeError("SEC에 등록된 미국 공시 기업이 아닙니다")
@@ -655,6 +655,18 @@ def _set_research(tk):
 
 def _send_to_options(tk):
     st.session_state["opt_ticker"] = tk
+
+
+def in_period(F, period, min_cols: int = 2):
+    """회계연도 말이 고른 기간 안에 드는 열만 (너무 적으면 기간 끝에서 가까운 min_cols개)."""
+    if F is None or not isinstance(F, pd.DataFrame) or not period:
+        return F
+    s, e = pd.Timestamp(period[0]), pd.Timestamp(period[1])
+    cols = [c for c in F.columns if s <= pd.Timestamp(c) <= e + pd.Timedelta(days=1)]
+    if len(cols) < min_cols:
+        before = [c for c in F.columns if pd.Timestamp(c) <= e + pd.Timedelta(days=1)]
+        cols = before[-min_cols:] if len(before) >= min_cols else list(F.columns[-min_cols:])
+    return F[cols]
 
 
 def _financials(ticker: str, R: dict, domestic: bool, code: str | None):
