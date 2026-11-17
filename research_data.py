@@ -52,9 +52,11 @@ def _safe(fn, default=None):
 @st.cache_data(ttl=60 * 60, show_spinner="기업 정보를 불러오는 중... (Yahoo 응답이 느리면 다시 시도합니다)")
 def load_research(ticker: str) -> dict:
     t = yf.Ticker(ticker)
-    out = {}
-    jobs = {  # 서로 독립적인 요청이라 기업 정보(info)까지 전부 동시에 보낸다 (차례로 보내면 10초 넘게 걸리기도 함)
-        "info": (lambda: _try(lambda: t.info) or {}, {}),
+    info = _try(lambda: t.info) or {}  # 기업 정보는 먼저 (Yahoo 인증값을 여기서 받아 두어야 뒤의 동시 요청이 거절되지 않음)
+    if not info or (not info.get("longName") and not info.get("shortName") and not info.get("quoteType")):
+        raise RuntimeError("기업 정보를 찾지 못했습니다 (티커를 확인해 주세요)")
+    out = {"info": info}
+    jobs = {  # 나머지는 서로 독립적인 요청이라 동시에 보낸다 (차례로 보내면 10초 넘게 걸리기도 함)
         "income": (lambda: t.income_stmt, pd.DataFrame()),
         "balance": (lambda: t.balance_sheet, pd.DataFrame()),
         "cashflow": (lambda: t.cashflow, pd.DataFrame()),
@@ -75,12 +77,6 @@ def load_research(ticker: str) -> dict:
         futs = {k: ex.submit(_safe, fn, d) for k, (fn, d) in jobs.items()}
         for k, f in futs.items():
             out[k] = f.result()
-    info = out.get("info") or {}
-    if not info or (not info.get("longName") and not info.get("shortName") and not info.get("quoteType")):
-        info = _try(lambda: t.info) or {}  # 동시 요청 중 실패했으면 혼자 한 번 더
-        out["info"] = info
-    if not info or (not info.get("longName") and not info.get("shortName") and not info.get("quoteType")):
-        raise RuntimeError("기업 정보를 찾지 못했습니다 (티커를 확인해 주세요)")
     return out
 
 
