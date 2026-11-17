@@ -1007,20 +1007,22 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
         except Exception:  # noqa: BLE001
             pool = None
     rs = rec_score(rows, sc / n if n else 0.0, pool)
+    reliable = rs["hi"] - rs["lo"] <= RELIABLE_WIDTH  # 신뢰도는 위험 신호로 자르기 전 구간 폭으로 판단
     if fl_now:  # 위험 신호가 있으면 50점을 넘지 않게
         rs.update(mid=min(rs["mid"], 50), lo=min(rs["lo"], 50), hi=min(rs["hi"], 50))
-    reliable = rs["hi"] - rs["lo"] <= RELIABLE_WIDTH
     st.markdown('<div style="font-size:11px;opacity:.6;margin-bottom:-6px">투자 권유 아님 · 과거 데이터로 계산한 모델 점수</div>',
                 unsafe_allow_html=True)
     k1, k2 = st.columns([1, 2])
     if reliable:
         k1.metric(f"매수·매도 점수 ({SCORE_H[0]})", f"{rs['mid']:.0f}점", score_label(rs["mid"]),
                   delta_color="normal" if rs["mid"] >= 50 else "inverse")
-        k2.caption(f"80% 구간 {rs['lo']:.0f}~{rs['hi']:.0f}점. 근거 자료가 충분해 알고리즘 점수를 그대로 보여줍니다.")
+        k2.caption(f"80% 구간 {rs['lo']:.0f}~{rs['hi']:.0f}점. 근거 자료가 충분해 알고리즘 점수를 그대로 보여줍니다."
+                   + (" 위험 신호가 있어 50점을 넘지 않게 잘랐습니다." if fl_now else ""))
     else:
         side = "매수 쪽" if rs["lo"] >= 55 else ("매도 쪽" if rs["hi"] <= 45 else "판단 보류")
         k1.metric(f"매수·매도 점수 ({SCORE_H[0]})", f"{rs['lo']:.0f}~{rs['hi']:.0f}점", side, delta_color="off")
-        k2.caption(f"자료가 부족해 범위로 보여줍니다 (80% 구간 폭 {rs['hi'] - rs['lo']:.0f}점 > {RELIABLE_WIDTH}점). "
+        k2.caption(("위험 신호가 있어 50점을 넘지 않게 잘랐습니다. " if fl_now else "")
+                   + f"자료가 부족해 범위로 보여줍니다 (80% 구간이 {RELIABLE_WIDTH}점보다 넓음). "
                    f"가운데 값은 {rs['mid']:.0f}점입니다."
                    + ("" if rs["pooled"] else " 아래 '여러 종목으로 규칙 검증'을 실행하면 같은 업종 대표 종목 사례가 더해져 범위가 좁아집니다."))
     st.caption(f"점수 = 지금과 판정 점수가 비슷했던 과거 시점(±{rs['width']:g}) {rs['n']}곳 가운데 이후 {SCORE_H[0]} 수익률이 "
