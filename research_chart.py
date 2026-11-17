@@ -94,10 +94,12 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
     import money
     title_of = {"%": "%", "x": "배·회", "$": f"주가({money.sym()})"}
 
-    # 일별 지표 시작일을 재무비율 기간에 맞춘다
-    start = None
-    if rt is not None and sel:
-        start = pd.Timestamp(rt.columns[0]) - pd.DateOffset(months=6)
+    # 위에서 고른 기간만 그린다 (재무비율은 그 기간 안의 회계연도)
+    period = R.get("_period")
+    start = pd.Timestamp(period[0]) if period else None
+    end = pd.Timestamp(period[1]) + pd.Timedelta(days=1) if period else None
+    if rt is not None and period:
+        rt = rt[[c for c in rt.columns if start <= pd.Timestamp(c) <= end]] if any(start <= pd.Timestamp(c) <= end for c in rt.columns) else rt
     palette = ["#4C9BE8", "#F2A93B", "#E5534B", "#5BB56E", "#9B6FD6", "#2BB3B1", "#D97AB0", "#8C8C8C", "#C9A227", "#3D7DCA"]
     fig = go.Figure()
     ci = 0
@@ -114,7 +116,9 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
         sr.index = pd.to_datetime(sr.index)
         if sr.index.tz is not None:
             sr.index = sr.index.tz_localize(None)
-        return sr[sr.index >= start] if start is not None else sr
+        if start is not None:
+            sr = sr[sr.index >= start]
+        return sr[sr.index <= end] if end is not None else sr
 
     trail = fwd_r = None
     if per is not None:
@@ -180,7 +184,7 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
         import data_check
         tb = annual_eps_table(sec, R.get("splits"))
         ed = R.get("edates")
-        issues = data_check.run_checks(hist, sec, R.get("splits"), ed, ann=ann, trail=None,
+        issues = data_check.run_checks(_clip(hist), sec, R.get("splits"), ed, ann=_clip(ann) if ann is not None else None, trail=None,
                                        ann_dates=None if tb is None else tb.index, trail_dates=None)
         data_check.render_checks(issues, key=ticker)
     except Exception as e:  # noqa: BLE001
