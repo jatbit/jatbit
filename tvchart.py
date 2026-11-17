@@ -113,9 +113,12 @@ def render(fig, height: int | None = None) -> None:
     ykeys = _axis_keys(lay0, "yaxis")
     # 세로축 맞춤 방식: 코드에서 눈금까지 정한 축(RSI 0~100 등)은 고정, 범위만 정한 축은 극단값을 뺀 분위수로, 나머지는 최소~최대
     modes = {}
+    force_minmax = set(((lay0.get("meta") or {}) if isinstance(lay0.get("meta"), dict) else {}).get("tv_minmax", []))
     for yk in ykeys:
         y = lay0.get(yk) or {}
-        if y.get("range") is not None and y.get("tickvals") is not None:
+        if yk in force_minmax:
+            modes[yk] = "minmax"
+        elif y.get("range") is not None and y.get("tickvals") is not None:
             modes[yk] = "fixed"
         elif y.get("range") is not None:
             modes[yk] = "robust"
@@ -154,6 +157,8 @@ let cache = null, fitting = false;
 function prep(){
   cache = (gd._fullData || []).map(t => {
     if (t.visible !== true) return null;
+    const meta = t.meta !== undefined ? t.meta : (t._input && t._input.meta);
+    if (meta === 'nofit') return null;  // 피보나치 레벨선처럼 세로축 맞춤에서 빼는 선
     const xs = t.x ? Array.from(t.x, ms) : null;
     if (!xs) return null;
     const ys = [];
