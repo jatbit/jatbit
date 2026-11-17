@@ -905,7 +905,7 @@ def _phi(x):
     return 0.5 * (1 + math.erf(x / math.sqrt(2)))
 
 
-def forward_score(c, R, fwd=None):
+def forward_score(c, R, fwd=None, prof="general"):
     """미래 추정치 기준: 1년 기대수익률 = (1 + EPS 성장률) × (PER가 기준 PER 쪽으로 k년에 걸쳐 돌아감) − 1 + 배당수익률.
     점수 = 6개월 수익률이 플러스일 확률 Φ(μ6 / σ6) × 100 (σ = 최근 2년 주간 변동성). 성장률·회귀 속도를 바꾼 시나리오로 범위를 낸다."""
     from research_data import ntm_eps
@@ -921,8 +921,13 @@ def forward_score(c, R, fwd=None):
             fac = _split_factor(fl.reindex(e.index), c["splits"]).reindex(e.index).fillna(1.0) if fl is not None else 1.0
             eps_ttm, src = float((e / fac).iloc[-1]), "최근 4개 분기 합"
     tb = c["eps_tb"]
-    if eps_ttm is None and tb is not None and len(tb):
-        eps_ttm, src = float(tb["EPS"].iloc[-1]), "직전 사업연도"
+    notes = []
+    eps_ann = float(tb["EPS"].iloc[-1]) if tb is not None and len(tb) else None
+    if eps_ttm is not None and eps_ann and eps_ann > 0 and not (0.5 <= eps_ttm / eps_ann <= 2.0):
+        notes.append(f"분기 합계 EPS({eps_ttm:.2f})가 직전 사업연도 EPS({eps_ann:.2f})와 너무 달라 사업연도 값을 썼습니다.")
+        eps_ttm = None
+    if eps_ttm is None and eps_ann:
+        eps_ttm, src = eps_ann, "직전 사업연도"
     if not eps_ttm or eps_ttm <= 0:
         return dict(err="최근 12개월 이익이 적자라 PER 기반 미래 수익률을 계산할 수 없습니다.")
     per_now = px / eps_ttm
@@ -939,10 +944,16 @@ def forward_score(c, R, fwd=None):
         f = _naive(fwd).dropna()
         if len(f) and f.iloc[-1] > 0:
             n_eps = px / float(f.iloc[-1])
+    g_hist = float(c["g_date"].dropna().iloc[-1] / 100) if c["g_date"] is not None and c["g_date"].notna().any() else None
     if n_eps and n_eps > 0:
-        gs["컨센서스 (12개월 예상 EPS)"] = float(np.clip(n_eps / eps_ttm - 1, -0.6, 1.0))
-    if c["g_date"] is not None and c["g_date"].notna().any():
-        gs["과거 3년 EPS 성장률"] = float(np.clip(c["g_date"].dropna().iloc[-1] / 100, -0.6, 1.0))
+        g_c = n_eps / eps_ttm - 1
+        if abs(g_c) > 0.6 and not (g_hist is not None and abs(g_hist) > 0.4 and np.sign(g_hist) == np.sign(g_c)):
+            notes.append(f"예상 EPS({n_eps:,.2f})가 최근 EPS({eps_ttm:,.2f})보다 {g_c * 100:+.0f}% 달라 자료 오류 가능성이 있어 뺐습니다.")
+            n_eps = None
+        else:
+            gs["컨센서스 (12개월 예상 EPS)"] = float(np.clip(g_c, -0.6, 1.0))
+    if g_hist is not None:
+        gs["과거 3년 EPS 성장률"] = float(np.clip(g_hist, -0.6, 1.0))
     if not gs:
         return dict(err="예상 EPS와 과거 성장률이 모두 없어 미래 수익률을 계산할 수 없습니다.")
     dy = 0.0
@@ -966,17 +977,21 @@ def forward_score(c, R, fwd=None):
         mu_h = (1 + mu) ** (days / 365) - 1
         return 100 * _phi(mu_h / (sig * np.sqrt(days / 365)))
 
+    if prof in ("cyclical", "reit"):  # 경기민감형은 PER 평균이 의미 없고, 리츠는 감가상각 때문에 PER 자체가 왜곡됨
+        notes.append("이 업종은 PER이 기준값으로 돌아간다고 보기 어려워 PER 회귀를 빼고 계산했습니다.")
+        target = np.nan
+    ratio = float(np.clip(target / per_now, 0.67, 1.5)) if np.isfinite(target) else 1.0  # 극단적인 PER 차이는 줄여서 반영
     scen = []
     for gname, g in gs.items():
         for k in (2, 3, 5, None):
-            rev = 1.0 if (k is None or not np.isfinite(target)) else (target / per_now) ** (1 / k)
+            rev = 1.0 if (k is None or not np.isfinite(target)) else ratio ** (1 / k)
             mu = (1 + g) * rev - 1 + dy
             scen.append(dict(g=gname, gv=g, k=k, mu=mu, score=to_score(mu)))
     base_g = "컨센서스 (12개월 예상 EPS)" if "컨센서스 (12개월 예상 EPS)" in gs else next(iter(gs))
     base = next(x for x in scen if x["g"] == base_g and x["k"] == (3 if np.isfinite(target) else None))
     lo, hi = min(x["score"] for x in scen), max(x["score"] for x in scen)
     return dict(mid=base["score"], lo=lo, hi=hi, mu=base["mu"], scen=scen, per_now=per_now, target=target, eps_ttm=eps_ttm,
-                eps_src=src, n_eps=n_eps, dy=dy, sig=sig, consensus="컨센서스 (12개월 예상 EPS)" in gs,
+                eps_src=src, n_eps=n_eps, dy=dy, sig=sig, consensus="컨센서스 (12개월 예상 EPS)" in gs, notes=notes,
                 reliable=("컨센서스 (12개월 예상 EPS)" in gs) and (hi - lo) <= RELIABLE_WIDTH)
 
 
@@ -1114,7 +1129,7 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
         for x in (rs, ra):
             x.update(mid=min(x["mid"], 50), lo=min(x["lo"], 50), hi=min(x["hi"], 50))
     try:
-        rf_ = forward_score(c, R, fwd)
+        rf_ = forward_score(c, R, fwd, prof)
     except Exception as e:  # noqa: BLE001
         rf_ = dict(err=f"계산 실패: {e}")
     st.markdown('<div style="font-size:11px;opacity:.6;margin-bottom:-6px">투자 권유 아님 · 과거 데이터로 계산한 모델 점수</div>',
@@ -1148,8 +1163,10 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
             tb_ = [[x["g"], _p(x["gv"]), "회귀 안 함" if x["k"] is None else f"{x['k']}년", _p(x["mu"]), f"{x['score']:.0f}점"]
                    for x in rf_["scen"]]
             st.markdown(table_html(tb_, ["EPS 성장 가정", "성장률", "PER 회귀 기간", "1년 기대수익률", "점수"]), unsafe_allow_html=True)
-            st.caption("1년 기대수익률 = (1 + EPS 성장률) × (기준 PER ÷ 현재 PER)^(1/회귀 기간) − 1 + 배당수익률. "
-                       "과거 시점의 컨센서스 기록이 없어 이 점수는 과거 검증을 하지 못했습니다.")
+            for t_ in rf_.get("notes", []):
+                st.caption(t_)
+            st.caption("1년 기대수익률 = (1 + EPS 성장률) × (기준 PER ÷ 현재 PER)^(1/회귀 기간) − 1 + 배당수익률 "
+                       "(기준 PER ÷ 현재 PER은 0.67~1.5배로 제한). 과거 시점의 컨센서스 기록이 없어 이 점수는 과거 검증을 하지 못했습니다.")
     if c["peers"]:
         st.caption("동종업계: " + ", ".join(p for p, _ in c["peers"]))
 
