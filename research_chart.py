@@ -190,6 +190,20 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
     except Exception as e:  # noqa: BLE001
         st.caption(f"데이터 점검을 실행하지 못했습니다 ({e}).")
 
+    try:  # 고른 재무비율로 상승·하락 판단 (outlook.py)
+        import outlook
+        daily = {}
+        for k in dsel:
+            if k == "PER (직전 사업연도 EPS)" and ann is not None:
+                daily["PER"] = (ann, "배")
+            elif k == "12M 선행 PER (컨센서스 추이)" and fc is not None:
+                daily["12M PER"] = (fc[0], "배")
+            elif k in _VAL and dv is not None and k in dv:
+                daily[_PER_TRACE.get(k, k)] = (dv[k], DAILY[k])
+        outlook.render_outlook(sec, R, ticker, sel, daily)
+    except Exception as e:  # noqa: BLE001
+        st.caption(f"상승·하락 판단을 계산하지 못했습니다 ({e}).")
+
     if dv is not None:
         from valuation import summary_table
         keys = [k for k in _VAL if k in dv and dv[k].notna().sum() > 20]
