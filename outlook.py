@@ -10,7 +10,7 @@
 업종 유형(성장·기술 / 경기민감 / 금융 / 리츠 / 방어)에 따라 지표 가중치와 PER을 읽는 방법을 바꾼다 (PROFILES).
 추가 신호: 분기 TTM 재무, 모멘텀(12-1개월), 실적 서프라이즈, 동종업계 대비 백분위, 위험 신호 거부권(Altman Z''·Beneish M).
 기대수익률 = CAPM(무위험 + 베타 × 시장 위험프리미엄) + 같은 판정이었던 과거의 평균 알파(사례 수만큼만 반영). 워크포워드로 검증.
-매수·매도 점수(0~100) 세 가지: CAPM 대비(비슷했던 과거 시점이 6개월 뒤 CAPM을 이긴 비율) · 개별(6개월 수익률이 플러스였던 비율) ·
+매수·매도 점수(0~100): CAPM 미포함(6개월 수익률이 플러스였던 비율) · 업종 대비(섹터 ETF를 이긴 비율) · CAPM 대비(CAPM을 이긴 비율) ·
 미래 추정치(예상 EPS 성장 + PER 회귀 + 배당 → 6개월 수익률이 플러스일 확률). 80% 구간이 20점보다 넓으면 범위로 표시.
 """
 import numpy as np
@@ -267,6 +267,42 @@ def _step_at(step: pd.Series, idx) -> pd.Series:
     pos = np.searchsorted(step.index.values, np.asarray(idx, dtype="datetime64[ns]"), side="right") - 1
     vals = np.where(pos >= 0, step.values[np.clip(pos, 0, None)], np.nan)
     return pd.Series(vals, index=idx)
+
+
+SECTOR_ETF = {  # Yahoo 섹터 → 미국 섹터 ETF (업종 평균 수익률 대용)
+    "Technology": ("XLK", "기술"), "Financial Services": ("XLF", "금융"), "Healthcare": ("XLV", "헬스케어"),
+    "Consumer Cyclical": ("XLY", "경기소비재"), "Consumer Defensive": ("XLP", "필수소비재"), "Energy": ("XLE", "에너지"),
+    "Industrials": ("XLI", "산업재"), "Basic Materials": ("XLB", "소재"), "Real Estate": ("XLRE", "부동산"),
+    "Utilities": ("XLU", "유틸리티"), "Communication Services": ("XLC", "커뮤니케이션"),
+}
+
+
+def sector_bench(ticker, info, domestic):
+    """업종 평균 수익률로 쓸 지수 (심볼, 이름). 미국: 섹터 ETF(SPDR), 국내: 업종 지수가 없어 시장 지수."""
+    if domestic:
+        return ("^KQ11", "코스닥 (국내 업종 지수 없음)") if ticker.endswith(".KQ") else ("^KS11", "코스피 (국내 업종 지수 없음)")
+    sec_name = (info or {}).get("sector")
+    if sec_name in SECTOR_ETF:
+        sym, nm = SECTOR_ETF[sec_name]
+        return sym, f"{nm} 업종 ETF {sym}"
+    try:
+        sic, _d = sec_sic(ticker)
+    except Exception:  # noqa: BLE001
+        sic = 0
+    rng = [((6798, 6798), "Real Estate"), ((6500, 6599), "Real Estate"), ((6000, 6799), "Financial Services"),
+           ((4900, 4999), "Utilities"), ((4800, 4899), "Communication Services"), ((1300, 1399), "Energy"),
+           ((2900, 2999), "Energy"), ((2830, 2836), "Healthcare"), ((3841, 3851), "Healthcare"), ((8000, 8099), "Healthcare"),
+           ((7370, 7379), "Technology"), ((3570, 3579), "Technology"), ((3660, 3679), "Technology"),
+           ((2000, 2199), "Consumer Defensive"), ((2840, 2844), "Consumer Defensive"), ((5400, 5499), "Consumer Defensive"),
+           ((3710, 3716), "Consumer Cyclical"), ((5000, 5999), "Consumer Cyclical"), ((7000, 7999), "Consumer Cyclical"),
+           ((1000, 1499), "Basic Materials"), ((2600, 2829), "Basic Materials"), ((3300, 3399), "Basic Materials"),
+           ((1500, 1799), "Industrials"), ((3400, 3569), "Industrials"), ((3580, 3659), "Industrials"),
+           ((3720, 3799), "Industrials"), ((4000, 4799), "Industrials")]
+    for (a, b), nm in rng:
+        if sic and a <= sic <= b:
+            sym, kn = SECTOR_ETF[nm]
+            return sym, f"{kn} 업종 ETF {sym}"
+    return "^GSPC", "S&P 500 (업종 판별 실패)"
 
 
 # ----------------------------------------------------------------------
@@ -561,6 +597,12 @@ def build_ctx(sec, R, ticker, daily, opts, domestic=False, peers=None):
         c["mname"] = {"^KS11": "코스피", "^KQ11": "코스닥", "^GSPC": "S&P 500"}[sym]
     except Exception:  # noqa: BLE001
         pass
+    c["sect"], c["sname"] = None, None
+    try:
+        ssym, c["sname"] = sector_bench(ticker, R.get("info") or {}, domestic)
+        c["sect"] = c["mkt"] if ssym in ("^GSPC", "^KS11", "^KQ11") and c["mkt"] is not None else _naive(_hist_close(ssym)[0])
+    except Exception:  # noqa: BLE001
+        c["sect"] = None
     c["sue"] = _surprises(R.get("edates")) if opts.get("surprise") else pd.Series(dtype=float)
     c["peers"] = []
     if opts.get("peers") and peers and not domestic:
@@ -747,6 +789,8 @@ def evaluate(c, prof, use, rf_now):
             rec[lab] = r
             rec["capm_" + lab] = capm
             rec["a_" + lab] = (r - (rfh + beta * (m - rfh))) if np.isfinite(r) and np.isfinite(m) else (r - capm)
+            sr = _fwd(c["sect"], d, days) if c.get("sect") is not None else np.nan
+            rec["i_" + lab] = r - sr if np.isfinite(r) and np.isfinite(sr) else np.nan
         rows.append(rec)
     return rows, signals, skipped, flags
 
@@ -850,8 +894,8 @@ def validate_profile(prof: str, years: int = 10):
             hp, np_ = _hit_rate(rows_p)
             hg, ng = _hit_rate(rows_g)
             wf = walk_forward(rows_p)["1년"]
-            pts = [(float(r["score"] / r["n"]), float(r["a_" + SCORE_H[0]]), float(r[SCORE_H[0]])) for r in rows_p
-                   if r["n"] and np.isfinite(r["a_" + SCORE_H[0]]) and np.isfinite(r[SCORE_H[0]])]
+            pts = [(float(r["score"] / r["n"]), float(r["a_" + SCORE_H[0]]), float(r[SCORE_H[0]]), float(r["i_" + SCORE_H[0]]))
+                   for r in rows_p if r["n"] and np.isfinite(r["a_" + SCORE_H[0]]) and np.isfinite(r[SCORE_H[0]])]
             return dict(종목=t, hit_p=hp, n_p=np_, hit_g=hg, n_g=ng, mae_m=wf["mae_m"], mae_c=wf["mae_c"], wf_hit=wf["hit"], wf_n=wf["nh"],
                         pts=pts)
         except Exception as e:  # noqa: BLE001
@@ -887,13 +931,15 @@ def _nb_score(pts, s_now, days):
                 mean=float(np.mean(nb)) if nb else np.nan)
 
 
-def rec_score(rows, s_now, pool=None, absolute=False):
-    """CAPM 대비(absolute=False): 이후 6개월 수익률이 CAPM 기대수익률을 넘었나(알파 > 0).
-    개별(absolute=True): 이후 6개월 수익률 자체가 플러스였나."""
+def rec_score(rows, s_now, pool=None, absolute=False, mode=None):
+    """mode: "capm" = 이후 6개월 수익률이 CAPM 기대수익률을 넘었나(알파 > 0) · "abs" = 수익률 자체가 플러스였나 ·
+    "ind" = 같은 기간 업종 평균(섹터 ETF) 수익률을 넘었나."""
+    mode = mode or ("abs" if absolute else "capm")
     lab, days = SCORE_H
-    key = lab if absolute else "a_" + lab
-    own = [(r["score"] / r["n"], r[key]) for r in rows if r["n"] and np.isfinite(r[key])]
-    pl = [(p[0], p[2] if absolute else p[1]) for p in (pool or []) if len(p) >= (3 if absolute else 2)]
+    key = {"abs": lab, "capm": "a_" + lab, "ind": "i_" + lab}[mode]
+    pi = {"capm": 1, "abs": 2, "ind": 3}[mode]
+    own = [(r["score"] / r["n"], r[key]) for r in rows if r["n"] and np.isfinite(r.get(key, np.nan))]
+    pl = [(p[0], p[pi]) for p in (pool or []) if len(p) > pi and np.isfinite(p[pi])]
     out = _nb_score(own + pl, s_now, days)
     out.update(own=sum(1 for s_, _a in own if abs(s_ - s_now) <= out["width"]), pooled=bool(pl))
     return out
@@ -1005,6 +1051,88 @@ def _show_score(col, title, d, reliable, note=""):
         col.caption(f"근거가 부족해 범위로 표시 (가운데 {d['mid']:.0f}점). " + note)
 
 
+def _gauge_svg(title, d, reliable, sub=""):
+    """0~100 원형 점수. 믿을 만하면 한 점(채운 호), 아니면 범위(옅은 호 + 가운데 표시)."""
+    import html as _h
+
+    r, sw, C = 44, 10, 2 * np.pi * 44
+    lo, hi, mid = (max(0.0, min(100.0, d[k])) for k in ("lo", "hi", "mid"))
+    if reliable:
+        col = "#1B9E5A" if mid >= 55 else ("#D9534F" if mid <= 45 else "#8A8F98")
+        arc = (f'<circle cx="60" cy="60" r="{r}" fill="none" stroke="{col}" stroke-width="{sw}" stroke-linecap="round" '
+               f'stroke-dasharray="{mid / 100 * C:.1f} {C:.1f}" transform="rotate(-90 60 60)"/>')
+        big, lab = f"{mid:.0f}", score_label(mid)
+    else:
+        col = "#1B9E5A" if lo >= 55 else ("#D9534F" if hi <= 45 else "#8A8F98")
+        a = (max(hi - lo, 1.5)) / 100 * C
+        arc = (f'<circle cx="60" cy="60" r="{r}" fill="none" stroke="{col}" stroke-opacity=".45" stroke-width="{sw}" '
+               f'stroke-dasharray="{a:.1f} {C:.1f}" stroke-dashoffset="{-lo / 100 * C:.1f}" transform="rotate(-90 60 60)"/>'
+               f'<circle cx="60" cy="60" r="{r}" fill="none" stroke="{col}" stroke-width="{sw + 4}" '
+               f'stroke-dasharray="2 {C:.1f}" stroke-dashoffset="{-mid / 100 * C + 1:.1f}" transform="rotate(-90 60 60)"/>')
+        big, lab = f"{lo:.0f}–{hi:.0f}", ("매수 쪽" if lo >= 55 else ("매도 쪽" if hi <= 45 else "판단 보류"))
+    fs = 26 if reliable else 19
+    return (f'<div style="flex:1 1 150px;max-width:220px;text-align:center">'
+            f'<svg viewBox="0 0 120 120" width="132" height="132" role="img" aria-label="{_h.escape(title)} {big}점">'
+            f'<circle cx="60" cy="60" r="{r}" fill="none" stroke="rgba(128,128,128,.22)" stroke-width="{sw}"/>{arc}'
+            f'<text x="60" y="62" text-anchor="middle" font-size="{fs}" font-weight="700" fill="currentColor">{big}</text>'
+            f'<text x="60" y="82" text-anchor="middle" font-size="11" fill="currentColor" opacity=".7">점</text></svg>'
+            f'<div style="font-weight:600;font-size:14px;margin-top:-4px">{_h.escape(title)}</div>'
+            f'<div style="font-size:13px;color:{col};font-weight:600">{lab}</div>'
+            f'<div style="font-size:11px;opacity:.65;line-height:1.35;margin-top:2px">{_h.escape(sub)}</div></div>')
+
+
+def gauges_html(items):
+    return ('<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:space-around;margin:4px 0 2px">'
+            + "".join(_gauge_svg(*it) for it in items) + "</div>")
+
+
+def summary_scores(sec, R, ticker, sel, daily_names, build_daily, opts, prof, domestic=False):
+    """맨 위 원형 점수 3개용: CAPM 미포함 · 업종 평균 대비 · CAPM 대비. 같은 입력이면 세션 안에서 다시 계산하지 않는다.
+    build_daily() → {표시 이름: (일별 시계열, 단위)} (필요할 때만 계산)."""
+    import stats
+
+    use = [k for k in sel if k in DIR or k in GROWTH]
+    pooled = bool(st.session_state.get(f"rs_val_{prof}")) and not domestic
+    per = R.get("_period")
+    key = (ticker, prof, tuple(use), tuple(sorted(daily_names)), tuple(sorted(opts.items())), str(per), pooled,
+           str(R["hist"].index[-1]) if isinstance(R.get("hist"), pd.Series) and len(R["hist"]) else "")
+    memo = st.session_state.setdefault("_rs_summary", {})
+    if key in memo:
+        return memo[key]
+    if not use and not daily_names and not opts.get("momentum"):
+        return None
+    daily = build_daily()
+    rf_now = stats.risk_free_for(domestic, pd.Timestamp.now().date())[0]
+    c = build_ctx(sec, R, ticker, daily, dict(opts, peers=False), domestic=domestic)
+    rows, signals, _sk, flags = evaluate(c, prof, use, rf_now)
+    if not rows:
+        return None
+    now_d = min(c["end"], c["h"].index[-1])
+    sg = signals(now_d)
+    sc, n = _score(sg)
+    if not n:
+        return None
+    pool = None
+    if pooled:
+        try:
+            res = validate_profile(prof)
+            pool = [tuple(p) for r in res if "pts" in r and r["종목"].upper() != ticker.upper() for p in r["pts"]]
+        except Exception:  # noqa: BLE001
+            pool = None
+    fl = _flags_at(flags, c, now_d) if flags else []
+    out = {}
+    for m in ("abs", "ind", "capm"):
+        d = rec_score(rows, sc / n, pool, mode=m)
+        rel = d["hi"] - d["lo"] <= RELIABLE_WIDTH
+        if fl:
+            d.update(mid=min(d["mid"], 50), lo=min(d["lo"], 50), hi=min(d["hi"], 50))
+        out[m] = (d, rel)
+    res_ = dict(scores=out, verdict=_verdict(sc, n), flags=fl, sname=c["sname"], pooled=bool(pool), n_sig=len(sg))
+    memo.clear()  # 최근 결과 하나만 보관
+    memo[key] = res_
+    return res_
+
+
 def score_label(x):
     return "매수" if x >= 65 else ("약한 매수" if x >= 55 else ("중립·보유" if x > 45 else ("약한 매도" if x > 35 else "매도")))
 
@@ -1112,47 +1240,20 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
     if fl_now:
         st.warning("위험 신호: " + ", ".join(fl_now))
 
-    # ---- 매수·매도 점수 (0~100): CAPM 대비 · 개별(과거 수익률) · 미래 추정치
-    pool = None
-    if st.session_state.get(f"rs_val_{prof}") and not domestic:  # 대표 종목은 미국 종목이라 국내 종목에는 섞지 않음
-        try:
-            with st.spinner("대표 종목 사례를 불러오는 중..."):
-                res = validate_profile(prof)
-            pool = [tuple(p) for r in res if "pts" in r and r["종목"].upper() != ticker.upper() for p in r["pts"]]
-        except Exception:  # noqa: BLE001
-            pool = None
-    s_now = sc / n if n else 0.0
-    rs = rec_score(rows, s_now, pool)
-    ra = rec_score(rows, s_now, pool, absolute=True)
-    rel_c, rel_a = (x["hi"] - x["lo"] <= RELIABLE_WIDTH for x in (rs, ra))  # 신뢰도는 위험 신호로 자르기 전 구간 폭으로 판단
-    if fl_now:  # 위험 신호가 있으면 50점을 넘지 않게
-        for x in (rs, ra):
-            x.update(mid=min(x["mid"], 50), lo=min(x["lo"], 50), hi=min(x["hi"], 50))
+    # ---- 미래 추정치 점수 (CAPM 미포함·업종 대비·CAPM 대비 원형 점수는 이 섹션 위에 표시)
     try:
         rf_ = forward_score(c, R, fwd, prof)
     except Exception as e:  # noqa: BLE001
         rf_ = dict(err=f"계산 실패: {e}")
-    st.markdown('<div style="font-size:11px;opacity:.6;margin-bottom:-6px">투자 권유 아님 · 과거 데이터로 계산한 모델 점수</div>',
-                unsafe_allow_html=True)
-    st.markdown(f"**매수·매도 점수 ({SCORE_H[0]})**")
-    k1, k2, k3 = st.columns(3)
-    _show_score(k1, "CAPM 대비", rs, rel_c, f"비슷했던 과거 {rs['n']}곳 중 {rs['k']}곳이 CAPM 기대수익률을 넘음.")
-    _show_score(k2, "개별 (과거 수익률)", ra, rel_a,
-                f"비슷했던 과거 {ra['n']}곳 중 {ra['k']}곳이 플러스, 평균 {_p(ra['mean'])}.")
+    k1, _k2 = st.columns([1, 2])
     if "err" in rf_:
-        k3.metric("미래 추정치", "계산 불가", delta_color="off")
-        k3.caption(rf_["err"])
+        k1.metric("미래 추정치 점수 (6개월)", "계산 불가", delta_color="off")
+        k1.caption(rf_["err"])
     else:
-        _show_score(k3, "미래 추정치", rf_, rf_["reliable"],
+        _show_score(k1, "미래 추정치 점수 (6개월)", rf_, rf_["reliable"],
                     f"1년 기대수익률 {_p(rf_['mu'])}" + ("" if rf_["consensus"] else " (컨센서스 없음 → 과거 성장률 사용)") + ". 과거 검증 없음.")
-    if fl_now:
-        st.caption("위험 신호가 있어 과거 데이터 기반 두 점수는 50점을 넘지 않게 잘랐습니다.")
-    st.caption("CAPM 대비 = 판정 점수가 지금과 비슷했던 과거 시점들이 이후 6개월 동안 CAPM 기대수익률을 이긴 비율 · "
-               "개별 = 같은 시점들의 이후 6개월 수익률이 플러스였던 비율 (둘 다 기간이 겹치는 만큼 사례를 줄이고 50점 쪽으로 당김"
-               + (f", 이 종목 {rs['own']}곳 + 같은 업종 대표 종목" if rs["pooled"] else "")
-               + ") · 미래 추정치 = 예상 EPS 성장과 PER의 기준값 회귀로 낸 기대수익률을 변동성으로 나눠 6개월 수익률이 플러스일 확률로 바꾼 값. "
-               f"80% 구간이 {RELIABLE_WIDTH}점보다 넓으면 범위로 표시. 50점 = 우위 없음, 65 이상 매수 · 55–65 약한 매수 · 45–55 중립 · "
-               "35–45 약한 매도 · 35 이하 매도.")
+    _k2.caption("예상 EPS 성장과 PER의 기준값 회귀로 낸 1년 기대수익률을 변동성으로 나눠, 6개월 수익률이 플러스일 확률로 바꾼 값입니다. "
+                "과거 데이터로 계산하는 세 가지 점수(CAPM 미포함·업종 대비·CAPM 대비)는 이 그래프 섹션 바로 위 원형 점수에 있습니다.")
     if "err" not in rf_:
         with st.expander("미래 추정치 계산 내역"):
             mgrid([("현재 PER", f"{rf_['per_now']:.1f}배", f"주가 ÷ EPS({rf_['eps_src']}) {rf_['eps_ttm']:.2f}"),
