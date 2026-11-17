@@ -71,11 +71,14 @@ def load_research(ticker: str) -> dict:
     }
     from concurrent.futures import ThreadPoolExecutor
 
-    with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+    with ThreadPoolExecutor(max_workers=8) as ex:  # 한꺼번에 너무 많이 보내면 Yahoo가 요청을 거절한다
         futs = {k: ex.submit(_safe, fn, d) for k, (fn, d) in jobs.items()}
         for k, f in futs.items():
             out[k] = f.result()
     info = out.get("info") or {}
+    if not info or (not info.get("longName") and not info.get("shortName") and not info.get("quoteType")):
+        info = _try(lambda: t.info) or {}  # 동시 요청 중 실패했으면 혼자 한 번 더
+        out["info"] = info
     if not info or (not info.get("longName") and not info.get("shortName") and not info.get("quoteType")):
         raise RuntimeError("기업 정보를 찾지 못했습니다 (티커를 확인해 주세요)")
     return out
