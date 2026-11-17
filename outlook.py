@@ -1010,6 +1010,8 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
     if fl_now:  # 위험 신호가 있으면 50점을 넘지 않게
         rs.update(mid=min(rs["mid"], 50), lo=min(rs["lo"], 50), hi=min(rs["hi"], 50))
     reliable = rs["hi"] - rs["lo"] <= RELIABLE_WIDTH
+    st.markdown('<div style="font-size:11px;opacity:.6;margin-bottom:-6px">투자 권유 아님 · 과거 데이터로 계산한 모델 점수</div>',
+                unsafe_allow_html=True)
     k1, k2 = st.columns([1, 2])
     if reliable:
         k1.metric(f"매수·매도 점수 ({SCORE_H[0]})", f"{rs['mid']:.0f}점", score_label(rs["mid"]),
@@ -1024,8 +1026,7 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
     st.caption(f"점수 = 지금과 판정 점수가 비슷했던 과거 시점(±{rs['width']:g}) {rs['n']}곳 가운데 이후 {SCORE_H[0]} 수익률이 "
                f"CAPM 기대수익률을 넘은 곳 {rs['k']}곳의 비율을, 기간이 겹치는 만큼 사례를 줄여(유효 {rs['n_eff']:.1f}곳) 50점 쪽으로 당긴 값"
                + (f" (이 종목 {rs['own']}곳 + 같은 업종 대표 종목)" if rs["pooled"] else "")
-               + ". 50점 = 시장 대비 우위 없음. 65점 이상 매수 · 55–65 약한 매수 · 45–55 중립 · 35–45 약한 매도 · 35 이하 매도. "
-               "투자 권유가 아닌 모델 계산값입니다.")
+               + ". 50점 = 시장 대비 우위 없음. 65점 이상 매수 · 55–65 약한 매수 · 45–55 중립 · 35–45 약한 매도 · 35 이하 매도.")
     if c["peers"]:
         st.caption("동종업계: " + ", ".join(p for p, _ in c["peers"]))
 
