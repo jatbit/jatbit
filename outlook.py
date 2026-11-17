@@ -8,6 +8,8 @@
 과거 검증: 기간 안의 매달 첫 거래일마다 그때까지 공시된 숫자로 다시 판정하고 그 뒤 1·3·6개월·1년 주가 수익률을 붙인다.
 기대수익률: 과거에 지금과 같은 판정이었던 달들의 이후 수익률 평균 (사례가 적으면 기간 전체 평균 쪽으로 당김).
 업종 유형(성장·기술 / 경기민감 / 금융 / 리츠 / 방어)에 따라 지표 가중치와 PER을 읽는 방법을 바꾼다 (PROFILES).
+추가 신호: 분기 TTM 재무, 모멘텀(12-1개월), 실적 서프라이즈, 동종업계 대비 백분위, 위험 신호 거부권(Altman Z''·Beneish M).
+기대수익률 = CAPM(무위험 + 베타 × 시장 위험프리미엄) + 같은 판정이었던 과거의 평균 알파(사례 수만큼만 반영). 워크포워드로 검증.
 """
 import numpy as np
 import pandas as pd
@@ -123,7 +125,7 @@ def _p(x, nd=1) -> str:
 # ----------------------------------------------------------------------
 # 업종 유형별로 볼 지표 (방법론 해설 문서 '업종별로 봐야 할 지표')
 # w: 가중치(없으면 1), skip: 이 업종에서 판단에 쓰지 않는 지표와 이유, earn: 이익 기준 배수(PER 등)를 읽는 방법
-#   normal = 자기 과거 대비 비싸면 하락 쪽 / peg = 이익 성장률로 나눈 PER(PEG)로 비교 / cycle = PER 대신 이익 사이클 위치
+#   normal = 자기 과거 대비 비싸면 하락 쪽 / peg = 이익 성장률로 나눈 PER(PEG)로 비교 / cycle = PER 대신 평균이익 PER
 # ----------------------------------------------------------------------
 EARN_KEYS = {"PER", "12M PER", "이익수익률 (E/P)"}
 _FIN_SKIP = "부채가 영업 자산인 업종이라 일반 기업 기준이 맞지 않습니다"
@@ -144,7 +146,7 @@ PROFILES = {
         w={"영업이익률": 1.5, "부채비율": 1.5, "이자보상배율": 1.5, "PBR": 1.5, "EV/EBITDA": 1.5},
         skip={},
         why="이익이 경기에 따라 크게 오르내리는 업종입니다. PER이 낮을 때가 이익 고점(이후 하락)이고 높을 때가 이익 바닥인 경우가 많아, "
-            "PER 대신 '이익이 과거 대비 어디쯤인가(이익 사이클)'를 거꾸로 읽고, PBR·EV/EBITDA·재무 안정성에 무게를 둡니다."),
+            "PER 대신 최근 최대 10년 평균 이익으로 나눈 '평균이익 PER'을 보고, PBR·EV/EBITDA·재무 안정성에 무게를 둡니다."),
     "financial": dict(
         name="금융", earn="normal", w={"ROE": 1.5, "PBR": 1.5},
         skip={k: _FIN_SKIP for k in ("부채비율", "유동비율", "이자보상배율", "매출총이익률", "영업이익률", "FCF 마진", "총자산회전율",
@@ -265,8 +267,220 @@ def _step_at(step: pd.Series, idx) -> pd.Series:
     return pd.Series(vals, index=idx)
 
 
-def _annual_signal(k, row, j, pcols, kind):
-    """연간 재무비율의 j번째 사업연도 신호 → (신호, 설명) 또는 None."""
+# ----------------------------------------------------------------------
+# 데이터 준비 (분기 TTM 재무표, 위험 신호용 항목, 동종업계, 실적 서프라이즈)
+# ----------------------------------------------------------------------
+MRP = 0.05  # 시장 위험프리미엄 가정 (CAPM 기준점)
+SHRINK_K = 3.0  # 사례가 적을수록 CAPM 쪽으로 당기는 정도
+VAL_TICKERS = {  # 여러 종목 검증용 대표 종목
+    "growth": ["MSFT", "ADBE", "CRM", "ORCL", "GOOGL", "META", "AMZN", "NOW", "INTU"],
+    "cyclical": ["NVDA", "AMD", "MU", "NUE", "DOW", "F", "GM", "CAT", "XOM"],
+    "financial": ["JPM", "BAC", "WFC", "C", "GS", "MS", "PNC", "USB", "TRV"],
+    "reit": ["O", "PLD", "SPG", "AMT", "PSA", "EQR", "AVB", "WELL", "VTR"],
+    "defensive": ["KO", "PEP", "PG", "DUK", "SO", "VZ", "JNJ", "MO", "CL"],
+    "general": ["HD", "COST", "WMT", "NKE", "UNP", "UPS", "LMT", "HON", "MCD"],
+}
+
+
+def _qflow(facts, tags, unit):
+    """분기별 기간 값 (valuation.quarterly_flow와 같은 방식, 단위 지정)."""
+    import valuation as V
+
+    ents = [e for e in V._entries(facts, "us-gaap", tags, unit) if e["start"]]
+    if not ents:
+        return pd.DataFrame(columns=["val", "filed"])
+    best = V._first_by_key(ents, lambda e: (e["start"], e["end"]))
+    q, by_start = {}, {}
+    for (s_, e_), v in best.items():
+        days = (pd.Timestamp(e_) - pd.Timestamp(s_)).days
+        if 80 <= days <= 100:
+            q[e_] = (v["val"], v["filed"])
+        by_start.setdefault(s_, []).append((e_, days, v))
+    for s_, lst in by_start.items():
+        prev = None
+        for e_, days, v in sorted(lst, key=lambda x: x[0]):
+            if prev is not None:
+                gap = (pd.Timestamp(e_) - pd.Timestamp(prev[0])).days
+                if 80 <= gap <= 100 and e_ not in q:
+                    q[e_] = (v["val"] - prev[2]["val"], max(v["filed"], prev[2]["filed"]))
+            if days >= 80:
+                prev = (e_, days, v)
+    if not q:
+        return pd.DataFrame(columns=["val", "filed"])
+    return pd.DataFrame({"val": {pd.Timestamp(k): v[0] for k, v in q.items()},
+                         "filed": {pd.Timestamp(k): pd.Timestamp(v[1]) for k, v in q.items()}}).sort_index()
+
+
+def _cik(ticker):
+    from research_data import _sec_cik_map
+
+    m = _sec_cik_map()
+    return m.get(ticker.upper()) or m.get(ticker.upper().replace(".", "-"))
+
+
+@st.cache_data(ttl=24 * 60 * 60, show_spinner="SEC 분기 공시로 최근 12개월 재무표를 만드는 중...")
+def quarterly_frame(ticker: str):
+    """분기 말마다 최근 12개월(TTM) 실적 + 분기 말 재무상태표. 열 = 분기 말, '_avail_희석 EPS' = 그 TTM을 알 수 있게 된 날."""
+    import valuation as V
+    from research_data import SEC_ITEMS, sec_facts
+
+    cik = _cik(ticker)
+    if not cik:
+        return None
+    facts = sec_facts(cik)
+    rows, filed = {}, None
+    for name, tags, unit, dur in SEC_ITEMS:
+        if dur and name == "희석주식수":
+            t = _qflow(facts, tags, unit)
+        elif dur:
+            t = V.ttm(_qflow(facts, tags, unit))
+        else:
+            t = V.instant(facts, tags, unit=unit)
+        if len(t):
+            rows[name] = t
+    base = rows.get("매출") if "매출" in rows else rows.get("순이익")
+    if base is None or len(base) < 8:
+        return None
+    ends = list(base.index)
+    df = pd.DataFrame(index=list(rows), columns=ends, dtype=float)
+    for name, t in rows.items():
+        for d in ends:
+            if d in t.index:
+                df.loc[name, d] = t.loc[d, "val"]
+            else:
+                near = t.index[abs((t.index - d).days) <= 10]
+                if len(near):
+                    df.loc[name, d] = t.loc[near[-1], "val"]
+    if "설비투자" in df.index and "영업현금흐름" in df.index:
+        df.loc["잉여현금흐름"] = df.loc["영업현금흐름"] - df.loc["설비투자"].fillna(0)
+    av = pd.Series([float(pd.Timestamp(base.loc[d, "filed"]).toordinal()) for d in ends], index=ends)
+    df.loc["_avail_희석 EPS"] = av
+    df.loc["_filed_희석 EPS"] = av
+    df.loc["_filed_희석주식수"] = av
+    return df.dropna(how="all")
+
+
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def extra_annual(ticker: str) -> dict:
+    """Beneish M-스코어용 연간 항목 (매출채권·판관비·유형자산)."""
+    from research_data import _sec_series, sec_facts
+
+    cik = _cik(ticker)
+    if not cik:
+        return {}
+    facts = sec_facts(cik)
+    items = {"매출채권": (["AccountsReceivableNetCurrent", "ReceivablesNetCurrent"], False),
+             "판관비": (["SellingGeneralAndAdministrativeExpense"], True),
+             "유형자산": (["PropertyPlantAndEquipmentNet"], False)}
+    return {k: _sec_series(facts, tags, "USD", dur) for k, (tags, dur) in items.items()}
+
+
+def _align(ser, cols):
+    out = pd.Series(np.nan, index=cols)
+    if ser is None or not len(ser):
+        return out
+    for c in cols:
+        near = ser.index[abs((ser.index - c).days) <= 10]
+        if len(near):
+            out[c] = ser[near[-1]]
+    return out
+
+
+def red_flags(sec, extra: dict, prof: str) -> dict:
+    """회계연도 말 → 위험 신호 목록. Altman Z''(비제조·제조 공용) 1.1 미만 = 부실 위험, Beneish M −1.78 초과 = 이익 조작 의심."""
+    cols = list(sec.columns)
+    g = lambda k: pd.to_numeric(sec.loc[k], errors="coerce") if k in sec.index else pd.Series(np.nan, index=sec.columns)  # noqa: E731
+    out = {c: [] for c in cols}
+    ta, tl, eq = g("총자산"), g("총부채"), g("자기자본")
+    tl = tl.fillna(ta - eq)
+    if prof not in ("financial", "reit"):
+        z2 = (6.56 * (g("유동자산") - g("유동부채")) + 3.26 * g("이익잉여금") + 6.72 * g("영업이익") + 1.05 * eq * ta / tl) / ta
+        for c in cols:
+            if np.isfinite(z2[c]) and z2[c] < 1.1:
+                out[c].append(f"부실 위험 (Altman Z'' {z2[c]:.2f})")
+    if prof != "financial" and extra:
+        rec, sga, ppe = (_align(extra.get(k), sec.columns) for k in ("매출채권", "판관비", "유형자산"))
+        sales, gp, ca, dep = g("매출"), g("매출총이익"), g("유동자산"), g("감가상각비")
+        ni, cfo = g("순이익"), g("영업현금흐름")
+        p = lambda x: x.shift(1)  # noqa: E731
+        dsri = (rec / sales) / p(rec / sales)
+        gmi = p(gp / sales) / (gp / sales)
+        aqi = (1 - (ca + ppe) / ta) / p(1 - (ca + ppe) / ta)
+        sgi = sales / p(sales)
+        depi = p(dep / (dep + ppe)) / (dep / (dep + ppe))
+        sgai = (sga / sales) / p(sga / sales)
+        tata = (ni - cfo) / ta
+        lvgi = (tl / ta) / p(tl / ta)
+        m = (-4.84 + 0.92 * dsri + 0.528 * gmi + 0.404 * aqi + 0.892 * sgi + 0.115 * depi - 0.172 * sgai.fillna(1)
+             + 4.679 * tata - 0.327 * lvgi)
+        for c in cols:
+            if np.isfinite(m[c]) and m[c] > -1.78:
+                out[c].append(f"이익 조작 의심 (Beneish M {m[c]:.2f})")
+    return out
+
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def _hist_close(sym: str):
+    import yfinance as yf
+
+    t = yf.Ticker(sym)
+    h = t.history(period="max", auto_adjust=False)
+    sp = None
+    try:
+        sp = t.splits
+    except Exception:  # noqa: BLE001
+        pass
+    return h["Close"].dropna(), sp
+
+
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def _peer_ratios(sym: str):
+    """동종업계 한 종목의 연간 재무비율과 공시일."""
+    from research_data import load_sec_financials
+
+    sec = load_sec_financials(sym)
+    h, sp = _hist_close(sym)
+    rt = compute_ratios(sec, h, sp)
+    rt.columns = [pd.Timestamp(c) for c in rt.columns]
+    av = _avail_dates(sec, rt.columns)
+    return rt, av
+
+
+def _surprises(edates) -> pd.Series:
+    """발표일 → 실적 서프라이즈 (실제 EPS − 직전 컨센서스) ÷ |컨센서스|."""
+    if not isinstance(edates, pd.DataFrame) or edates.empty or not {"EPS Estimate", "Reported EPS"} <= set(edates.columns):
+        return pd.Series(dtype=float)
+    e = edates.copy()
+    e.index = pd.to_datetime(e.index)
+    if e.index.tz is not None:
+        e.index = e.index.tz_localize(None)
+    e.index = e.index.normalize()
+    est, rep = pd.to_numeric(e["EPS Estimate"], errors="coerce"), pd.to_numeric(e["Reported EPS"], errors="coerce")
+    s = ((rep - est) / est.abs().clip(lower=0.01)).dropna()
+    return s[~s.index.duplicated(keep="last")].sort_index()
+
+
+def _px_before(h, d):
+    x = h[h.index <= pd.Timestamp(d)]
+    return float(x.iloc[-1]) if len(x) else np.nan
+
+
+def _rf_at(d, domestic, rf_now):
+    if domestic:
+        return rf_now
+    try:
+        import stats
+
+        got = stats.us10y_asof(pd.Timestamp(d).date())
+        return float(got[0]) if got else rf_now
+    except Exception:  # noqa: BLE001
+        return rf_now
+
+
+# ----------------------------------------------------------------------
+# 신호 계산
+# ----------------------------------------------------------------------
+def _ratio_signal(k, row, j, pcols, kind, lag, min_n):
     v = row.iloc[j]
     if not np.isfinite(v):
         return None
@@ -274,109 +488,299 @@ def _annual_signal(k, row, j, pcols, kind):
     fmt = _fmt(unit)
     if kind in ("level", "peg"):
         past = np.array([row[c] for c in pcols if c <= row.index[j] and np.isfinite(row[c])])
-        if len(past) < 3:
+        if len(past) < min_n:
             return None
         p = _pctile(past, v)
         lab = f"PEG {v:.2f}" if kind == "peg" else fmt(v)
         return _val_sig(p, DIR.get(k, -1)), f"{lab} · 기간 내 백분위 {p * 100:.0f}%"
     if kind == "growth":
         return (1 if v > 1 else (-1 if v < -1 else 0)), fmt(v)
-    if j == 0:
+    if j - lag < 0:
         return None
-    prev = row.iloc[j - 1]
+    prev = row.iloc[j - lag]
     if not np.isfinite(prev):
         return None
     ch = v - prev
     sig = int(np.sign(ch)) * DIR[k] if abs(ch) > 0.02 * abs(prev) else 0
-    return sig, f"{fmt(prev)} → {fmt(v)}"
+    return sig, f"1년 전 {fmt(prev)} → {fmt(v)}"
 
 
-def _daily_signal(s, unit, start, d, peg=False):
+def _daily_signal(s, unit, start, d, label="", direction=None):
     vals = s[(s.index >= start) & (s.index <= pd.Timestamp(d))].dropna()
     if len(vals) < 120:
         return None
     v = float(vals.iloc[-1])
     p = _pctile(vals.values, v)
-    direction = 1 if unit == "%" else -1  # 이익수익률·배당수익률 같은 %는 높을수록 쌈
-    lab = f"PEG {v:.2f}" if peg else (f"{v:.2f}%" if unit == "%" else f"{v:.1f}배")
+    direction = direction if direction is not None else (1 if unit == "%" else -1)  # 배당수익률 같은 %는 높을수록 쌈
+    lab = f"{label} {v:.2f}" if label else (f"{v:.2f}%" if unit == "%" else f"{v:.1f}배")
     return _val_sig(p, direction), f"{lab} · 기간 내 백분위 {p * 100:.0f}%"
 
 
-def _cycle_signal(eps_tb, d):
-    """이익 사이클 위치: 그날까지 공시된 연간 EPS 중 최근 값의 백분위. 고점권이면 하락 쪽, 바닥권이면 상승 쪽."""
-    if eps_tb is None:
-        return None
-    e = eps_tb["EPS"][eps_tb.index <= pd.Timestamp(d)].dropna()
-    if len(e) < 5:
-        return None
-    v = float(e.iloc[-1])
-    p = _pctile(e.values, v)
-    where = "고점권" if p >= 0.8 else ("바닥권" if p <= 0.2 else "중간")
-    return (-1 if p >= 0.8 else (1 if p <= 0.2 else 0)), f"EPS {v:.2f} · 과거 대비 백분위 {p * 100:.0f}% ({where})"
+def build_ctx(sec, R, ticker, daily, opts, domestic=False, peers=None):
+    """판정에 필요한 데이터를 한 번에 준비 (업종 유형과 무관한 부분)."""
+    h = _naive(R["hist"])
+    c = dict(h=h, sec=sec, splits=R.get("splits"), opts=opts, domestic=domestic, ticker=ticker)
+    period = R.get("_period")
+    rt_a = compute_ratios(sec, R["hist"], R.get("splits"))
+    rt_a.columns = [pd.Timestamp(x) for x in rt_a.columns]
+    c["rt_a"], c["avail_a"] = rt_a, _avail_dates(sec, rt_a.columns)
+    c["start"] = pd.Timestamp(period[0]) if period else rt_a.columns[0]
+    c["end"] = pd.Timestamp(period[1]) + pd.Timedelta(days=1) if period else h.index[-1]
+    qf = None
+    if opts.get("quarterly") and not domestic:
+        try:
+            qf = quarterly_frame(ticker)
+        except Exception:  # noqa: BLE001
+            qf = None
+    if qf is not None and qf.shape[1] >= 8:
+        rt = compute_ratios(qf, R["hist"], R.get("splits"), lag=4)
+        rt.columns = [pd.Timestamp(x) for x in rt.columns]
+        c.update(rt=rt, avail=_avail_dates(qf, rt.columns), lag=4, min_n=8, freq="분기")
+    else:
+        c.update(rt=rt_a, avail=c["avail_a"], lag=1, min_n=3, freq="연간")
+    c["cols"] = list(c["rt"].columns)
+    c["pcols"] = [x for x in c["cols"] if c["start"] <= x <= c["end"]]
+    c["dser"] = {nm: (_naive(s), u) for nm, (s, u) in daily.items() if isinstance(s, pd.Series) and len(s)}
+    c["eps_tb"] = annual_eps_table(sec, R.get("splits"))
+    c["g_date"], _ = _eps_growth(sec, R.get("splits"))
+    tb = c["eps_tb"]
+    if tb is not None and len(tb) >= 5:  # 평균이익(최근 최대 10년, 최소 5년) — 경기민감형 PER용
+        e = tb["EPS"].values
+        avg = [np.mean(e[max(0, i - 9):i + 1]) if i >= 4 else np.nan for i in range(len(e))]
+        step = pd.Series(avg, index=tb.index)
+        st_ = _step_at(step, h.index)
+        c["norm_per"] = pd.Series(np.where(st_ > 0, h.values / st_.values, np.nan), index=h.index)
+    else:
+        c["norm_per"] = None
+    c["mkt"], c["mname"] = None, None
+    sym = "^KS11" if ticker.endswith(".KS") else ("^KQ11" if ticker.endswith(".KQ") else "^GSPC")
+    try:
+        c["mkt"] = _naive(_index_hist(sym))
+        c["mname"] = {"^KS11": "코스피", "^KQ11": "코스닥", "^GSPC": "S&P 500"}[sym]
+    except Exception:  # noqa: BLE001
+        pass
+    c["sue"] = _surprises(R.get("edates")) if opts.get("surprise") else pd.Series(dtype=float)
+    c["peers"] = []
+    if opts.get("peers") and peers and not domestic:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def one(p):
+            try:
+                return p, _peer_ratios(p)
+            except Exception:  # noqa: BLE001
+                return p, None
+
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            c["peers"] = [(p, r) for p, r in ex.map(one, [p for p in peers if p.upper() != ticker.upper()][:10]) if r is not None]
+    c["extra"] = {}
+    if opts.get("flags") and not domestic:
+        try:
+            c["extra"] = extra_annual(ticker)
+        except Exception:  # noqa: BLE001
+            c["extra"] = {}
+    # 주간 수익률 (베타 추정용)
+    hw = h.resample("W-FRI").last().pct_change()
+    c["hw"] = hw
+    c["mw"] = c["mkt"].resample("W-FRI").last().pct_change() if c["mkt"] is not None else None
+    return c
 
 
-def _make_signals(prof, use, rt, cols, pcols, dser, start, sec, splits):
-    """업종 유형 prof 기준 신호 함수 → signals(j, d) = {이름: (신호, 설명, 가중치)}, 제외 목록."""
+def _beta(c, d):
+    if c["mw"] is None:
+        return 1.0
+    d = pd.Timestamp(d)
+    a = c["hw"][(c["hw"].index > d - pd.Timedelta(days=730)) & (c["hw"].index <= d)]
+    b = c["mw"].reindex(a.index)
+    m = a.notna() & b.notna()
+    if m.sum() < 52 or float(b[m].var()) <= 0:
+        return 1.0
+    beta = float(np.cov(a[m], b[m])[0, 1] / b[m].var())
+    return 0.67 * beta + 0.33  # 블룸 조정 (1 쪽으로 당김)
+
+
+def make_signals(c, prof, use):
+    """업종 유형 prof 기준 신호 함수 signals(d) → {이름: (신호, 설명, 가중치)}, 제외 목록."""
     P = PROFILES[prof]
-    skipped = {}
-    ann = []  # (이름, 행, 종류)
-    g_date, g_fy = _eps_growth(sec, splits) if P["earn"] == "peg" else (None, None)
+    o = c["opts"]
+    skipped, ann = {}, []
+    g_date = c["g_date"]
+    rt, cols, lag = c["rt"], c["cols"], c["lag"]
     for k in use:
         if k in P["skip"]:
             skipped[k] = P["skip"][k]
+            continue
+        if k not in rt.index:
             continue
         if k in VALN:
             if k in EARN_KEYS and P["earn"] == "cycle":
                 continue
             if k in EARN_KEYS and P["earn"] == "peg":
-                g = g_fy.reindex(cols) if g_fy is not None else pd.Series(np.nan, index=cols)
-                ann.append((k, (rt.loc[k] / g.where(g > 0)), "peg"))
+                g = _step_at(g_date, [c["avail"][x] for x in cols]) if g_date is not None else pd.Series(np.nan, index=cols)
+                g.index = cols
+                ann.append((k, rt.loc[k] / g.where(g > 0), "peg"))
             else:
                 ann.append((k, rt.loc[k], "level"))
         elif k in GROWTH:
             ann.append((k, rt.loc[k], "growth"))
         else:
             ann.append((k, rt.loc[k], "change"))
-    daily = []  # (이름, 시계열, 단위, peg)
-    has_earn = any(k in EARN_KEYS for k in use) or any(nm in EARN_KEYS for nm in dser)
-    for nm, (s, u) in dser.items():
+    daily = []
+    has_earn = any(k in EARN_KEYS for k in use) or any(nm in EARN_KEYS for nm in c["dser"])
+    for nm, (s, u) in c["dser"].items():
         if nm in P["skip"]:
             skipped[nm] = P["skip"][nm]
             continue
         if nm in EARN_KEYS and P["earn"] == "cycle":
             continue
         if nm in EARN_KEYS and P["earn"] == "peg" and u != "%":
-            if g_date is None:
-                g_date, _ = _eps_growth(sec, splits)
             g = _step_at(g_date, s.index)
-            daily.append((nm, s / g.where(g > 0).values, u, True))
+            daily.append((nm + " (성장 대비)", s / g.where(g > 0).values, u, "PEG", None, P["w"].get(nm, 1.0)))
         else:
-            daily.append((nm, s, u, False))
-    eps_tb = annual_eps_table(sec, splits) if (P["earn"] == "cycle" and has_earn) else None
+            daily.append((nm, s, u, "", None, P["w"].get(nm, 1.0)))
+    if P["earn"] == "cycle" and has_earn and c["norm_per"] is not None:
+        daily.append(("평균이익 PER", c["norm_per"], "배", "", -1, 1.5))
+    peer_keys = [k for k in use if k in c["rt_a"].index and k not in P["skip"]] if c["peers"] else []
+    h, mkt = c["h"], c["mkt"]
 
-    def signals(j, d):
+    def fy_at(d):
+        ok = [x for x in cols if c["avail"][x] <= d]
+        return ok[-1] if ok and (pd.Timestamp(d) - ok[-1]).days <= 550 else None
+
+    def signals(d):
         out = {}
-        for k, row, kind in ann:
-            r = _annual_signal(k, row, j, pcols, kind)
+        col = fy_at(d)
+        if col is not None:
+            j = cols.index(col)
+            for k, row, kind in ann:
+                r = _ratio_signal(k, row, j, c["pcols"], kind, lag, c["min_n"])
+                if r is not None:
+                    out[k + (" (성장 대비)" if kind == "peg" else "")] = (r[0], r[1], P["w"].get(k, 1.0))
+        for nm, s, u, lab, dirn, w in daily:
+            r = _daily_signal(s, u, c["start"], d, lab, dirn)
             if r is not None:
-                out[k + (" (성장 대비)" if kind == "peg" else "")] = (r[0], r[1], P["w"].get(k, 1.0))
-        for nm, s, u, peg in daily:
-            r = _daily_signal(s, u, start, d, peg)
-            if r is not None:
-                out[nm + (" (성장 대비)" if peg else "")] = (r[0], r[1], P["w"].get(nm, 1.0))
-        if eps_tb is not None:
-            r = _cycle_signal(eps_tb, d)
-            if r is not None:
-                out["이익 사이클 위치"] = (r[0], r[1], 1.5)
+                out[nm] = (r[0], r[1], w)
+        if o.get("momentum"):
+            p0, p1 = _px_before(h, pd.Timestamp(d) - pd.Timedelta(days=365)), _px_before(h, pd.Timestamp(d) - pd.Timedelta(days=30))
+            if np.isfinite(p0) and np.isfinite(p1) and p0 > 0:
+                r = p1 / p0 - 1
+                ex = r
+                if mkt is not None:
+                    m0, m1 = _px_before(mkt, pd.Timestamp(d) - pd.Timedelta(days=365)), _px_before(mkt, pd.Timestamp(d) - pd.Timedelta(days=30))
+                    if np.isfinite(m0) and np.isfinite(m1) and m0 > 0:
+                        ex = r - (m1 / m0 - 1)
+                sig = 1 if ex > 0.05 else (-1 if ex < -0.05 else 0)
+                out["모멘텀 (12-1개월)"] = (sig, f"{r * 100:+.1f}%" + (f" · 지수 대비 {ex * 100:+.1f}%p" if mkt is not None else ""), 1.0)
+        sue = c["sue"]
+        if len(sue):
+            past = sue[sue.index <= pd.Timestamp(d)]
+            if len(past) and (pd.Timestamp(d) - past.index[-1]).days <= 91:
+                v = float(past.iloc[-1])
+                if len(past) >= 6:
+                    p = _pctile(past.values, v)
+                    sig = 1 if p >= 0.7 else (-1 if p <= 0.3 else 0)
+                    extra = f" · 과거 서프라이즈 중 백분위 {p * 100:.0f}%"
+                else:
+                    sig = 1 if v > 0.05 else (-1 if v < -0.05 else 0)
+                    extra = ""
+                out["실적 서프라이즈"] = (sig, f"예상 대비 {v * 100:+.1f}% ({past.index[-1]:%Y-%m-%d} 발표){extra}", 1.0)
+        if peer_keys:
+            col_a = [x for x in c["rt_a"].columns if c["avail_a"][x] <= d]
+            if col_a and (pd.Timestamp(d) - col_a[-1]).days <= 550:
+                ca = col_a[-1]
+                for k in peer_keys:
+                    me = c["rt_a"].loc[k, ca]
+                    if not np.isfinite(me):
+                        continue
+                    vals = []
+                    for _p_, (prt, pav) in c["peers"]:
+                        if k not in prt.index:
+                            continue
+                        pc = [x for x in prt.columns if pav[x] <= d]
+                        if pc and (pd.Timestamp(d) - pc[-1]).days <= 550 and np.isfinite(prt.loc[k, pc[-1]]):
+                            vals.append(float(prt.loc[k, pc[-1]]))
+                    if len(vals) < 4:
+                        continue
+                    p = _pctile(np.array(vals + [me]), me)
+                    dirn = DIR.get(k, 1)
+                    sig = dirn if p >= 0.8 else (-dirn if p <= 0.2 else 0)
+                    out[f"{k} (동종업계 대비)"] = (sig, f"{_fmt(RATIOS[k][0])(me)} · {len(vals)}개사 중 백분위 {p * 100:.0f}%", 1.0)
         return out
 
     return signals, skipped
 
 
 def _score(sg: dict):
-    sc = sum(v[0] * v[2] for v in sg.values())
-    n = sum(v[2] for v in sg.values())
-    return sc, n
+    return sum(v[0] * v[2] for v in sg.values()), sum(v[2] for v in sg.values())
+
+
+def _flags_at(flags, c, d):
+    ok = [x for x in flags if c["avail_a"].get(pd.Timestamp(x), pd.Timestamp.max) <= d]
+    return flags[ok[-1]] if ok else []
+
+
+def evaluate(c, prof, use, rf_now):
+    """매달 첫 거래일 판정과 이후 수익률(1·3·6개월·1년), CAPM 기대수익률, 실현 알파."""
+    signals, skipped = make_signals(c, prof, use)
+    flags = red_flags(c["sec"], c["extra"], prof) if c["opts"].get("flags") else {}
+    h, mkt = c["h"], c["mkt"]
+    hp = h[(h.index >= c["start"]) & (h.index <= c["end"])]
+    dates = list(hp.groupby([hp.index.year, hp.index.month]).head(1).index)
+    rows = []
+    for d in dates:
+        sg = signals(d)
+        if not sg:
+            continue
+        sc, n = _score(sg)
+        vd = _verdict(sc, n)
+        fl = _flags_at(flags, c, d) if flags else []
+        if fl and vd == "상승 우세":
+            vd = "중립"
+        beta, rf = _beta(c, d), _rf_at(d, c["domestic"], rf_now)
+        rec = dict(d=d, sig=sg, score=sc, n=n, verdict=vd, flags=fl, beta=beta, rf=rf)
+        for lab, days in HORIZONS:
+            r = _fwd(h, d, days)
+            m = _fwd(mkt, d, days) if mkt is not None else np.nan
+            rfh = (1 + rf) ** (days / 365) - 1
+            capm = (1 + rf + beta * MRP) ** (days / 365) - 1
+            rec[lab] = r
+            rec["capm_" + lab] = capm
+            rec["a_" + lab] = (r - (rfh + beta * (m - rfh))) if np.isfinite(r) and np.isfinite(m) else (r - capm)
+        rows.append(rec)
+    return rows, signals, skipped, flags
+
+
+def _alpha_est(sample, days):
+    """같은 판정 사례의 평균 알파를 사례 수만큼만 믿고 0(=CAPM) 쪽으로 당김."""
+    a = np.array([x for x in sample if np.isfinite(x)])
+    if not len(a):
+        return 0.0, 0
+    n_eff = len(a) * min(1.0, 30 / days)  # 매달 판정하므로 기간이 겹치는 만큼 독립 사례는 적다
+    return float(n_eff / (n_eff + SHRINK_K) * a.mean()), len(a)
+
+
+def walk_forward(rows):
+    """각 판정 시점에 '그때까지 결과가 나온 과거 사례'만으로 예측 → 실제와 비교."""
+    out = {}
+    for lab, days in HORIZONS:
+        em, ec, hit, nh = [], [], 0, 0
+        for r in rows:
+            if not np.isfinite(r[lab]):
+                continue
+            prior = [k["a_" + lab] for k in rows if k["d"] + pd.Timedelta(days=days) <= r["d"] and k["verdict"] == r["verdict"]]
+            a, n = _alpha_est(prior, days)
+            pred = r["capm_" + lab] + a
+            em.append(abs(r[lab] - pred))
+            ec.append(abs(r[lab] - r["capm_" + lab]))
+            if a != 0 and np.isfinite(r["a_" + lab]) and r["a_" + lab] != 0:
+                nh += 1
+                hit += int(np.sign(a) == np.sign(r["a_" + lab]))
+        out[lab] = dict(mae_m=np.mean(em) if em else np.nan, mae_c=np.mean(ec) if ec else np.nan, hit=hit, nh=nh, n=len(em))
+    return out
+
+
+def _hit_rate(rows, key="score"):
+    dd = [r for r in rows if np.isfinite(r["1년"]) and r.get(key, 0) != 0 and r["1년"] != 0]
+    return sum(1 for r in dd if np.sign(r[key]) == np.sign(r["1년"])), len(dd)
 
 
 def _w(x) -> str:
@@ -387,12 +791,81 @@ def _set_rec(key, vals):
     st.session_state[key] = vals
 
 
-def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=None, ms_key=None) -> None:
+def _split_rec(prof, dv_keys):
+    """업종 추천 지표 → (연간 재무비율 목록, 일별 지표 이름 목록)."""
+    ann, daily = [], []
+    for k in PROFILES[prof]["rec"]:
+        if k == "주가":
+            continue
+        if k == "PER (직전 사업연도 EPS)":
+            daily.append("PER")
+        elif k == "12M 선행 PER (컨센서스 추이)":
+            continue
+        elif k in dv_keys:
+            daily.append(k)
+        elif k in RATIOS:
+            ann.append(k)
+    return ann, daily
+
+
+@st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False)
+def validate_profile(prof: str, years: int = 10):
+    """업종 유형의 대표 종목들에 같은 규칙(추천 지표·분기 TTM·모멘텀·위험 신호)을 적용한 결과."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    import stats
+    import valuation as V
+    from research_data import annual_per_series, load_sec_financials
+
+    rf_now = stats.risk_free_for(False, pd.Timestamp.now().date())[0]
+    end = pd.Timestamp.now().normalize()
+    period = (end - pd.Timedelta(days=int(365.25 * years)), end)
+
+    def one(t):
+        try:
+            sec = load_sec_financials(t)
+            h, sp = _hist_close(t)
+            daily = {}
+            ann = annual_per_series(h, sec, sp)
+            if ann is not None:
+                daily["PER"] = (ann, "배")
+            try:
+                dv = V.daily_valuation(V.load_quarterly(t), h, sp)
+            except Exception:  # noqa: BLE001
+                dv = None
+            dv_keys = [k for k in V.VAL if dv is not None and k in dv and dv[k].notna().sum() > 20]
+            a_use, d_use = _split_rec(prof, dv_keys)
+            d_use_g = d_use
+            for k in d_use:
+                if k != "PER" and dv is not None:
+                    daily[k] = (dv[k], V.VAL[k][0])
+            daily = {k: v for k, v in daily.items() if k in d_use_g}
+            R = {"hist": h, "splits": sp, "_period": period}
+            opts = dict(quarterly=True, momentum=True, surprise=False, peers=False, flags=True)
+            c = build_ctx(sec, R, t, daily, opts)
+            rows_p = evaluate(c, prof, a_use, rf_now)[0]
+            rows_g = evaluate(c, "general", a_use, rf_now)[0]
+            hp, np_ = _hit_rate(rows_p)
+            hg, ng = _hit_rate(rows_g)
+            wf = walk_forward(rows_p)["1년"]
+            return dict(종목=t, hit_p=hp, n_p=np_, hit_g=hg, n_g=ng, mae_m=wf["mae_m"], mae_c=wf["mae_c"], wf_hit=wf["hit"], wf_n=wf["nh"])
+        except Exception as e:  # noqa: BLE001
+            return dict(종목=t, err=str(e)[:80])
+
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        return list(ex.map(one, VAL_TICKERS.get(prof, [])))
+
+
+# ----------------------------------------------------------------------
+# 화면
+# ----------------------------------------------------------------------
+def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=None, ms_key=None, domestic=False) -> None:
     """sel: 고른 연간 재무비율 이름, daily: {표시 이름: (일별 시계열, 단위)} — 고른 일별 밸류에이션."""
     from glossary import table_html
     from options import mgrid
 
     st.markdown("##### 상승·하락 판단")
+    domestic = bool(domestic or "_ksec" in R)
     hist = R.get("hist")
     if sec is None or not isinstance(hist, pd.Series) or not len(hist):
         st.caption("재무제표나 주가가 없어 판단할 수 없습니다.")
@@ -423,120 +896,114 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
             st.caption("이 업종에서 볼 지표: " + ", ".join(names.get(k, k) for k in rec if k != "주가"))
             st.button("이 지표들로 바꾸기", key=f"rs_rec_{ticker}_{prof}", on_click=_set_rec, args=(ms_key, rec))
 
+    with st.expander("판정에 넣을 신호"):
+        o1, o2 = st.columns(2)
+        opts = dict(
+            quarterly=o1.toggle("분기 실적으로 갱신 (최근 12개월)", value=not domestic, key=f"rs_o_q_{ticker}", disabled=domestic,
+                                help="연간 재무제표 대신 분기마다 최근 12개월 합계로 재무비율을 다시 계산합니다 (미국 SEC 공시 종목)."),
+            momentum=o1.toggle("모멘텀 (12-1개월 수익률)", value=True, key=f"rs_o_m_{ticker}",
+                               help="최근 12개월 수익률(직전 1개월 제외)이 지수보다 5%p 넘게 높으면 상승 쪽, 낮으면 하락 쪽."),
+            surprise=o1.toggle("실적 서프라이즈", value=True, key=f"rs_o_s_{ticker}",
+                               help="최근 분기 실적이 발표 직전 컨센서스보다 얼마나 좋았나 (발표 후 91일 동안). 이 회사의 과거 서프라이즈와 비교합니다."),
+            peers=o2.toggle("동종업계 비교", value=False, key=f"rs_o_p_{ticker}", disabled=domestic,
+                            help="고른 재무비율이 동종업계 비교 탭의 회사들 가운데 상위·하위 20%인지. 처음 켜면 회사들 재무제표를 받느라 30초쯤 걸립니다."),
+            flags=o2.toggle("위험 신호 거부권 (Altman Z'' · Beneish M)", value=True, key=f"rs_o_f_{ticker}",
+                            help="부실 위험(Z'' 1.1 미만)이나 이익 조작 의심(M −1.78 초과)이면 '상승 우세'를 '중립'으로 낮춥니다."),
+        )
+        if domestic:
+            st.caption("국내 종목은 분기 재무와 동종업계 비교를 아직 지원하지 않습니다 (DART 연간 재무제표 기준).")
+
     use = [k for k in sel if k in DIR or k in GROWTH]
     no_dir = [k for k in sel if k not in use]
-    if not use and not daily:
+    if not use and not daily and not opts["momentum"]:
         st.info("위 '그래프 항목'에서 재무비율이나 PER 같은 밸류에이션을 하나 이상 고르면 판단합니다.")
         return
-    h = _naive(hist)
-    rt = compute_ratios(sec, hist, R.get("splits"))
-    cols = [pd.Timestamp(c) for c in rt.columns]
-    rt.columns = cols
-    period = R.get("_period")
-    start = pd.Timestamp(period[0]) if period else cols[0]
-    end = pd.Timestamp(period[1]) + pd.Timedelta(days=1) if period else h.index[-1]
-    pcols = [c for c in cols if start <= c <= end]
-    if not pcols:
-        st.caption("고른 기간 안에 사업연도가 없어 판단할 수 없습니다.")
-        return
-    avail = _avail_dates(sec, cols)
-    dser = {nm: (_naive(s), u) for nm, (s, u) in daily.items() if isinstance(s, pd.Series) and len(s)}
-    fs = fscore(sec, R.get("splits"))
-    fs.index = [pd.Timestamp(c) for c in fs.index]
-    signals, skipped = _make_signals(prof, use, rt, cols, pcols, dser, start, sec, R.get("splits"))
-    base_sig = signals if prof == "general" else _make_signals("general", use, rt, cols, pcols, dser, start, sec, R.get("splits"))[0]
+    peers = None
+    if opts["peers"]:
+        try:
+            from peers import us_peer_list
 
-    mkt, mname = None, None
-    sym = "^KS11" if ticker.endswith(".KS") else ("^KQ11" if ticker.endswith(".KQ") else "^GSPC")
-    try:
-        mkt = _naive(_index_hist(sym))
-        mname = {"^KS11": "코스피", "^KQ11": "코스닥", "^GSPC": "S&P 500"}[sym]
-    except Exception:  # noqa: BLE001
-        mkt = None
+            peers, _desc = us_peer_list(ticker, info)
+        except Exception:  # noqa: BLE001
+            peers = None
+    import stats
 
-    # ---- 과거 판정: 기간 안의 매달 첫 거래일마다 그때까지 공시된 최근 사업연도 + 그날 밸류에이션으로 다시 판정
-    def fy_at(d):
-        ok = [c for c in cols if avail[c] <= d]
-        return ok[-1] if ok else None
-
-    hp = h[(h.index >= start) & (h.index <= end)]
-    dates = list(hp.groupby([hp.index.year, hp.index.month]).head(1).index)
-    rows = []
-    for d in dates:
-        c = fy_at(d)
-        if c is None:
-            continue
-        j = cols.index(c)
-        sg = signals(j, d)
-        sc, n = _score(sg)
-        rec_ = dict(d=d, fy=c, sig=sg, score=sc, n=n, verdict=_verdict(sc, n))
-        if base_sig is not signals:
-            bsc, bn = _score(base_sig(j, d))
-            rec_["bscore"] = bsc
-        for lab, days in HORIZONS:
-            rec_[lab] = _fwd(h, d, days)
-        m = _fwd(mkt, d, 365) if mkt is not None else np.nan
-        rec_["ex"] = rec_["1년"] - m if np.isfinite(rec_["1년"]) and np.isfinite(m) else np.nan
-        rows.append(rec_)
+    rf_now, rf_lab = stats.risk_free_for(domestic, pd.Timestamp.now().date())
+    with st.spinner("과거 시점마다 다시 판정하는 중..."):
+        c = build_ctx(sec, R, ticker, daily, opts, domestic=domestic, peers=peers)
+        rows, signals, skipped, flags = evaluate(c, prof, use, rf_now)
     if not rows:
         st.caption("고른 기간 안에 판정할 수 있는 시점이 없습니다.")
         return
 
-    # ---- 지금 판단: 가장 최근 공시 사업연도 재무비율 + 오늘 기준 밸류에이션
-    now_d = min(end, h.index[-1])
-    fy_now = fy_at(now_d)
-    now_sig = signals(cols.index(fy_now), now_d)
+    # ---- 지금 판단
+    h = c["h"]
+    now_d = min(c["end"], h.index[-1])
+    now_sig = signals(now_d)
     sc, n = _score(now_sig)
     vd = _verdict(sc, n)
     if vd is None:
         st.caption("고른 항목의 값이 부족해 판단할 수 없습니다 (전년 값이 없거나 비교할 과거 값이 적음).")
-        for k, why in skipped.items():
-            st.caption(f"{k}: {why}")
         return
-    msg = (f"**{vd}** — 점수 {sc:+.1f} / {n:.1f} ({P['name']} 기준, {fy_now:%Y}년 사업연도 공시 {avail[fy_now]:%Y-%m-%d}, "
-           f"밸류에이션은 {now_d:%Y-%m-%d} 기준)")
+    fl_now = _flags_at(flags, c, now_d) if flags else []
+    capped = bool(fl_now) and vd == "상승 우세"
+    if capped:
+        vd = "중립"
+    msg = (f"**{vd}**{' (위험 신호로 낮춤)' if capped else ''} — 점수 {sc:+.1f} / {n:.1f} "
+           f"({P['name']} 기준 · {c['freq']} 재무 · {now_d:%Y-%m-%d})")
     (st.success if vd == "상승 우세" else st.error if vd == "하락 우세" else st.info)(msg)
+    if fl_now:
+        st.warning("위험 신호: " + ", ".join(fl_now))
+    if c["peers"]:
+        st.caption("동종업계: " + ", ".join(p for p, _ in c["peers"]))
 
-    # ---- 향후 기대수익률: 과거에 같은 판정이었던 때의 수익률 (사례가 적으면 전체 평균 쪽으로 당김)
+    # ---- 향후 기대수익률 = CAPM 기대수익률 + 판정에 따른 보정(과거 같은 판정의 평균 알파, 사례 수만큼만 반영)
+    beta_now = _beta(c, now_d)
     st.markdown("**향후 기대수익률**")
     ftb = []
     for lab, days in HORIZONS:
-        allr = np.array([r[lab] for r in rows if np.isfinite(r[lab])])
-        same = np.array([r[lab] for r in rows if np.isfinite(r[lab]) and r["verdict"] == vd])
-        if not len(allr):
-            ftb.append([lab, "-", "-", "-", "-", "0"])
-            continue
-        n_eff = len(same) * min(1.0, 30 / days)  # 매달 판정하므로 기간이 겹치는 만큼 독립 사례는 적다
-        w = n_eff / (n_eff + 3) if len(same) else 0.0
-        exp_r = w * (same.mean() if len(same) else 0.0) + (1 - w) * allr.mean()
-        base = same if len(same) >= 3 else allr
-        lo, hi = np.percentile(base, [25, 75])
-        ftb.append([lab, _p(exp_r), f"{(same > 0).mean() * 100:.0f}%" if len(same) else "-",
-                    f"{_p(lo)} ~ {_p(hi)}", _p(allr.mean()), f"{len(same)}"])
-    st.markdown(table_html(ftb, ["기간", "예측 기대수익률", "상승 확률", "예상 범위", "기간 전체 평균", "같은 판정 사례"]),
+        capm = (1 + rf_now + beta_now * MRP) ** (days / 365) - 1
+        same = [r for r in rows if r["verdict"] == vd and np.isfinite(r[lab])]
+        a, ns = _alpha_est([r["a_" + lab] for r in same], days)
+        base = [r["a_" + lab] for r in same] if len(same) >= 3 else [r["a_" + lab] for r in rows if np.isfinite(r[lab])]
+        base = [x for x in base if np.isfinite(x)]
+        rng = f"{_p(capm + np.percentile(base, 25))} ~ {_p(capm + np.percentile(base, 75))}" if base else "-"
+        up = f"{np.mean([r[lab] > 0 for r in same]) * 100:.0f}%" if same else "-"
+        ftb.append([lab, _p(capm + a), _p(capm), _p(a), up, rng, f"{ns}"])
+    st.markdown(table_html(ftb, ["기간", "예측 기대수익률", "CAPM 기준", "판정 보정", "상승 확률", "예상 범위", "같은 판정 사례"]),
                 unsafe_allow_html=True)
-    st.caption(f"과거 판정이 '{vd}'인 달들의 이후 수익률로 계산합니다. 사례가 적을수록 기간 전체 평균 쪽으로 당겨서 계산하고, "
-               "예상 범위는 그 수익률의 하위 25%~상위 25%입니다 (같은 판정 사례가 3개 미만이면 전체 기준).")
+    st.caption(f"CAPM 기준 = 무위험수익률 {rf_now * 100:.2f}% + 베타 {beta_now:.2f} × 시장 위험프리미엄 {MRP * 100:.0f}% (가정). "
+               f"판정 보정 = 과거 판정이 '{vd}'인 달들의 시장 대비 초과수익(알파) 평균을, 사례가 적을수록 0 쪽으로 당긴 값. "
+               "예상 범위 = 그 알파의 하위 25%~상위 25%를 CAPM 기준에 더한 값. 무위험수익률: " + rf_lab)
+
+    # ---- 워크포워드 성적
+    wf = walk_forward(rows)
+    wtb = []
+    for lab, _days in HORIZONS:
+        w = wf[lab]
+        if not w["n"]:
+            continue
+        wtb.append([lab, _p(w["mae_m"]).lstrip("+"), _p(w["mae_c"]).lstrip("+"),
+                    f"{w['hit']}/{w['nh']} ({w['hit'] / w['nh'] * 100:.0f}%)" if w["nh"] else "-", f"{w['n']}"])
+    if wtb:
+        st.markdown("**워크포워드 성적** — 각 시점에 그때까지 결과가 나온 사례만으로 예측했을 때")
+        st.markdown(table_html(wtb, ["기간", "예측 오차 (이 방법)", "예측 오차 (CAPM만)", "초과수익 방향 적중", "시점 수"]),
+                    unsafe_allow_html=True)
+        st.caption("예측 오차 = 예측 기대수익률과 실제 수익률 차이의 평균 (작을수록 좋음). 이 방법의 오차가 CAPM만 쓴 오차보다 작아야 판정이 쓸모 있습니다.")
 
     past = [r for r in rows if np.isfinite(r["1년"])]
-
-    def hit_rate(key):
-        dd = [r for r in past if r.get(key, 0) != 0 and r["1년"] != 0]
-        k_ = sum(1 for r in dd if np.sign(r[key]) == np.sign(r["1년"]))
-        return k_, len(dd)
-
-    hit, nh = hit_rate("score")
-    exs = [r["ex"] for r in past if r["verdict"] == vd and np.isfinite(r["ex"])]
+    hit, nh = _hit_rate(rows)
     items = [("점수 방향 적중률", f"{hit}/{nh} ({hit / nh * 100:.0f}%)" if nh else "-",
               f"{P['name']} 기준 · 점수 부호와 이후 1년 방향이 같았던 달의 비율")]
-    if base_sig is not signals:
-        bh, bn_ = hit_rate("bscore")
+    if prof != "general":
+        rows_g = evaluate(c, "general", use, rf_now)[0]
+        bh, bn_ = _hit_rate(rows_g)
         items.append(("업종 반영 없이 적중률", f"{bh}/{bn_} ({bh / bn_ * 100:.0f}%)" if bn_ else "-", "같은 지표를 일반 기준으로 판정했을 때"))
-    items.append((f"{mname} 대비 초과수익" if mname else "시장 대비 초과수익", _p(np.mean(exs)) if exs else "-",
-                  f"과거 판정이 '{vd}'일 때 1년 평균"))
-    fl = fs.loc[fy_now] if fy_now in fs.index else None
-    if fl is not None and fl["항목"] >= 5:
-        items.append(("F-스코어", f"{int(fl['점수'])}/{int(fl['항목'])}", "재무 상태 개선 항목 수 (참고)"))
+    items.append(("베타", f"{beta_now:.2f}", f"최근 2년 주간 수익률 · {c['mname'] or '지수'} 기준 (블룸 조정)"))
+    fs = fscore(sec, R.get("splits"))
+    fs.index = [pd.Timestamp(x) for x in fs.index]
+    if len(fs) and fs["항목"].iloc[-1] >= 5:
+        items.append(("F-스코어", f"{int(fs['점수'].iloc[-1])}/{int(fs['항목'].iloc[-1])}", "재무 상태 개선 항목 수 (참고)"))
     mgrid(items)
 
     # ---- 근거별 신호
@@ -547,19 +1014,32 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
         trs.append([k, desc, _sig_txt(s), _w(wt), f"{hk}/{len(hp_)}" if hp_ else "-"])
     st.markdown(table_html(trs, ["근거", "값", "신호", "가중치", "과거 적중 (1년)"]), unsafe_allow_html=True)
     notes = []
-    if P["earn"] == "peg" and any("(성장 대비)" in k for k in now_sig):
+    if any("(성장 대비)" in k for k in now_sig):
         notes.append("(성장 대비) = PER ÷ 최근 3년 EPS 연평균 성장률(%). 이익이 늘지 않았으면 계산하지 않습니다.")
-    if P["earn"] == "cycle" and (any(k in EARN_KEYS for k in use) or any(k in EARN_KEYS for k in dser)):
-        notes.append("경기민감형이라 PER은 '이익 사이클 위치'로 바꿔 판단했습니다 (이익이 고점권이면 하락 쪽, 바닥권이면 상승 쪽).")
+    if "평균이익 PER" in now_sig:
+        notes.append("경기민감형이라 PER 대신 '평균이익 PER'(주가 ÷ 최근 최대 10년 평균 EPS)로 판단했습니다. 이익 고점의 낮은 PER에 속지 않기 위해서입니다.")
     for k, why in skipped.items():
         notes.append(f"{k}: 판단에서 뺐습니다 — {why}.")
     if no_dir:
         notes.append(f"{', '.join(no_dir)}: 높고 낮음의 좋고 나쁨이 정해져 있지 않아 판단에서 뺐습니다.")
+    tr = R.get("eps_trend")
+    if isinstance(tr, pd.DataFrame) and {"current", "90daysAgo"} <= set(tr.columns):
+        parts = []
+        for per, nm in (("0y", "올해"), ("+1y", "내년")):
+            try:
+                a_, b_ = float(tr.loc[per, "current"]), float(tr.loc[per, "90daysAgo"])
+                if b_:
+                    parts.append(f"{nm} {(a_ / b_ - 1) * 100:+.1f}%")
+            except Exception:  # noqa: BLE001
+                pass
+        if parts:
+            notes.append("실적 추정치 변화 (최근 90일 컨센서스): " + ", ".join(parts)
+                         + ". 과거 시점의 추정치 기록이 없어 점수와 검증에는 넣지 않고 참고로만 보여줍니다.")
     for t in notes:
         st.caption(t)
 
     # ---- 판정별 평균과 과거 판정 내역
-    with st.expander("과거 판정과 이후 수익률", expanded=True):
+    with st.expander("과거 판정과 이후 수익률"):
         sm = []
         for v_ in ("상승 우세", "중립", "하락 우세"):
             g_ = [r for r in rows if r["verdict"] == v_]
@@ -570,11 +1050,38 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
             sm.append(line)
         st.markdown(table_html(sm, ["판정", "횟수"] + [f"{lab} 평균" for lab, _ in HORIZONS]), unsafe_allow_html=True)
         st.caption("괄호는 오른 횟수/전체 횟수입니다.")
-        df = pd.DataFrame([[f"{r['d']:%Y-%m-%d}", f"{r['fy']:%Y}", f"{r['score']:+.1f}/{r['n']:.1f}", r["verdict"] or "-"]
+        df = pd.DataFrame([[f"{r['d']:%Y-%m-%d}", f"{r['score']:+.1f}/{r['n']:.1f}", r["verdict"] + (" ⚠" if r["flags"] else "")]
                            + [_p(r[lab]) for lab, _ in HORIZONS] for r in reversed(rows)],
-                          columns=["판정일", "사업연도", "점수", "판정"] + [lab for lab, _ in HORIZONS])
+                          columns=["판정일", "점수", "판정"] + [lab for lab, _ in HORIZONS])
         st.dataframe(df, hide_index=True, use_container_width=True, height=320)
-        st.caption("매달 첫 거래일에 그때까지 공시된 숫자와 그날의 밸류에이션으로 다시 판정했습니다. 수익률은 판정일 종가부터 "
-                   "1·3·6개월, 1년 뒤 종가까지입니다 (배당 제외). 아직 기간이 안 지난 칸은 비어 있습니다.")
-    st.caption("과거 통계로 낸 추정이며 예측을 보장하지 않습니다. 매달 판정하므로 이웃한 달의 1년 수익률은 기간이 겹쳐, "
+        st.caption(f"매달 첫 거래일에 그때까지 공시된 숫자({c['freq']})와 그날의 주가로 다시 판정했습니다. ⚠ = 위험 신호. "
+                   "수익률은 판정일 종가부터 1·3·6개월, 1년 뒤 종가까지입니다 (배당 제외).")
+
+    # ---- 여러 종목 검증
+    with st.expander(f"여러 종목으로 '{P['name']}' 규칙 검증"):
+        st.caption(f"대표 종목 {', '.join(VAL_TICKERS[prof])}에 이 업종의 추천 지표·분기 재무·모멘텀·위험 신호를 똑같이 적용합니다 "
+                   "(최근 10년, 동종업계 비교·실적 서프라이즈 제외). 처음 실행은 1~2분 걸리고 결과는 1주일 저장됩니다.")
+        run_key = f"rs_val_{prof}"
+        if st.button("검증 실행", key=f"rs_valbtn_{ticker}_{prof}"):
+            st.session_state[run_key] = True
+        if st.session_state.get(run_key):
+            with st.spinner("대표 종목들을 다시 판정하는 중..."):
+                res = validate_profile(prof)
+            ok = [r for r in res if "err" not in r]
+            tb = [[r["종목"], f"{r['hit_p']}/{r['n_p']}", f"{r['hit_g']}/{r['n_g']}", _p(r["mae_m"]).lstrip("+"),
+                   _p(r["mae_c"]).lstrip("+")] for r in ok]
+            if ok:
+                sp = sum(r["hit_p"] for r in ok), sum(r["n_p"] for r in ok)
+                sg_ = sum(r["hit_g"] for r in ok), sum(r["n_g"] for r in ok)
+                mm = np.nanmean([r["mae_m"] for r in ok])
+                mc = np.nanmean([r["mae_c"] for r in ok])
+                tb.append(["합계·평균", f"{sp[0]}/{sp[1]} ({sp[0] / max(sp[1], 1) * 100:.0f}%)",
+                           f"{sg_[0]}/{sg_[1]} ({sg_[0] / max(sg_[1], 1) * 100:.0f}%)", _p(mm).lstrip("+"), _p(mc).lstrip("+")])
+                st.markdown(table_html(tb, ["종목", f"적중 ({P['name']})", "적중 (일반 기준)", "1년 예측 오차 (이 방법)",
+                                            "1년 예측 오차 (CAPM만)"]), unsafe_allow_html=True)
+            bad = [r for r in res if "err" in r]
+            if bad:
+                st.caption("불러오지 못한 종목: " + ", ".join(f"{r['종목']}({r['err']})" for r in bad))
+
+    st.caption("과거 통계로 낸 추정이며 예측을 보장하지 않습니다. 매달 판정하므로 이웃한 달의 수익률은 기간이 겹쳐, "
                "실제로 독립된 사례 수는 표의 횟수보다 적습니다.")
