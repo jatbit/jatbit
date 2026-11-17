@@ -258,7 +258,7 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict) -> None:
                     f"{_p(lo)} ~ {_p(hi)}", _p(allr.mean()), f"{len(same)}"])
     st.markdown(table_html(ftb, ["기간", "예측 기대수익률", "상승 확률", "예상 범위", "기간 전체 평균", "같은 판정 사례"]),
                 unsafe_allow_html=True)
-    st.caption(f"과거 판정이 '{vd}'였던 달들의 이후 수익률로 계산합니다. 사례가 적을수록 기간 전체 평균 쪽으로 당겨서 계산하고, "
+    st.caption(f"과거 판정이 '{vd}'인 달들의 이후 수익률로 계산합니다. 사례가 적을수록 기간 전체 평균 쪽으로 당겨서 계산하고, "
                "예상 범위는 그 수익률의 하위 25%~상위 25%입니다 (같은 판정 사례가 3개 미만이면 전체 기준).")
 
     past = [r for r in rows if np.isfinite(r["1년"])]
