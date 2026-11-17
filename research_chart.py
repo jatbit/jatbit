@@ -200,7 +200,7 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
                 daily["12M PER"] = (fc[0], "배")
             elif k in _VAL and dv is not None and k in dv:
                 daily[_PER_TRACE.get(k, k)] = (dv[k], DAILY[k])
-        outlook.render_outlook(sec, R, ticker, sel, daily)
+        outlook.render_outlook(sec, R, ticker, sel, daily, options=options, ms_key=f"rs_combo_{ticker}")
     except Exception as e:  # noqa: BLE001
         st.caption(f"상승·하락 판단을 계산하지 못했습니다 ({e}).")
 
