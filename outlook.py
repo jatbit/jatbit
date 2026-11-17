@@ -10,7 +10,8 @@
 업종 유형(성장·기술 / 경기민감 / 금융 / 리츠 / 방어)에 따라 지표 가중치와 PER을 읽는 방법을 바꾼다 (PROFILES).
 추가 신호: 분기 TTM 재무, 모멘텀(12-1개월), 실적 서프라이즈, 동종업계 대비 백분위, 위험 신호 거부권(Altman Z''·Beneish M).
 기대수익률 = CAPM(무위험 + 베타 × 시장 위험프리미엄) + 같은 판정이었던 과거의 평균 알파(사례 수만큼만 반영). 워크포워드로 검증.
-매수·매도 점수(0~100) = 판정 점수가 비슷했던 과거 시점들이 6개월 뒤 CAPM을 이긴 비율(베타 사전분포·유효 사례 수). 80% 구간이 20점보다 넓으면 범위로 표시.
+매수·매도 점수(0~100) 세 가지: CAPM 대비(비슷했던 과거 시점이 6개월 뒤 CAPM을 이긴 비율) · 개별(6개월 수익률이 플러스였던 비율) ·
+미래 추정치(예상 EPS 성장 + PER 회귀 + 배당 → 6개월 수익률이 플러스일 확률). 80% 구간이 20점보다 넓으면 범위로 표시.
 """
 import numpy as np
 import pandas as pd
@@ -536,7 +537,7 @@ def build_ctx(sec, R, ticker, daily, opts, domestic=False, peers=None):
     if qf is not None and qf.shape[1] >= 8:
         rt = compute_ratios(qf, R["hist"], R.get("splits"), lag=4)
         rt.columns = [pd.Timestamp(x) for x in rt.columns]
-        c.update(rt=rt, avail=_avail_dates(qf, rt.columns), lag=4, min_n=8, freq="분기")
+        c.update(rt=rt, avail=_avail_dates(qf, rt.columns), lag=4, min_n=8, freq="분기", qf=qf)
     else:
         c.update(rt=rt_a, avail=c["avail_a"], lag=1, min_n=3, freq="연간")
     c["cols"] = list(c["rt"].columns)
@@ -849,8 +850,8 @@ def validate_profile(prof: str, years: int = 10):
             hp, np_ = _hit_rate(rows_p)
             hg, ng = _hit_rate(rows_g)
             wf = walk_forward(rows_p)["1년"]
-            pts = [(float(r["score"] / r["n"]), float(r["a_" + SCORE_H[0]])) for r in rows_p
-                   if r["n"] and np.isfinite(r["a_" + SCORE_H[0]])]
+            pts = [(float(r["score"] / r["n"]), float(r["a_" + SCORE_H[0]]), float(r[SCORE_H[0]])) for r in rows_p
+                   if r["n"] and np.isfinite(r["a_" + SCORE_H[0]]) and np.isfinite(r[SCORE_H[0]])]
             return dict(종목=t, hit_p=hp, n_p=np_, hit_g=hg, n_g=ng, mae_m=wf["mae_m"], mae_c=wf["mae_c"], wf_hit=wf["hit"], wf_n=wf["nh"],
                         pts=pts)
         except Exception as e:  # noqa: BLE001
@@ -867,12 +868,8 @@ SCORE_H = ("6개월", 182)  # 점수의 기준 기간
 RELIABLE_WIDTH = 20  # 80% 구간 폭이 이 점수 이하이면 한 점으로, 넘으면 범위로 보여줌
 
 
-def rec_score(rows, s_now, pool=None):
-    """점수 = 지금과 판정 점수가 비슷했던 과거 시점들 가운데 이후 6개월 수익률이 CAPM 기대수익률을 넘은(알파 > 0) 비율의 추정치.
-    겹치는 기간만큼 사례 수를 줄이고(유효 사례), 베타(2,2) 사전분포로 50점 쪽으로 당긴 뒤 80% 구간을 낸다."""
-    lab, days = SCORE_H
-    own = [(r["score"] / r["n"], r["a_" + lab]) for r in rows if r["n"] and np.isfinite(r["a_" + lab])]
-    pts = own + list(pool or [])
+def _nb_score(pts, s_now, days):
+    """판정 점수가 지금과 비슷했던 과거 시점들의 결과(값 > 0 이면 성공) → 0~100 점수와 80% 구간."""
     nb, width = [], None
     for width in (0.15, 0.25, 0.4, 2.0):
         nb = [a for s_, a in pts if abs(s_ - s_now) <= width]
@@ -880,14 +877,117 @@ def rec_score(rows, s_now, pool=None):
             break
     n = len(nb)
     k = sum(1 for a in nb if a > 0)
-    n_eff = n * min(1.0, 30 / days)
+    n_eff = n * min(1.0, 30 / days)  # 매달 판정하므로 기간이 겹치는 만큼 독립 사례는 적다
     p_hat = k / n if n else 0.5
-    a_, b_ = 2 + n_eff * p_hat, 2 + n_eff * (1 - p_hat)
+    a_, b_ = 2 + n_eff * p_hat, 2 + n_eff * (1 - p_hat)  # 베타(2,2) 사전분포 → 사례가 적으면 50점 쪽으로
     m = a_ / (a_ + b_)
     sd = np.sqrt(m * (1 - m) / (a_ + b_ + 1))
     lo, hi = max(0.0, m - 1.2816 * sd), min(1.0, m + 1.2816 * sd)
     return dict(mid=m * 100, lo=lo * 100, hi=hi * 100, n=n, n_eff=n_eff, k=k, width=width,
-                own=sum(1 for s_, a in own if abs(s_ - s_now) <= width), pooled=len(pool or []) > 0)
+                mean=float(np.mean(nb)) if nb else np.nan)
+
+
+def rec_score(rows, s_now, pool=None, absolute=False):
+    """CAPM 대비(absolute=False): 이후 6개월 수익률이 CAPM 기대수익률을 넘었나(알파 > 0).
+    개별(absolute=True): 이후 6개월 수익률 자체가 플러스였나."""
+    lab, days = SCORE_H
+    key = lab if absolute else "a_" + lab
+    own = [(r["score"] / r["n"], r[key]) for r in rows if r["n"] and np.isfinite(r[key])]
+    pl = [(p[0], p[2] if absolute else p[1]) for p in (pool or []) if len(p) >= (3 if absolute else 2)]
+    out = _nb_score(own + pl, s_now, days)
+    out.update(own=sum(1 for s_, _a in own if abs(s_ - s_now) <= out["width"]), pooled=bool(pl))
+    return out
+
+
+def _phi(x):
+    import math
+
+    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+
+def forward_score(c, R, fwd=None):
+    """미래 추정치 기준: 1년 기대수익률 = (1 + EPS 성장률) × (PER가 기준 PER 쪽으로 k년에 걸쳐 돌아감) − 1 + 배당수익률.
+    점수 = 6개월 수익률이 플러스일 확률 Φ(μ6 / σ6) × 100 (σ = 최근 2년 주간 변동성). 성장률·회귀 속도를 바꾼 시나리오로 범위를 낸다."""
+    from research_data import ntm_eps
+
+    h = c["h"]
+    px = float(h.iloc[-1])
+    eps_ttm, src = None, ""
+    qf = c.get("qf")
+    if qf is not None and "희석 EPS" in qf.index:
+        e = pd.to_numeric(qf.loc["희석 EPS"], errors="coerce").dropna()
+        if len(e):
+            fl = pd.to_numeric(qf.loc["_filed_희석 EPS"], errors="coerce") if "_filed_희석 EPS" in qf.index else None
+            fac = _split_factor(fl.reindex(e.index), c["splits"]).reindex(e.index).fillna(1.0) if fl is not None else 1.0
+            eps_ttm, src = float((e / fac).iloc[-1]), "최근 4개 분기 합"
+    tb = c["eps_tb"]
+    if eps_ttm is None and tb is not None and len(tb):
+        eps_ttm, src = float(tb["EPS"].iloc[-1]), "직전 사업연도"
+    if not eps_ttm or eps_ttm <= 0:
+        return dict(err="최근 12개월 이익이 적자라 PER 기반 미래 수익률을 계산할 수 없습니다.")
+    per_now = px / eps_ttm
+    target = np.nan
+    if tb is not None and len(tb):
+        step = _step_at(tb["EPS"], h.index)
+        ph = (h / step.where(step > 0)).dropna()
+        ph = ph[(ph.index >= c["start"]) & (ph.index <= c["end"]) & (ph > 0)]
+        if len(ph) > 250:
+            target = float(ph.median())
+    gs = {}
+    n_eps, _ = ntm_eps(R.get("info") or {}, R.get("eps_est"))
+    if not (n_eps and n_eps > 0) and isinstance(fwd, pd.Series):
+        f = _naive(fwd).dropna()
+        if len(f) and f.iloc[-1] > 0:
+            n_eps = px / float(f.iloc[-1])
+    if n_eps and n_eps > 0:
+        gs["컨센서스 (12개월 예상 EPS)"] = float(np.clip(n_eps / eps_ttm - 1, -0.6, 1.0))
+    if c["g_date"] is not None and c["g_date"].notna().any():
+        gs["과거 3년 EPS 성장률"] = float(np.clip(c["g_date"].dropna().iloc[-1] / 100, -0.6, 1.0))
+    if not gs:
+        return dict(err="예상 EPS와 과거 성장률이 모두 없어 미래 수익률을 계산할 수 없습니다.")
+    dy = 0.0
+    sec = c["sec"]
+    try:
+        dv_ = pd.to_numeric(sec.loc["배당금"], errors="coerce").dropna()
+        shr = pd.to_numeric(sec.loc["희석주식수"], errors="coerce").dropna()
+        fac = _split_factor(pd.to_numeric(sec.loc["_filed_희석주식수"], errors="coerce"), c["splits"]).reindex(sec.columns).fillna(1.0) \
+            if "_filed_희석주식수" in sec.index else pd.Series(1.0, index=sec.columns)
+        if len(dv_) and len(shr):
+            dy = float(abs(dv_.iloc[-1]) / (px * float(shr.iloc[-1] * fac[shr.index[-1]])))
+            dy = dy if 0 <= dy < 0.2 else 0.0
+    except Exception:  # noqa: BLE001
+        dy = 0.0
+    hw = c["hw"][c["hw"].index > h.index[-1] - pd.Timedelta(days=730)].dropna()
+    sig = float(hw.std() * np.sqrt(52)) if len(hw) > 40 else 0.3
+    sig = max(sig, 0.05)
+    days = SCORE_H[1]
+
+    def to_score(mu):
+        mu_h = (1 + mu) ** (days / 365) - 1
+        return 100 * _phi(mu_h / (sig * np.sqrt(days / 365)))
+
+    scen = []
+    for gname, g in gs.items():
+        for k in (2, 3, 5, None):
+            rev = 1.0 if (k is None or not np.isfinite(target)) else (target / per_now) ** (1 / k)
+            mu = (1 + g) * rev - 1 + dy
+            scen.append(dict(g=gname, gv=g, k=k, mu=mu, score=to_score(mu)))
+    base_g = "컨센서스 (12개월 예상 EPS)" if "컨센서스 (12개월 예상 EPS)" in gs else next(iter(gs))
+    base = next(x for x in scen if x["g"] == base_g and x["k"] == (3 if np.isfinite(target) else None))
+    lo, hi = min(x["score"] for x in scen), max(x["score"] for x in scen)
+    return dict(mid=base["score"], lo=lo, hi=hi, mu=base["mu"], scen=scen, per_now=per_now, target=target, eps_ttm=eps_ttm,
+                eps_src=src, n_eps=n_eps, dy=dy, sig=sig, consensus="컨센서스 (12개월 예상 EPS)" in gs,
+                reliable=("컨센서스 (12개월 예상 EPS)" in gs) and (hi - lo) <= RELIABLE_WIDTH)
+
+
+def _show_score(col, title, d, reliable, note=""):
+    if reliable:
+        col.metric(title, f"{d['mid']:.0f}점", score_label(d["mid"]), delta_color="normal" if d["mid"] >= 50 else "inverse")
+        col.caption(f"80% 구간 {d['lo']:.0f}–{d['hi']:.0f}점. " + note)
+    else:
+        side = "매수 쪽" if d["lo"] >= 55 else ("매도 쪽" if d["hi"] <= 45 else "판단 보류")
+        col.metric(title, f"{d['lo']:.0f}–{d['hi']:.0f}점", side, delta_color="off")
+        col.caption(f"근거가 부족해 범위로 표시 (가운데 {d['mid']:.0f}점). " + note)
 
 
 def score_label(x):
@@ -901,7 +1001,7 @@ def _val_on(prof):
 # ----------------------------------------------------------------------
 # 화면
 # ----------------------------------------------------------------------
-def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=None, ms_key=None, domestic=False) -> None:
+def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=None, ms_key=None, domestic=False, fwd=None) -> None:
     """sel: 고른 연간 재무비율 이름, daily: {표시 이름: (일별 시계열, 단위)} — 고른 일별 밸류에이션."""
     from glossary import table_html
     from options import mgrid
@@ -997,38 +1097,59 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
     if fl_now:
         st.warning("위험 신호: " + ", ".join(fl_now))
 
-    # ---- 매수·매도 점수 (0~100)
+    # ---- 매수·매도 점수 (0~100): CAPM 대비 · 개별(과거 수익률) · 미래 추정치
     pool = None
-    if st.session_state.get(f"rs_val_{prof}"):
+    if st.session_state.get(f"rs_val_{prof}") and not domestic:  # 대표 종목은 미국 종목이라 국내 종목에는 섞지 않음
         try:
             with st.spinner("대표 종목 사례를 불러오는 중..."):
                 res = validate_profile(prof)
             pool = [tuple(p) for r in res if "pts" in r and r["종목"].upper() != ticker.upper() for p in r["pts"]]
         except Exception:  # noqa: BLE001
             pool = None
-    rs = rec_score(rows, sc / n if n else 0.0, pool)
-    reliable = rs["hi"] - rs["lo"] <= RELIABLE_WIDTH  # 신뢰도는 위험 신호로 자르기 전 구간 폭으로 판단
+    s_now = sc / n if n else 0.0
+    rs = rec_score(rows, s_now, pool)
+    ra = rec_score(rows, s_now, pool, absolute=True)
+    rel_c, rel_a = (x["hi"] - x["lo"] <= RELIABLE_WIDTH for x in (rs, ra))  # 신뢰도는 위험 신호로 자르기 전 구간 폭으로 판단
     if fl_now:  # 위험 신호가 있으면 50점을 넘지 않게
-        rs.update(mid=min(rs["mid"], 50), lo=min(rs["lo"], 50), hi=min(rs["hi"], 50))
+        for x in (rs, ra):
+            x.update(mid=min(x["mid"], 50), lo=min(x["lo"], 50), hi=min(x["hi"], 50))
+    try:
+        rf_ = forward_score(c, R, fwd)
+    except Exception as e:  # noqa: BLE001
+        rf_ = dict(err=f"계산 실패: {e}")
     st.markdown('<div style="font-size:11px;opacity:.6;margin-bottom:-6px">투자 권유 아님 · 과거 데이터로 계산한 모델 점수</div>',
                 unsafe_allow_html=True)
-    k1, k2 = st.columns([1, 2])
-    if reliable:
-        k1.metric(f"매수·매도 점수 ({SCORE_H[0]})", f"{rs['mid']:.0f}점", score_label(rs["mid"]),
-                  delta_color="normal" if rs["mid"] >= 50 else "inverse")
-        k2.caption(f"80% 구간 {rs['lo']:.0f}~{rs['hi']:.0f}점. 근거 자료가 충분해 알고리즘 점수를 그대로 보여줍니다."
-                   + (" 위험 신호가 있어 50점을 넘지 않게 잘랐습니다." if fl_now else ""))
+    st.markdown(f"**매수·매도 점수 ({SCORE_H[0]})**")
+    k1, k2, k3 = st.columns(3)
+    _show_score(k1, "CAPM 대비", rs, rel_c, f"비슷했던 과거 {rs['n']}곳 중 {rs['k']}곳이 CAPM 기대수익률을 넘음.")
+    _show_score(k2, "개별 (과거 수익률)", ra, rel_a,
+                f"비슷했던 과거 {ra['n']}곳 중 {ra['k']}곳이 플러스, 평균 {_p(ra['mean'])}.")
+    if "err" in rf_:
+        k3.metric("미래 추정치", "계산 불가", delta_color="off")
+        k3.caption(rf_["err"])
     else:
-        side = "매수 쪽" if rs["lo"] >= 55 else ("매도 쪽" if rs["hi"] <= 45 else "판단 보류")
-        k1.metric(f"매수·매도 점수 ({SCORE_H[0]})", f"{rs['lo']:.0f}~{rs['hi']:.0f}점", side, delta_color="off")
-        k2.caption(("위험 신호가 있어 50점을 넘지 않게 잘랐습니다. " if fl_now else "")
-                   + f"자료가 부족해 범위로 보여줍니다 (80% 구간이 {RELIABLE_WIDTH}점보다 넓음). "
-                   f"가운데 값은 {rs['mid']:.0f}점입니다."
-                   + ("" if rs["pooled"] else " 아래 '여러 종목으로 규칙 검증'을 실행하면 같은 업종 대표 종목 사례가 더해져 범위가 좁아집니다."))
-    st.caption(f"점수 = 지금과 판정 점수가 비슷했던 과거 시점(±{rs['width']:g}) {rs['n']}곳 가운데 이후 {SCORE_H[0]} 수익률이 "
-               f"CAPM 기대수익률을 넘은 곳 {rs['k']}곳의 비율을, 기간이 겹치는 만큼 사례를 줄여(유효 {rs['n_eff']:.1f}곳) 50점 쪽으로 당긴 값"
-               + (f" (이 종목 {rs['own']}곳 + 같은 업종 대표 종목)" if rs["pooled"] else "")
-               + ". 50점 = 시장 대비 우위 없음. 65점 이상 매수 · 55–65 약한 매수 · 45–55 중립 · 35–45 약한 매도 · 35 이하 매도.")
+        _show_score(k3, "미래 추정치", rf_, rf_["reliable"],
+                    f"1년 기대수익률 {_p(rf_['mu'])}" + ("" if rf_["consensus"] else " (컨센서스 없음 → 과거 성장률 사용)") + ". 과거 검증 없음.")
+    if fl_now:
+        st.caption("위험 신호가 있어 과거 데이터 기반 두 점수는 50점을 넘지 않게 잘랐습니다.")
+    st.caption("CAPM 대비 = 판정 점수가 지금과 비슷했던 과거 시점들이 이후 6개월 동안 CAPM 기대수익률을 이긴 비율 · "
+               "개별 = 같은 시점들의 이후 6개월 수익률이 플러스였던 비율 (둘 다 기간이 겹치는 만큼 사례를 줄이고 50점 쪽으로 당김"
+               + (f", 이 종목 {rs['own']}곳 + 같은 업종 대표 종목" if rs["pooled"] else "")
+               + ") · 미래 추정치 = 예상 EPS 성장과 PER의 기준값 회귀로 낸 기대수익률을 변동성으로 나눠 6개월 수익률이 플러스일 확률로 바꾼 값. "
+               f"80% 구간이 {RELIABLE_WIDTH}점보다 넓으면 범위로 표시. 50점 = 우위 없음, 65 이상 매수 · 55–65 약한 매수 · 45–55 중립 · "
+               "35–45 약한 매도 · 35 이하 매도.")
+    if "err" not in rf_:
+        with st.expander("미래 추정치 계산 내역"):
+            mgrid([("현재 PER", f"{rf_['per_now']:.1f}배", f"주가 ÷ EPS({rf_['eps_src']}) {rf_['eps_ttm']:.2f}"),
+                   ("기준 PER", f"{rf_['target']:.1f}배" if np.isfinite(rf_["target"]) else "-", "고른 기간의 PER 중앙값"),
+                   ("12개월 예상 EPS", f"{rf_['n_eps']:.2f}" if rf_["n_eps"] else "-", "컨센서스"),
+                   ("배당수익률", _p(rf_["dy"]).lstrip("+"), "최근 사업연도 배당금 ÷ 시가총액"),
+                   ("변동성 (연)", _p(rf_["sig"]).lstrip("+"), "최근 2년 주간 수익률")])
+            tb_ = [[x["g"], _p(x["gv"]), "회귀 안 함" if x["k"] is None else f"{x['k']}년", _p(x["mu"]), f"{x['score']:.0f}점"]
+                   for x in rf_["scen"]]
+            st.markdown(table_html(tb_, ["EPS 성장 가정", "성장률", "PER 회귀 기간", "1년 기대수익률", "점수"]), unsafe_allow_html=True)
+            st.caption("1년 기대수익률 = (1 + EPS 성장률) × (기준 PER ÷ 현재 PER)^(1/회귀 기간) − 1 + 배당수익률. "
+                       "과거 시점의 컨센서스 기록이 없어 이 점수는 과거 검증을 하지 못했습니다.")
     if c["peers"]:
         st.caption("동종업계: " + ", ".join(p for p, _ in c["peers"]))
 
