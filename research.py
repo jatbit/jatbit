@@ -83,6 +83,8 @@ def render_research() -> None:
         pass
     try:
         R = load_research(ticker)
+        if (R.get("info") or {}).get("_partial"):
+            st.caption("Yahoo가 지금 기업 정보 요청을 막고 있어 이름·시세 위주로 보여줍니다. 잠시 후 다시 열면 모든 지표가 채워집니다.")
     except Exception as e:  # noqa: BLE001
         if domestic and ticker.endswith(".KS"):  # 코스피·코스닥 구분이 틀린 경우 다른 쪽으로 다시 시도
             try:
