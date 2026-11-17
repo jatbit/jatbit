@@ -98,6 +98,8 @@ def render_research() -> None:
             st.error(f"{ticker} 정보를 불러오지 못했습니다: {e}. 잠시 후 다시 시도해 주세요.")
             return
     info = R["info"]
+    if domestic:  # 상승·하락 판단의 업종 유형 판별용 (KRX 업종명)
+        R["_ksec"] = " ".join(x for x in (c.get("sector"), c.get("industry")) if x)
     ccy = info.get("currency") or ("KRW" if domestic else "USD")
     money.set_cur(ccy)
     cur = "$" if ccy == "USD" else ("₩" if ccy == "KRW" else "")
