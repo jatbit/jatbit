@@ -327,13 +327,14 @@ def _split_factor(filed_ord: pd.Series, splits) -> pd.Series:
     return pd.Series(out)
 
 
-def compute_ratios(sec: pd.DataFrame, hist: pd.Series, splits) -> pd.DataFrame:
+def compute_ratios(sec: pd.DataFrame, hist: pd.Series, splits, lag: int = 1) -> pd.DataFrame:
+    """lag: 1년 전 값이 몇 열 앞인지 (연간 재무제표 1, 분기별 최근 12개월(TTM) 표 4)."""
     g = lambda k: sec.loc[k] if k in sec.index else pd.Series(np.nan, index=sec.columns)  # noqa: E731
     rev, gp, oi, ni = g("매출"), g("매출총이익"), g("영업이익"), g("순이익")
     ocf, fcf, assets, eq = g("영업현금흐름"), g("잉여현금흐름"), g("총자산"), g("자기자본")
     liab = g("총부채").fillna(assets - eq)
-    avg = lambda x: ((x + x.shift(1)) / 2).fillna(x)  # noqa: E731  평균잔액(전년 말과 올해 말의 평균)
-    growth = lambda x: (x - x.shift(1)) / x.shift(1).abs() * 100  # noqa: E731
+    avg = lambda x: ((x + x.shift(lag)) / 2).fillna(x)  # noqa: E731  평균잔액(1년 전과 지금의 평균)
+    growth = lambda x: (x - x.shift(lag)) / x.shift(lag).abs() * 100  # noqa: E731
     fac_e = _split_factor(g("_filed_희석 EPS"), splits).reindex(sec.columns).fillna(1.0)
     fac_s = _split_factor(g("_filed_희석주식수"), splits).reindex(sec.columns).fillna(1.0)
     eps = g("희석 EPS") / fac_e
