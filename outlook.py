@@ -10,6 +10,7 @@
 업종 유형(성장·기술 / 경기민감 / 금융 / 리츠 / 방어)에 따라 지표 가중치와 PER을 읽는 방법을 바꾼다 (PROFILES).
 추가 신호: 분기 TTM 재무, 모멘텀(12-1개월), 실적 서프라이즈, 동종업계 대비 백분위, 위험 신호 거부권(Altman Z''·Beneish M).
 기대수익률 = CAPM(무위험 + 베타 × 시장 위험프리미엄) + 같은 판정이었던 과거의 평균 알파(사례 수만큼만 반영). 워크포워드로 검증.
+매수·매도 점수(0~100) = 판정 점수가 비슷했던 과거 시점들이 6개월 뒤 CAPM을 이긴 비율(베타 사전분포·유효 사례 수). 80% 구간이 20점보다 넓으면 범위로 표시.
 """
 import numpy as np
 import pandas as pd
@@ -848,12 +849,53 @@ def validate_profile(prof: str, years: int = 10):
             hp, np_ = _hit_rate(rows_p)
             hg, ng = _hit_rate(rows_g)
             wf = walk_forward(rows_p)["1년"]
-            return dict(종목=t, hit_p=hp, n_p=np_, hit_g=hg, n_g=ng, mae_m=wf["mae_m"], mae_c=wf["mae_c"], wf_hit=wf["hit"], wf_n=wf["nh"])
+            pts = [(float(r["score"] / r["n"]), float(r["a_" + SCORE_H[0]])) for r in rows_p
+                   if r["n"] and np.isfinite(r["a_" + SCORE_H[0]])]
+            return dict(종목=t, hit_p=hp, n_p=np_, hit_g=hg, n_g=ng, mae_m=wf["mae_m"], mae_c=wf["mae_c"], wf_hit=wf["hit"], wf_n=wf["nh"],
+                        pts=pts)
         except Exception as e:  # noqa: BLE001
             return dict(종목=t, err=str(e)[:80])
 
     with ThreadPoolExecutor(max_workers=3) as ex:
         return list(ex.map(one, VAL_TICKERS.get(prof, [])))
+
+
+# ----------------------------------------------------------------------
+# 매수·매도 점수 (0~100)
+# ----------------------------------------------------------------------
+SCORE_H = ("6개월", 182)  # 점수의 기준 기간
+RELIABLE_WIDTH = 20  # 80% 구간 폭이 이 점수 이하이면 한 점으로, 넘으면 범위로 보여줌
+
+
+def rec_score(rows, s_now, pool=None):
+    """점수 = 지금과 판정 점수가 비슷했던 과거 시점들 가운데 이후 6개월 수익률이 CAPM 기대수익률을 넘은(알파 > 0) 비율의 추정치.
+    겹치는 기간만큼 사례 수를 줄이고(유효 사례), 베타(2,2) 사전분포로 50점 쪽으로 당긴 뒤 80% 구간을 낸다."""
+    lab, days = SCORE_H
+    own = [(r["score"] / r["n"], r["a_" + lab]) for r in rows if r["n"] and np.isfinite(r["a_" + lab])]
+    pts = own + list(pool or [])
+    nb, width = [], None
+    for width in (0.15, 0.25, 0.4, 2.0):
+        nb = [a for s_, a in pts if abs(s_ - s_now) <= width]
+        if len(nb) >= 24:
+            break
+    n = len(nb)
+    k = sum(1 for a in nb if a > 0)
+    n_eff = n * min(1.0, 30 / days)
+    p_hat = k / n if n else 0.5
+    a_, b_ = 2 + n_eff * p_hat, 2 + n_eff * (1 - p_hat)
+    m = a_ / (a_ + b_)
+    sd = np.sqrt(m * (1 - m) / (a_ + b_ + 1))
+    lo, hi = max(0.0, m - 1.2816 * sd), min(1.0, m + 1.2816 * sd)
+    return dict(mid=m * 100, lo=lo * 100, hi=hi * 100, n=n, n_eff=n_eff, k=k, width=width,
+                own=sum(1 for s_, a in own if abs(s_ - s_now) <= width), pooled=len(pool or []) > 0)
+
+
+def score_label(x):
+    return "매수" if x >= 65 else ("약한 매수" if x >= 55 else ("중립·보유" if x > 45 else ("약한 매도" if x > 35 else "매도")))
+
+
+def _val_on(prof):
+    st.session_state[f"rs_val_{prof}"] = True
 
 
 # ----------------------------------------------------------------------
@@ -954,6 +996,36 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
     (st.success if vd == "상승 우세" else st.error if vd == "하락 우세" else st.info)(msg)
     if fl_now:
         st.warning("위험 신호: " + ", ".join(fl_now))
+
+    # ---- 매수·매도 점수 (0~100)
+    pool = None
+    if st.session_state.get(f"rs_val_{prof}"):
+        try:
+            with st.spinner("대표 종목 사례를 불러오는 중..."):
+                res = validate_profile(prof)
+            pool = [tuple(p) for r in res if "pts" in r and r["종목"].upper() != ticker.upper() for p in r["pts"]]
+        except Exception:  # noqa: BLE001
+            pool = None
+    rs = rec_score(rows, sc / n if n else 0.0, pool)
+    if fl_now:  # 위험 신호가 있으면 50점을 넘지 않게
+        rs.update(mid=min(rs["mid"], 50), lo=min(rs["lo"], 50), hi=min(rs["hi"], 50))
+    reliable = rs["hi"] - rs["lo"] <= RELIABLE_WIDTH
+    k1, k2 = st.columns([1, 2])
+    if reliable:
+        k1.metric(f"매수·매도 점수 ({SCORE_H[0]})", f"{rs['mid']:.0f}점", score_label(rs["mid"]),
+                  delta_color="normal" if rs["mid"] >= 50 else "inverse")
+        k2.caption(f"80% 구간 {rs['lo']:.0f}~{rs['hi']:.0f}점. 근거 자료가 충분해 알고리즘 점수를 그대로 보여줍니다.")
+    else:
+        side = "매수 쪽" if rs["lo"] >= 55 else ("매도 쪽" if rs["hi"] <= 45 else "판단 보류")
+        k1.metric(f"매수·매도 점수 ({SCORE_H[0]})", f"{rs['lo']:.0f}~{rs['hi']:.0f}점", side, delta_color="off")
+        k2.caption(f"자료가 부족해 범위로 보여줍니다 (80% 구간 폭 {rs['hi'] - rs['lo']:.0f}점 > {RELIABLE_WIDTH}점). "
+                   f"가운데 값은 {rs['mid']:.0f}점입니다."
+                   + ("" if rs["pooled"] else " 아래 '여러 종목으로 규칙 검증'을 실행하면 같은 업종 대표 종목 사례가 더해져 범위가 좁아집니다."))
+    st.caption(f"점수 = 지금과 판정 점수가 비슷했던 과거 시점(±{rs['width']:g}) {rs['n']}곳 가운데 이후 {SCORE_H[0]} 수익률이 "
+               f"CAPM 기대수익률을 넘은 곳 {rs['k']}곳의 비율을, 기간이 겹치는 만큼 사례를 줄여(유효 {rs['n_eff']:.1f}곳) 50점 쪽으로 당긴 값"
+               + (f" (이 종목 {rs['own']}곳 + 같은 업종 대표 종목)" if rs["pooled"] else "")
+               + ". 50점 = 시장 대비 우위 없음. 65점 이상 매수 · 55~65 약한 매수 · 45~55 중립 · 35~45 약한 매도 · 35 이하 매도. "
+               "투자 권유가 아닌 모델 계산값입니다.")
     if c["peers"]:
         st.caption("동종업계: " + ", ".join(p for p, _ in c["peers"]))
 
@@ -1062,8 +1134,7 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
         st.caption(f"대표 종목 {', '.join(VAL_TICKERS[prof])}에 이 업종의 추천 지표·분기 재무·모멘텀·위험 신호를 똑같이 적용합니다 "
                    "(최근 10년, 동종업계 비교·실적 서프라이즈 제외). 처음 실행은 1~2분 걸리고 결과는 1주일 저장됩니다.")
         run_key = f"rs_val_{prof}"
-        if st.button("검증 실행", key=f"rs_valbtn_{ticker}_{prof}"):
-            st.session_state[run_key] = True
+        st.button("검증 실행", key=f"rs_valbtn_{ticker}_{prof}", on_click=_val_on, args=(prof,))
         if st.session_state.get(run_key):
             with st.spinner("대표 종목들을 다시 판정하는 중..."):
                 res = validate_profile(prof)
