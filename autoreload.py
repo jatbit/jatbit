@@ -13,7 +13,7 @@ import sys
 ORDER = ["bsm", "glossary", "tvchart", "ui", "ta", "money", "rates", "data_load", "period", "stats", "common",
          "options_data", "options_chain", "hedge", "options", "volmodels", "capm_opt", "bonds", "news", "valuation", "kr", "sectors", "dcf", "insider",
          "credit", "optvol", "american", "risklab", "backtest", "peers", "earnings", "research_data", "data_check", "research_chart", "research", "market", "screener",
-         "page_single", "page_compare", "page_portfolio"]
+         "drawings", "page_single", "page_compare", "page_portfolio"]
 _BASE = os.path.dirname(os.path.abspath(__file__))
 _SELF = os.path.abspath(__file__)
 _seen: dict = {}
