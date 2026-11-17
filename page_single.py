@@ -9,7 +9,7 @@ IND_OPTS = ["이동평균선", "볼린저밴드", "RSI", "MACD", "일목균형�
 IND_DEFAULTS = {"single_ma_n": "5, 20, 60, 120", "single_bb_n": 20, "single_bb_k": 2.0, "single_rsi_n": 14, "single_rsi_hi": 70,
                 "single_rsi_lo": 30, "single_macd_f": 12, "single_macd_s": 26, "single_macd_g": 9,
                 "single_ichi_t": 9, "single_ichi_k": 26, "single_ichi_s": 52, "single_ichi_d": 26,
-                "single_fib_lv": "0, 0.236, 0.382, 0.5, 0.618, 0.786, 1, 1.618, 2.618", "single_fib_sens": 5.0, "single_fib_nth": 1}
+                "single_fib_lv": "0, 0.236, 0.382, 0.5, 0.618, 0.786, 1, 1.618, 2.618", "single_fib_sens": 10.0, "single_fib_nth": 1}
 
 
 def _clean_ind_state() -> None:
