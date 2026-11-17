@@ -5,9 +5,11 @@ from common import *  # noqa: F401,F403
 # ======================================================================
 # 탭 1: 주가 조회
 # ======================================================================
-IND_OPTS = ["이동평균선", "볼린저밴드", "RSI", "MACD"]
+IND_OPTS = ["이동평균선", "볼린저밴드", "RSI", "MACD", "일목균형표", "피보나치"]
 IND_DEFAULTS = {"single_ma_n": "5, 20, 60, 120", "single_bb_n": 20, "single_bb_k": 2.0, "single_rsi_n": 14, "single_rsi_hi": 70,
-                "single_rsi_lo": 30, "single_macd_f": 12, "single_macd_s": 26, "single_macd_g": 9}
+                "single_rsi_lo": 30, "single_macd_f": 12, "single_macd_s": 26, "single_macd_g": 9,
+                "single_ichi_t": 9, "single_ichi_k": 26, "single_ichi_s": 52, "single_ichi_d": 26,
+                "single_fib_lv": "0, 0.236, 0.382, 0.5, 0.618, 0.786, 1, 1.618, 2.618", "single_fib_sens": 5.0, "single_fib_nth": 1}
 
 
 def _clean_ind_state() -> None:
@@ -51,8 +53,49 @@ def _ind_settings(inds: list) -> dict:
         if P["macd_f"] >= P["macd_s"]:
             st.caption("단기 기간이 장기 기간보다 짧아야 합니다. 두 값을 바꿔서 계산합니다.")
             P["macd_f"], P["macd_s"] = min(P["macd_f"], P["macd_s"]), max(P["macd_f"], P["macd_s"]) + (P["macd_f"] == P["macd_s"])
+    if IND_OPTS[4] in inds:
+        a, b, c, d = st.columns(4)
+        P["ichi"] = (int(a.number_input("전환선", 1, 200, IND_DEFAULTS["single_ichi_t"], step=1, key="single_ichi_t")),
+                     int(b.number_input("기준선", 1, 400, IND_DEFAULTS["single_ichi_k"], step=1, key="single_ichi_k")),
+                     int(c.number_input("선행스팬2", 1, 400, IND_DEFAULTS["single_ichi_s"], step=1, key="single_ichi_s")),
+                     int(d.number_input("이동", 1, 200, IND_DEFAULTS["single_ichi_d"], step=1, key="single_ichi_d")))
+    if IND_OPTS[5] in inds:
+        import drawings as dw
+
+        kind = st.radio("피보나치 종류", dw.FIB_KINDS, horizontal=True, key="single_fib_kind")
+        lv = st.text_input("레벨 (쉼표로 구분, 소수·음수 가능)", value=IND_DEFAULTS["single_fib_lv"], key="single_fib_lv",
+                           help="예: -0.618, 0, 0.382, 0.5, 0.618, 1, 1.618, 2.618, 4.236")
+        mode = st.radio("기준점", ["자동", "직접 지정"], horizontal=True, key="single_fib_mode")
+        F = {"kind": kind, "levels": dw.parse_levels(lv), "mode": mode, "dates": []}
+        if mode == "자동":
+            a, b = st.columns(2)
+            F["sens"] = float(a.number_input("민감도 (%)", 0.5, 50.0, IND_DEFAULTS["single_fib_sens"], step=0.5, format="%.1f",
+                                             key="single_fib_sens", help="이만큼 반대로 움직이면 고점·저점으로 봅니다. 작을수록 짧은 파동"))
+            F["nth"] = int(b.number_input("몇 번째 최근 파동", 1, 20, IND_DEFAULTS["single_fib_nth"], step=1, key="single_fib_nth"))
+        else:
+            names = (["1 (추세선 시작)", "2 (추세선 끝)", "3 (채널 폭)"] if kind == dw.FIB_KINDS[0]
+                     else ["1 (파동 시작)", "2 (파동 끝)", "3 (되돌림)"] if kind == dw.FIB_KINDS[1] else ["1 (시작)", "2 (끝)"])
+            cols = st.columns(len(names))
+            F["dates"] = [col.date_input(nm, value=None, key=f"single_fib_d{i}") for i, (col, nm) in enumerate(zip(cols, names))]
+            F["sens"], F["nth"] = IND_DEFAULTS["single_fib_sens"], 1
+        P["fib"] = F
     st.button("기본값으로 되돌리기", key="single_ind_reset", on_click=_reset_ind)
     return P
+
+
+def _ohlc_base(code: str, start_d, end_d, weekly: bool, longest: int = 120):
+    """일목균형표 계산용 고가·저가·종가 (앞쪽 계산 구간 여유 포함)."""
+    back = int(longest * (7 if weekly else 1.5)) + 60
+    try:
+        ext = load_prices(code, (pd.Timestamp(start_d) - pd.Timedelta(days=back)).date().isoformat(), end_d.isoformat())
+    except Exception:  # noqa: BLE001
+        return None
+    if ext is None or ext.empty or not {"High", "Low", "Close"} <= set(ext.columns):
+        return None
+    ext = ext[["High", "Low", "Close"]].dropna()
+    if weekly:
+        ext = ext.resample("W-FRI").agg({"High": "max", "Low": "min", "Close": "last"}).dropna()
+    return ext
 
 
 def _indicator_base(code: str, start_d, end_d, weekly: bool, longest: int = 120):
@@ -81,7 +124,7 @@ def render_single(listing: pd.DataFrame) -> None:
             chart_type = st.radio("차트 종류", ["선", "캔들"], horizontal=True, key="single_type")
             basis = st.radio("표시 기준", ["주가", "수익률"], horizontal=True, key="single_basis")
             _clean_ind_state()
-            inds = st.multiselect("보조지표", IND_OPTS, key="single_ind", placeholder="이동평균선, 볼린저밴드, RSI, MACD")
+            inds = st.multiselect("보조지표", IND_OPTS, key="single_ind", placeholder="이동평균선, 볼린저밴드, RSI, MACD, 일목균형표, 피보나치")
             IP = _ind_settings(inds)
             rate_sel = rate_controls("single")
     period = period_input("single_period")
@@ -167,6 +210,7 @@ def render_single(listing: pd.DataFrame) -> None:
         plot_df = df.resample("W-FRI").agg(agg).dropna(subset=["Open", "Close"])
         weekly = True
     n_bars = len(plot_df)
+    raw_plot = plot_df  # 피보나치 기준점은 가격 그대로에서 찾는다
     pct_mode = basis == "수익률"
     if pct_mode:
         base0 = float(df["Close"].dropna().iloc[0])
@@ -181,8 +225,10 @@ def render_single(listing: pd.DataFrame) -> None:
     want_bb = IND_OPTS[1] in inds
     want_rsi = IND_OPTS[2] in inds
     want_macd = IND_OPTS[3] in inds
+    want_ichi = IND_OPTS[4] in inds
+    want_fib = IND_OPTS[5] in inds and "fib" in IP
     longest = max([*IP.get("ma", [0]), IP.get("bb_n", 0), IP.get("rsi_n", 0) * 3, IP.get("macd_s", 0) * 3 + IP.get("macd_g", 0), 20])
-    base_c = _indicator_base(chosen["code"], start_d, end_d, weekly, longest) if inds else None
+    base_c = _indicator_base(chosen["code"], start_d, end_d, weekly, longest) if (want_ma or want_bb or want_rsi or want_macd) else None
     x0 = plot_df.index[0]
 
     def _disp(sr):  # 가격 단위 → 화면 단위(수익률 모드면 %)
@@ -231,6 +277,83 @@ def render_single(listing: pd.DataFrame) -> None:
             if not want_ma:
                 fig.add_trace(go.Scatter(x=plot_df.index, y=_disp(mid), mode="lines", name=f"볼린저 중심({IP['bb_n']})",
                                          line=dict(color=ta.MA_COLORS[20], width=1), hovertemplate="중심 %{y:,.2f}<extra></extra>"), row=1, col=1)
+    import drawings as dw
+
+    def _conv(v):  # 가격 → 화면 단위
+        return (v / base0 - 1) * 100 if pct_mode else v
+
+    fit_lo, fit_hi = [], []  # 피보나치를 그릴 때 처음 화면의 세로 범위 (먼 레벨선 때문에 차트가 납작해지지 않게)
+    for _c in ("Low", "Close") if "Low" in plot_df.columns else ("Close",):
+        fit_lo.append(float(plot_df[_c].min()))
+    for _c in ("High", "Close") if "High" in plot_df.columns else ("Close",):
+        fit_hi.append(float(plot_df[_c].max()))
+    if want_ichi and "ichi" in IP:
+        it, ik, is_, idd = IP["ichi"]
+        ohlc = _ohlc_base(chosen["code"], start_d, end_d, weekly, max(it, ik, is_) + idd)
+        if ohlc is not None and len(ohlc) > max(it, ik, is_):
+            I = dw.ichimoku(ohlc, it, ik, is_, idd, weekly)
+
+            def _cut(sr, keep_future=False):
+                sr = sr[sr.index >= x0]
+                if not keep_future:
+                    sr = sr.reindex(plot_df.index)
+                return _conv(sr)
+
+            sa, sb = _cut(I["span_a"], True), _cut(I["span_b"], True)
+            for seg_x, seg_a, seg_b, up in dw.cloud_segments(sa, sb):
+                fig.add_trace(go.Scatter(x=seg_x, y=seg_b, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False),
+                              row=1, col=1)
+                fig.add_trace(go.Scatter(x=seg_x, y=seg_a, mode="lines", line=dict(width=0), fill="tonexty", hoverinfo="skip",
+                                         fillcolor="rgba(229,72,77,0.16)" if up else "rgba(59,130,246,0.16)", showlegend=False),
+                              row=1, col=1)
+            for nm, sr, col, w in (("선행스팬1", sa, "#E5484D", 0.8), ("선행스팬2", sb, "#3B82F6", 0.8),
+                                   ("전환선", _cut(I["tenkan"]), "#D9B85E", 1.2), ("기준선", _cut(I["kijun"]), "#B794F4", 1.2),
+                                   ("후행스팬", _cut(I["chikou"]), "#48BB78", 1.0)):
+                fig.add_trace(go.Scatter(x=sr.index, y=sr.values, mode="lines", name=nm, line=dict(color=col, width=w),
+                                         hovertemplate=f"{nm} %{{y:,.2f}}<extra></extra>"), row=1, col=1)
+            for sr in (sa, sb):
+                if sr.notna().any():
+                    fit_lo.append(float(sr.min()))
+                    fit_hi.append(float(sr.max()))
+        else:
+            st.caption("일목균형표 계산에 필요한 과거 시세를 불러오지 못했습니다.")
+    if want_fib:
+        F = IP["fib"]
+        anc = None
+        if F["mode"] == "직접 지정":
+            anc = dw.manual_anchors(F["kind"], raw_plot, F["dates"])
+            if anc is None:
+                st.caption("피보나치 기준점 날짜를 모두 고르면 그 점으로 그립니다. 지금은 자동으로 잡은 기준점입니다.")
+        if anc is None:
+            hi_s = raw_plot["High"] if "High" in raw_plot.columns else raw_plot["Close"]
+            lo_s = raw_plot["Low"] if "Low" in raw_plot.columns else raw_plot["Close"]
+            anc = dw.auto_anchors(F["kind"], dw.zigzag(hi_s, lo_s, F["sens"]), F["nth"])
+        if anc is None:
+            st.caption("피보나치를 그릴 고점·저점이 부족합니다. 민감도(%)를 낮추거나 기간을 늘려 보세요.")
+        else:
+            ext_n = max(5, n_bars // 15)
+            xfull = plot_df.index.append(dw.future_index(plot_df.index, ext_n, weekly))
+            for j, (lv, s0, ys) in enumerate(dw.fib_lines(F["kind"], anc, F["levels"], n_bars, ext_n)):
+                col = dw.FIB_COLORS[j % len(dw.FIB_COLORS)]
+                xs = xfull[s0:s0 + len(ys)]
+                yv = _conv(np.asarray(ys, dtype=float))
+                lab = f"{lv:g}  ({yv[-1]:+.1f}%)" if pct_mode else f"{lv:g}  ({yv[-1]:,.0f})" if domestic else f"{lv:g}  ({yv[-1]:,.2f})"
+                fig.add_trace(go.Scatter(x=xs, y=yv, mode="lines", line=dict(color=col, width=1), hoverinfo="skip",
+                                         showlegend=False, meta="nofit"), row=1, col=1)
+                fig.add_trace(go.Scatter(x=[xs[-1]], y=[yv[-1]], mode="text", text=[lab], textposition="top left",
+                                         textfont=dict(color=col, size=10), hoverinfo="skip", showlegend=False, meta="nofit"),
+                              row=1, col=1)
+            nums = ["1", "3", "2"] if F["kind"] == dw.FIB_KINDS[0] else ["1", "2", "3"]
+            fig.add_trace(go.Scatter(x=[plot_df.index[a["i"]] for a in anc], y=[_conv(a["p"]) for a in anc], mode="markers+text",
+                                     text=nums[:len(anc)], textposition=["bottom center" if a["k"] == "L" else "top center" for a in anc],
+                                     marker=dict(size=7, color="#ECE6D8", line=dict(color="#C9A44C", width=1.5)),
+                                     textfont=dict(color="#ECE6D8", size=11), hoverinfo="skip", showlegend=False, meta="nofit"),
+                          row=1, col=1)
+            lo_v, hi_v = min(fit_lo), max(fit_hi)  # 이미 화면 단위
+            pad = (hi_v - lo_v) * 0.06 or abs(hi_v) * 0.05 or 1
+            fig.update_yaxes(range=[lo_v - pad, hi_v + pad], row=1, col=1)
+            fig.update_layout(meta={"tv_minmax": ["yaxis"]})
+    if base_c is not None:
         r_i = 3
         if want_rsi:
             rv = ta.rsi(base_c, IP["rsi_n"])
@@ -251,7 +374,7 @@ def render_single(listing: pd.DataFrame) -> None:
             fig.add_trace(go.Scatter(x=plot_df.index, y=sg, mode="lines", name="시그널", line=dict(color="#DD6B20", width=1.1),
                                      hovertemplate="시그널 %{y:,.2f}<extra></extra>"), row=r_i, col=1)
             fig.update_yaxes(title_text=f"MACD({IP['macd_f']},{IP['macd_s']},{IP['macd_g']})", row=r_i, col=1)
-    elif inds:
+    elif want_ma or want_bb or want_rsi or want_macd:
         st.caption("보조지표 계산에 필요한 과거 시세를 불러오지 못했습니다.")
     if "Volume" in plot_df.columns:
         fig.add_trace(
@@ -269,7 +392,7 @@ def render_single(listing: pd.DataFrame) -> None:
         fig.add_hline(y=0, row=1, col=1, line_width=1, line_dash="dot", line_color="#718096")
     fig.update_yaxes(title_text="거래량", row=2, col=1, tickformat=",")
     fig.update_layout(
-        height=560 + 130 * (n_rows - 2), showlegend=bool(base_c is not None and (want_ma or want_bb)), hovermode="x unified",
+        height=560 + 130 * (n_rows - 2), showlegend=bool((base_c is not None and (want_ma or want_bb)) or want_ichi), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0, font=dict(size=10)),
         margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
         boxgap=box_gap, bargap=0.3 if n_bars <= 150 else 0.4,
