@@ -92,7 +92,7 @@ def _row(spec):
         return st.columns(spec)
 
 
-def period_input(key: str, mirror: str = None, presets: bool = False):
+def period_input(key: str, mirror: str = None, presets: bool = False, default_days: int = 180):
     """빠른 기간 버튼(오늘 기준) + 직접 선택 달력을 한 줄에. 종료일은 오늘이며, 데이터는 가장 최근 영업일까지 나온다.
     mirror: 같은 기간을 공유할 다른 페이지의 period_input 키."""
     today = kst_today()
@@ -106,7 +106,7 @@ def period_input(key: str, mirror: str = None, presets: bool = False):
     with cols[1]:
         p = st.date_input(
             "기간",
-            value=(today - timedelta(days=180), today),
+            value=(today - timedelta(days=default_days), today),
             min_value=date(1950, 1, 1),
             max_value=today,
             format="YYYY-MM-DD",
