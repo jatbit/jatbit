@@ -296,7 +296,8 @@ def render_score_gauges(sec, R: dict, ticker: str, n_eps, src: str = "SEC 10-K")
 
     ss = st.session_state
     opts = dict(quarterly=ss.get(f"rs_o_q_{ticker}", not domestic) and not domestic, momentum=ss.get(f"rs_o_m_{ticker}", True),
-                surprise=ss.get(f"rs_o_s_{ticker}", True), peers=False, flags=ss.get(f"rs_o_f_{ticker}", True))
+                surprise=ss.get(f"rs_o_s_{ticker}", True), peers=False, flags=ss.get(f"rs_o_f_{ticker}", True),
+                extra=ss.get(f"rs_o_x_{ticker}", True))
     st.markdown("##### 매수·매도 점수 (6개월)")
     st.markdown('<div style="font-size:11px;opacity:.6;margin-top:-8px">투자 권유 아님 · 과거 데이터로 계산한 모델 점수</div>',
                 unsafe_allow_html=True)
@@ -321,7 +322,7 @@ def render_score_gauges(sec, R: dict, ticker: str, n_eps, src: str = "SEC 10-K")
     st.markdown(outlook.gauges_html(items), unsafe_allow_html=True)
     names = {"PER (직전 사업연도 EPS)": "PER", "12M 선행 PER (컨센서스 추이)": "12M PER"}
     used = [names.get(k, _PER_TRACE.get(k, k)) for k in chosen if k != "주가"]
-    extra = [x for x, on in (("모멘텀", opts["momentum"]), ("실적 서프라이즈", opts["surprise"])) if on]
+    extra = [x for x, on in (("모멘텀", opts["momentum"]), ("실적 서프라이즈", opts["surprise"]), ("추가 신호", opts["extra"])) if on]
     st.caption(f"판정 근거: {', '.join(used + extra) or '-'} · {outlook.PROFILES[prof]['name']} 기준 · 업종 평균 = {res['sname'] or '-'}"
                + (f" · 위험 신호: {', '.join(res['flags'])} (50점 상한)" if res["flags"] else "")
                + ". 점수 = 지금과 판정 점수가 비슷했던 과거 시점들 가운데 이후 6개월 수익률이 0 · 업종 평균 · CAPM 기대수익률을 넘은 비율 "
