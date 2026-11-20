@@ -12,7 +12,7 @@
 기대수익률 = CAPM(무위험 + 베타 × 시장 위험프리미엄) + 같은 판정이었던 과거의 평균 알파(사례 수만큼만 반영). 워크포워드로 검증.
 매수·매도 점수(0~100): CAPM 미포함(6개월 수익률이 플러스였던 비율) · 업종 대비(섹터 ETF를 이긴 비율) · CAPM 대비(CAPM을 이긴 비율) ·
 미래 추정치(예상 EPS 성장 + PER 회귀 + 배당 → 6개월 수익률이 플러스일 확률). 80% 구간이 20점보다 넓으면 범위로 표시.
-추가 신호(영상 방법론): 고점 대비 하락 · 경기민감형 이익 고점 위치 · 현금 품질 · PBR÷ROE · 주주환원 · 외국인 수급(국내).
+추가 신호(영상 방법론, 업종별 검증 통과분만 EXTRA_ON): 고점 대비 하락 · 현금 품질 · 주주환원 · 외국인 수급(국내).
 밸류에이션은 후행이므로 외국인 지분율이 늘고 있으면 PER 등이 비싸도 감점하지 않는다.
 """
 import numpy as np
@@ -797,16 +797,31 @@ def make_signals(c, prof, use):
 
 
 FRGN_CHG = 0.5  # 60거래일 외국인 지분율 변화(%p)가 이 이상이면 매수·매도 신호
-EXTRA_NAMES = ("고점 대비 하락", "이익 고점 위치", "현금 품질", "PBR ÷ ROE", "주주환원", "외국인 수급")
+# 업종별로 켜는 추가 신호 — 2026-11-21 업종별 대표 종목 검증(신호가 켜진 달의 이후 6개월 CAPM 대비 초과수익)에서
+# 적중률 50% 초과 + 평균 초과수익 플러스였던 것만 남김. 결과(적중률, 평균 초과수익):
+#   고점 대비 하락: 성장 55% +0.8%p · 경기민감 48% −6.7%p · 금융 56% +0.4%p · 방어 62% +1.5%p · 일반 58% +2.3%p · 리츠 66% +4.8%p
+#                   (국내 4종목 합계 43% → 국내 종목은 끔)
+#   이익 고점 위치(경기민감): 46% −6.5%p → 뺌        PBR ÷ ROE: 모든 업종 50% 이하 → 뺌
+#   현금 품질: 성장 58% +2.9%p만 통과 · 주주환원: 성장 71% +7.1%p · 경기민감 52% +5.8%p만 통과
+#   외국인 수급(국내 4종목 합계 52%, 평균 +4.1%p): 국내 종목에 항상 사용
+EXTRA_ON = {
+    "growth": {"고점 대비 하락", "현금 품질", "주주환원"},
+    "cyclical": {"주주환원"},
+    "financial": {"고점 대비 하락"},
+    "defensive": {"고점 대비 하락"},
+    "general": {"고점 대비 하락"},
+    "reit": {"고점 대비 하락"},
+}
 
 
 def _extra_signals(c, P, prof, d, out, col, val_names):
     """방법론 문서 '영상에서 정리한 방법론' 신호. 조건에 걸릴 때만 넣는다(아니면 근거 수를 늘리지 않음)."""
     d = pd.Timestamp(d)
     h = c["h"]
+    on = EXTRA_ON.get(prof, set())
     # 1) 고점 대비 하락: 52주 고점에서 15% 넘게 빠지고 최근 3개월도 마이너스면 매도 쪽 (고점은 못 맞추니 꺾인 걸 확인하고 판다)
     hh = h[(h.index > d - pd.Timedelta(days=365)) & (h.index <= d)]
-    if len(hh) > 200:
+    if "고점 대비 하락" in on and not c["domestic"] and len(hh) > 200:
         dd = float(hh.iloc[-1] / hh.max() - 1)
         p3 = _px_before(h, d - pd.Timedelta(days=91))
         r3 = float(hh.iloc[-1] / p3 - 1) if np.isfinite(p3) and p3 > 0 else np.nan
@@ -814,7 +829,7 @@ def _extra_signals(c, P, prof, d, out, col, val_names):
             out["고점 대비 하락"] = (-1, f"52주 고점 대비 {dd * 100:+.1f}% · 최근 3개월 {r3 * 100:+.1f}%", 1.0)
     # 2) 이익 고점 위치 (경기민감형): 지금 EPS가 최근 최대 10년 평균보다 크게 높으면 이익 고점권, 크게 낮으면 바닥권
     tb = c["eps_tb"]
-    if P["earn"] == "cycle" and tb is not None:
+    if "이익 고점 위치" in on and P["earn"] == "cycle" and tb is not None:
         t = tb[tb.index <= d]
         if len(t) >= 5 and (d - t.index[-1]).days <= 550:
             e = t["EPS"].values[-10:]
@@ -828,7 +843,7 @@ def _extra_signals(c, P, prof, d, out, col, val_names):
     rt = c["rt"]
     if col is not None:
         # 3) 현금 품질: 순이익보다 영업현금흐름이 많으면 좋음, 크게 적으면 이익의 질이 낮음
-        if prof not in ("financial", "reit") and {"영업현금흐름/순이익", "순이익률"} <= set(rt.index):
+        if "현금 품질" in on and {"영업현금흐름/순이익", "순이익률"} <= set(rt.index):
             v, nm = rt.loc["영업현금흐름/순이익", col], rt.loc["순이익률", col]
             if np.isfinite(v) and np.isfinite(nm) and nm > 0:
                 if v >= 1.1:
@@ -836,7 +851,7 @@ def _extra_signals(c, P, prof, d, out, col, val_names):
                 elif v < 0.8:
                     out["현금 품질"] = (-1, f"영업현금흐름 ÷ 순이익 {v:.2f}배 (이익보다 현금이 적음)", 1.0)
         # 4) PBR ÷ ROE: ROE가 높아지면 PBR이 높아도 비싸지 않다 → 자기 과거 대비 상위 20%면 비쌈, 하위 20%면 쌈
-        if {"PBR", "ROE"} <= set(rt.index):
+        if "PBR ÷ ROE" in on and {"PBR", "ROE"} <= set(rt.index):
             x = rt.loc["PBR"] / rt.loc["ROE"].where(rt.loc["ROE"] > 0)
             past = np.array([x[cc] for cc in c["pcols"] if cc <= col and np.isfinite(x[cc])])
             v = x[col]
@@ -849,7 +864,7 @@ def _extra_signals(c, P, prof, d, out, col, val_names):
     # 5) 주주환원: 배당 + 자사주 매입이 잉여현금흐름의 절반 이상이고 시가총액의 3% 이상이면 매수 쪽 (연간 재무제표)
     rt_a, sec = c["rt_a"], c["sec"]
     ok = [x for x in rt_a.columns if c["avail_a"][x] <= d]
-    if ok and (d - ok[-1]).days <= 550 and "PBR" in rt_a.index:
+    if "주주환원" in on and ok and (d - ok[-1]).days <= 550 and "PBR" in rt_a.index:
         j = list(rt_a.columns).index(ok[-1])
 
         def val(k):
@@ -1339,13 +1354,14 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
                             help="고른 재무비율이 동종업계 비교 탭의 회사들 가운데 상위·하위 20%인지. 처음 켜면 회사들 재무제표를 받느라 30초쯤 걸립니다."),
             flags=o2.toggle("위험 신호 거부권 (Altman Z'' · Beneish M)", value=True, key=f"rs_o_f_{ticker}",
                             help="부실 위험(Z'' 1.1 미만)이나 이익 조작 의심(M −1.78 초과)이면 '상승 우세'를 '중립'으로 낮춥니다."),
-            extra=o2.toggle("추가 신호 (고점 대비 하락 · 이익 고점 위치 · 현금 품질 · PBR÷ROE · 주주환원 · 외국인 수급)", value=True,
+            extra=o2.toggle("추가 신호 (고점 대비 하락 · 현금 품질 · 주주환원 · 외국인 수급)", value=True,
                             key=f"rs_o_x_{ticker}",
-                            help="고점 대비 15% 넘게 빠지고 3개월 마이너스면 매도 쪽 · 경기민감형은 EPS가 10년 평균의 1.5배 이상이면 매도 쪽, "
-                                 "0.6배 이하면 매수 쪽 · 영업현금흐름 ÷ 순이익 1.1배 이상 매수 쪽, 0.8배 미만 매도 쪽 · PBR ÷ ROE가 자기 과거 "
-                                 "상위·하위 20% · 배당+자사주 매입이 잉여현금흐름의 50% 이상이고 시가총액의 3% 이상이면 매수 쪽 · "
-                                 "국내 종목은 60거래일 외국인 지분율이 0.5%p 넘게 늘면 매수 쪽(이때는 PER 등이 비싸도 감점 안 함). "
-                                 "조건에 걸릴 때만 근거에 들어갑니다."),
+                            help="업종별 대표 종목 검증에서 효과가 있었던 업종에만 씁니다. "
+                                 "고점 대비 하락(경기민감형·국내 제외): 52주 고점보다 15% 넘게 빠지고 3개월 마이너스면 매도 쪽 · "
+                                 "현금 품질(성장·기술형): 영업현금흐름 ÷ 순이익 1.1배 이상 매수 쪽, 0.8배 미만 매도 쪽 · "
+                                 "주주환원(성장·기술형, 경기민감형): 배당+자사주 매입이 잉여현금흐름의 50% 이상이고 시가총액의 3% 이상이면 매수 쪽 · "
+                                 "외국인 수급(국내): 60거래일 외국인 지분율이 0.5%p 넘게 늘면 매수 쪽, 줄면 매도 쪽이고, 늘 때는 PER 등이 비싸도 감점 안 함. "
+                                 "이익 고점 위치와 PBR ÷ ROE는 검증에서 효과가 없어 뺐습니다. 조건에 걸릴 때만 근거에 들어갑니다."),
         )
         if domestic:
             st.caption("국내 종목은 분기 재무와 동종업계 비교를 아직 지원하지 않습니다 (DART 연간 재무제표 기준).")
