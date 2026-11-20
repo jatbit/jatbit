@@ -12,6 +12,8 @@
 기대수익률 = CAPM(무위험 + 베타 × 시장 위험프리미엄) + 같은 판정이었던 과거의 평균 알파(사례 수만큼만 반영). 워크포워드로 검증.
 매수·매도 점수(0~100): CAPM 미포함(6개월 수익률이 플러스였던 비율) · 업종 대비(섹터 ETF를 이긴 비율) · CAPM 대비(CAPM을 이긴 비율) ·
 미래 추정치(예상 EPS 성장 + PER 회귀 + 배당 → 6개월 수익률이 플러스일 확률). 80% 구간이 20점보다 넓으면 범위로 표시.
+추가 신호(영상 방법론): 고점 대비 하락 · 경기민감형 이익 고점 위치 · 현금 품질 · PBR÷ROE · 주주환원 · 외국인 수급(국내).
+밸류에이션은 후행이므로 외국인 지분율이 늘고 있으면 PER 등이 비싸도 감점하지 않는다.
 """
 import numpy as np
 import pandas as pd
@@ -303,6 +305,35 @@ def sector_bench(ticker, info, domestic):
             sym, kn = SECTOR_ETF[nm]
             return sym, f"{kn} 업종 ETF {sym}"
     return "^GSPC", "S&P 500 (업종 판별 실패)"
+
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def foreign_flow(code: str):
+    """국내 종목 일별 외국인 지분율(%)·순매수(주) — 다음 금융(finance.daum.net) 투자자별 매매 동향, 최근 약 5년.
+    열: rate(외국인 지분율 %), net(외국인 순매수 주식 수). 못 받으면 None."""
+    import json
+    import urllib.request
+
+    rows = []
+    for pg in range(1, 9):
+        url = f"https://finance.daum.net/api/investor/days?symbolCode=A{code}&page={pg}&perPage=200&pagination=true"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+            "Referer": f"https://finance.daum.net/quotes/A{code}", "Accept": "application/json, text/plain, */*"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            j = json.loads(resp.read().decode("utf-8"))
+        d = j.get("data") or []
+        rows += d
+        if not d or pg >= int(j.get("totalPages") or 1):
+            break
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    idx = pd.to_datetime(df["date"]).dt.normalize()
+    out = pd.DataFrame({"rate": pd.to_numeric(df["foreignOwnSharesRate"], errors="coerce").values * 100,
+                        "net": pd.to_numeric(df["foreignStraightPurchaseVolume"], errors="coerce").values}, index=idx.values)
+    out = out[~out.index.duplicated()].sort_index()
+    return out if out["rate"].notna().sum() > 60 else None
 
 
 # ----------------------------------------------------------------------
@@ -616,6 +647,14 @@ def build_ctx(sec, R, ticker, daily, opts, domestic=False, peers=None):
 
         with ThreadPoolExecutor(max_workers=4) as ex:
             c["peers"] = [(p, r) for p, r in ex.map(one, [p for p in peers if p.upper() != ticker.upper()][:10]) if r is not None]
+    c["frgn"], c["frgn_err"] = None, ""
+    if opts.get("extra") and domestic:
+        try:
+            c["frgn"] = foreign_flow(ticker.split(".")[0])
+            if c["frgn"] is None:
+                c["frgn_err"] = "자료 없음"
+        except Exception as e:  # noqa: BLE001
+            c["frgn_err"] = str(e)[:60]
     c["extra"] = {}
     if opts.get("flags") and not domestic:
         try:
@@ -748,9 +787,98 @@ def make_signals(c, prof, use):
                     dirn = DIR.get(k, 1)
                     sig = dirn if p >= 0.8 else (-dirn if p <= 0.2 else 0)
                     out[f"{k} (동종업계 대비)"] = (sig, f"{_fmt(RATIOS[k][0])(me)} · {len(vals)}개사 중 백분위 {p * 100:.0f}%", 1.0)
+        if o.get("extra"):
+            _extra_signals(c, P, prof, d, out, col, val_names)
         return out
 
+    val_names = ({k + (" (성장 대비)" if kind == "peg" else "") for k, _r, kind in ann if kind in ("level", "peg")}
+                 | {x[0] for x in daily} | {"PBR ÷ ROE"})
     return signals, skipped
+
+
+FRGN_CHG = 0.5  # 60거래일 외국인 지분율 변화(%p)가 이 이상이면 매수·매도 신호
+EXTRA_NAMES = ("고점 대비 하락", "이익 고점 위치", "현금 품질", "PBR ÷ ROE", "주주환원", "외국인 수급")
+
+
+def _extra_signals(c, P, prof, d, out, col, val_names):
+    """방법론 문서 '영상에서 정리한 방법론' 신호. 조건에 걸릴 때만 넣는다(아니면 근거 수를 늘리지 않음)."""
+    d = pd.Timestamp(d)
+    h = c["h"]
+    # 1) 고점 대비 하락: 52주 고점에서 15% 넘게 빠지고 최근 3개월도 마이너스면 매도 쪽 (고점은 못 맞추니 꺾인 걸 확인하고 판다)
+    hh = h[(h.index > d - pd.Timedelta(days=365)) & (h.index <= d)]
+    if len(hh) > 200:
+        dd = float(hh.iloc[-1] / hh.max() - 1)
+        p3 = _px_before(h, d - pd.Timedelta(days=91))
+        r3 = float(hh.iloc[-1] / p3 - 1) if np.isfinite(p3) and p3 > 0 else np.nan
+        if dd <= -0.15 and np.isfinite(r3) and r3 < 0:
+            out["고점 대비 하락"] = (-1, f"52주 고점 대비 {dd * 100:+.1f}% · 최근 3개월 {r3 * 100:+.1f}%", 1.0)
+    # 2) 이익 고점 위치 (경기민감형): 지금 EPS가 최근 최대 10년 평균보다 크게 높으면 이익 고점권, 크게 낮으면 바닥권
+    tb = c["eps_tb"]
+    if P["earn"] == "cycle" and tb is not None:
+        t = tb[tb.index <= d]
+        if len(t) >= 5 and (d - t.index[-1]).days <= 550:
+            e = t["EPS"].values[-10:]
+            avg, cur = float(np.mean(e)), float(e[-1])
+            if avg > 0:
+                ratio = cur / avg
+                if ratio >= 1.5:
+                    out["이익 고점 위치"] = (-1, f"EPS {cur:.2f} = 최근 {len(e)}년 평균의 {ratio:.1f}배 (이익 고점권)", 1.0)
+                elif ratio <= 0.6:
+                    out["이익 고점 위치"] = (1, f"EPS {cur:.2f} = 최근 {len(e)}년 평균의 {ratio:.1f}배 (이익 바닥권)", 1.0)
+    rt = c["rt"]
+    if col is not None:
+        # 3) 현금 품질: 순이익보다 영업현금흐름이 많으면 좋음, 크게 적으면 이익의 질이 낮음
+        if prof not in ("financial", "reit") and {"영업현금흐름/순이익", "순이익률"} <= set(rt.index):
+            v, nm = rt.loc["영업현금흐름/순이익", col], rt.loc["순이익률", col]
+            if np.isfinite(v) and np.isfinite(nm) and nm > 0:
+                if v >= 1.1:
+                    out["현금 품질"] = (1, f"영업현금흐름 ÷ 순이익 {v:.2f}배", 1.0)
+                elif v < 0.8:
+                    out["현금 품질"] = (-1, f"영업현금흐름 ÷ 순이익 {v:.2f}배 (이익보다 현금이 적음)", 1.0)
+        # 4) PBR ÷ ROE: ROE가 높아지면 PBR이 높아도 비싸지 않다 → 자기 과거 대비 상위 20%면 비쌈, 하위 20%면 쌈
+        if {"PBR", "ROE"} <= set(rt.index):
+            x = rt.loc["PBR"] / rt.loc["ROE"].where(rt.loc["ROE"] > 0)
+            past = np.array([x[cc] for cc in c["pcols"] if cc <= col and np.isfinite(x[cc])])
+            v = x[col]
+            if np.isfinite(v) and len(past) >= c["min_n"]:
+                p = _pctile(past, v)
+                s = _val_sig(p, -1)
+                if s:
+                    out["PBR ÷ ROE"] = (s, f"PBR {rt.loc['PBR', col]:.2f}배 ÷ ROE {rt.loc['ROE', col]:.1f}% · 기간 내 백분위 {p * 100:.0f}%",
+                                        P["w"].get("PBR", 1.0))
+    # 5) 주주환원: 배당 + 자사주 매입이 잉여현금흐름의 절반 이상이고 시가총액의 3% 이상이면 매수 쪽 (연간 재무제표)
+    rt_a, sec = c["rt_a"], c["sec"]
+    ok = [x for x in rt_a.columns if c["avail_a"][x] <= d]
+    if ok and (d - ok[-1]).days <= 550 and "PBR" in rt_a.index:
+        j = list(rt_a.columns).index(ok[-1])
+
+        def val(k):
+            if k not in sec.index:
+                return np.nan
+            return pd.to_numeric(sec.loc[k], errors="coerce").iloc[j]
+
+        ret = np.nansum([abs(val("배당금")), abs(val("자사주매입"))])
+        fcf = val("영업현금흐름") - (abs(val("설비투자")) if np.isfinite(val("설비투자")) else 0.0)
+        mcap = rt_a.loc["PBR"].iloc[j] * val("자기자본")
+        if ret > 0 and np.isfinite(fcf) and fcf > 0 and np.isfinite(mcap) and mcap > 0:
+            y, po = ret / mcap, ret / fcf
+            if po >= 0.5 and y >= 0.03:
+                out["주주환원"] = (1, f"배당+자사주 매입 = 시가총액의 {y * 100:.1f}% (잉여현금흐름의 {po * 100:.0f}%)", 1.0)
+    # 6) 외국인 수급 (국내): 60거래일 외국인 지분율 변화
+    f = c.get("frgn")
+    if f is not None:
+        fr = f[f.index <= d]
+        if len(fr) >= 61 and (d - fr.index[-1]).days <= 10:
+            r0, r1 = float(fr["rate"].iloc[-61]), float(fr["rate"].iloc[-1])
+            chg = r1 - r0
+            if abs(chg) >= FRGN_CHG:
+                out["외국인 수급"] = (1 if chg > 0 else -1, f"60거래일 외국인 지분율 {r0:.2f}% → {r1:.2f}% ({chg:+.2f}%p)", 1.0)
+    # 밸류에이션은 후행: 외국인이 사고 있으면 비싸 보여도(PER 등 상위 20%) 감점하지 않는다
+    if out.get("외국인 수급", (0,))[0] > 0:
+        for k in list(out):
+            base = k.split(" (")[0]
+            if (k in val_names or base in VALN) and out[k][0] < 0:
+                out[k] = (0, out[k][1] + " · 외국인 매수 중이라 감점 안 함", out[k][2])
 
 
 def _score(sg: dict):
@@ -829,6 +957,23 @@ def _hit_rate(rows, key="score"):
     return sum(1 for r in dd if np.sign(r[key]) == np.sign(r["1년"])), len(dd)
 
 
+def sig_tally(rows, lab="6개월"):
+    """신호별: 신호가 켜진(±1) 달 중 이후 6개월 CAPM 대비 초과수익(알파) 방향이 맞은 횟수, 사례 수, 신호 방향을 곱한 평균 알파."""
+    out = {}
+    for r in rows:
+        a = r.get("a_" + lab, np.nan)
+        if not np.isfinite(a) or a == 0:
+            continue
+        for k, (s, _desc, _w) in r["sig"].items():
+            if s == 0:
+                continue
+            t = out.setdefault(k, [0, 0, 0.0])
+            t[0] += int(np.sign(s) == np.sign(a))
+            t[1] += 1
+            t[2] += float(np.sign(s) * a)
+    return out
+
+
 def _w(x) -> str:
     return f"{x:g}"
 
@@ -887,7 +1032,7 @@ def validate_profile(prof: str, years: int = 10):
                     daily[k] = (dv[k], V.VAL[k][0])
             daily = {k: v for k, v in daily.items() if k in d_use_g}
             R = {"hist": h, "splits": sp, "_period": period}
-            opts = dict(quarterly=True, momentum=True, surprise=False, peers=False, flags=True)
+            opts = dict(quarterly=True, momentum=True, surprise=False, peers=False, flags=True, extra=True)
             c = build_ctx(sec, R, t, daily, opts)
             rows_p = evaluate(c, prof, a_use, rf_now)[0]
             rows_g = evaluate(c, "general", a_use, rf_now)[0]
@@ -897,7 +1042,7 @@ def validate_profile(prof: str, years: int = 10):
             pts = [(float(r["score"] / r["n"]), float(r["a_" + SCORE_H[0]]), float(r[SCORE_H[0]]), float(r["i_" + SCORE_H[0]]))
                    for r in rows_p if r["n"] and np.isfinite(r["a_" + SCORE_H[0]]) and np.isfinite(r[SCORE_H[0]])]
             return dict(종목=t, hit_p=hp, n_p=np_, hit_g=hg, n_g=ng, mae_m=wf["mae_m"], mae_c=wf["mae_c"], wf_hit=wf["hit"], wf_n=wf["nh"],
-                        pts=pts)
+                        pts=pts, sig=sig_tally(rows_p))
         except Exception as e:  # noqa: BLE001
             return dict(종목=t, err=str(e)[:80])
 
@@ -1194,6 +1339,13 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
                             help="고른 재무비율이 동종업계 비교 탭의 회사들 가운데 상위·하위 20%인지. 처음 켜면 회사들 재무제표를 받느라 30초쯤 걸립니다."),
             flags=o2.toggle("위험 신호 거부권 (Altman Z'' · Beneish M)", value=True, key=f"rs_o_f_{ticker}",
                             help="부실 위험(Z'' 1.1 미만)이나 이익 조작 의심(M −1.78 초과)이면 '상승 우세'를 '중립'으로 낮춥니다."),
+            extra=o2.toggle("추가 신호 (고점 대비 하락 · 이익 고점 위치 · 현금 품질 · PBR÷ROE · 주주환원 · 외국인 수급)", value=True,
+                            key=f"rs_o_x_{ticker}",
+                            help="고점 대비 15% 넘게 빠지고 3개월 마이너스면 매도 쪽 · 경기민감형은 EPS가 10년 평균의 1.5배 이상이면 매도 쪽, "
+                                 "0.6배 이하면 매수 쪽 · 영업현금흐름 ÷ 순이익 1.1배 이상 매수 쪽, 0.8배 미만 매도 쪽 · PBR ÷ ROE가 자기 과거 "
+                                 "상위·하위 20% · 배당+자사주 매입이 잉여현금흐름의 50% 이상이고 시가총액의 3% 이상이면 매수 쪽 · "
+                                 "국내 종목은 60거래일 외국인 지분율이 0.5%p 넘게 늘면 매수 쪽(이때는 PER 등이 비싸도 감점 안 함). "
+                                 "조건에 걸릴 때만 근거에 들어갑니다."),
         )
         if domestic:
             st.caption("국내 종목은 분기 재무와 동종업계 비교를 아직 지원하지 않습니다 (DART 연간 재무제표 기준).")
@@ -1349,6 +1501,11 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
         if parts:
             notes.append("실적 추정치 변화 (최근 90일 컨센서스): " + ", ".join(parts)
                          + ". 과거 시점의 추정치 기록이 없어 점수와 검증에는 넣지 않고 참고로만 보여줍니다.")
+    if any(k.split(" (")[0] in VALN or "PER" in k or "PBR" in k or k in daily for k in now_sig):
+        notes.append("밸류에이션(PER·PBR 등)은 후행 지표입니다. 이익이 바닥일 때는 비싸 보이고 고점일 때는 싸 보입니다."
+                     + (" 그래서 외국인 지분율이 늘고 있으면 비싸 보여도 감점하지 않습니다." if domestic and opts.get("extra") else ""))
+    if opts.get("extra") and domestic and c.get("frgn") is None:
+        notes.append(f"외국인 수급 자료를 받지 못해 이 신호는 뺐습니다 ({c.get('frgn_err') or '자료 없음'}).")
     for t in notes:
         st.caption(t)
 
@@ -1370,6 +1527,12 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
         st.dataframe(df, hide_index=True, use_container_width=True, height=320)
         st.caption(f"매달 첫 거래일에 그때까지 공시된 숫자({c['freq']})와 그날의 주가로 다시 판정했습니다. ⚠ = 위험 신호. "
                    "수익률은 판정일 종가부터 1·3·6개월, 1년 뒤 종가까지입니다 (배당 제외).")
+        own = sig_tally(rows)
+        if own:
+            stb = [[k, f"{v[0]}/{v[1]}", f"{v[0] / v[1] * 100:.0f}%", _p(v[2] / v[1])]
+                   for k, v in sorted(own.items(), key=lambda kv: -kv[1][1]) if v[1]]
+            st.markdown("**이 종목의 신호별 성적** — 신호가 켜진 달의 이후 6개월 CAPM 대비 초과수익 방향")
+            st.markdown(table_html(stb, ["신호", "적중/사례", "적중률", "평균 초과수익 (신호 방향)"]), unsafe_allow_html=True)
 
     # ---- 여러 종목 검증
     with st.expander(f"여러 종목으로 '{P['name']}' 규칙 검증"):
@@ -1392,6 +1555,18 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
                            f"{sg_[0]}/{sg_[1]} ({sg_[0] / max(sg_[1], 1) * 100:.0f}%)", _p(mm).lstrip("+"), _p(mc).lstrip("+")])
                 st.markdown(table_html(tb, ["종목", f"적중 ({P['name']})", "적중 (일반 기준)", "1년 예측 오차 (이 방법)",
                                             "1년 예측 오차 (CAPM만)"]), unsafe_allow_html=True)
+            agg = {}
+            for r in ok:
+                for k, (hk, nk, sa) in (r.get("sig") or {}).items():
+                    t = agg.setdefault(k, [0, 0, 0.0])
+                    t[0], t[1], t[2] = t[0] + hk, t[1] + nk, t[2] + sa
+            if agg:
+                stb = [[k, f"{v[0]}/{v[1]}", f"{v[0] / v[1] * 100:.0f}%", _p(v[2] / v[1])]
+                       for k, v in sorted(agg.items(), key=lambda kv: -kv[1][1]) if v[1]]
+                st.markdown("**신호별 성적** — 신호가 켜진 달의 이후 6개월 CAPM 대비 초과수익 방향")
+                st.markdown(table_html(stb, ["신호", "적중/사례", "적중률", "평균 초과수익 (신호 방향)"]), unsafe_allow_html=True)
+                st.caption("적중률이 50% 근처이고 평균 초과수익이 0 근처면 그 신호는 이 업종에서 효과가 없다는 뜻입니다. "
+                           "매달 판정하므로 이웃한 달끼리 기간이 겹쳐 실제 독립 사례는 더 적습니다.")
             bad = [r for r in res if "err" in r]
             if bad:
                 st.caption("불러오지 못한 종목: " + ", ".join(f"{r['종목']}({r['err']})" for r in bad))
