@@ -313,7 +313,7 @@ def render_score_gauges(sec, R: dict, ticker: str, n_eps, src: str = "SEC 10-K")
 
     def sub(m, what):
         d = S[m][0]
-        return f"과거 비슷한 {d['n']}곳 중 {d['k']}곳이 {what}"
+        return f"과거 비슷한 시점 {d['n']}번 중 {d['k']}번 {what}"
 
     items = [("CAPM 미포함", S["abs"][0], S["abs"][1], sub("abs", "플러스")),
              ("업종 평균 대비", S["ind"][0], S["ind"][1], sub("ind", "업종보다 높음")),
