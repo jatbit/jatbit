@@ -187,6 +187,7 @@ SEC_ITEMS = [  # (표시 이름, us-gaap 태그 우선순위, 단위, 기간형 
     ("이자비용", ["InterestExpense", "InterestExpenseNonoperating", "InterestExpenseDebt"], "USD", True),
     ("희석주식수", ["WeightedAverageNumberOfDilutedSharesOutstanding"], "shares", True),
     ("배당금", ["PaymentsOfDividends", "PaymentsOfDividendsCommonStock"], "USD", True),
+    ("자사주매입", ["PaymentsForRepurchaseOfCommonStock"], "USD", True),
     # 신용위험(credit.py) 계산용
     ("이익잉여금", ["RetainedEarningsAccumulatedDeficit"], "USD", False),
     ("단기차입금", ["DebtCurrent", "LongTermDebtCurrent", "ShortTermBorrowings"], "USD", False),
