@@ -70,6 +70,8 @@ def us_universe() -> pd.DataFrame:
 
     if "Sector" not in d.columns:
         d["Sector"] = "분류 없음"
+    d["SectorEn"] = d["Sector"].astype(str)
+    d["IndustryEn"] = d["Industry"].astype(str) if "Industry" in d.columns else d["SectorEn"]
     d["Sector"] = d["Sector"].map(lambda x: GICS_KO.get(str(x), str(x) if x == x else "분류 없음"))
     if "Industry" not in d.columns:
         d["Industry"] = d["Sector"]
@@ -335,3 +337,130 @@ def render_screener() -> None:
     st.download_button("결과 CSV 내려받기", out.to_csv(index=False).encode("utf-8-sig"), file_name="screener.csv", mime="text/csv")
     st.caption("국내는 KRX 당일 시세(장중엔 지연)와 Yahoo 일봉, 미국은 Yahoo 일봉 기준입니다. 기술적 지표는 1시간마다 새로 계산합니다. "
                "조건에 맞는다는 것이 매수·매도 신호를 뜻하지는 않습니다.")
+    _render_scores(D, domestic)
+
+
+# ----------------------------------------------------------------------
+# 매수·매도 점수 순위
+# ----------------------------------------------------------------------
+SCORE_COLS = {"abs": "CAPM 미포함", "ind": "업종 평균 대비", "capm": "CAPM 대비"}
+
+
+def _score_jobs(D: pd.DataFrame, domestic: bool) -> list:
+    jobs = []
+    for _, r in D.iterrows():
+        sym = str(r["Symbol"])
+        if domestic:
+            ksec = " ".join(str(x) for x in (r.get("Sector"), r.get("Industry")) if x == x and x and x != "분류 없음")
+            jobs.append(dict(sym=sym, name=str(r["Name"]), code=str(r["Code"]), sector="", industry="", ksec=ksec))
+        else:
+            jobs.append(dict(sym=sym, name=str(r["Name"]), code=sym, sector=str(r.get("SectorEn") or ""),
+                             industry=str(r.get("IndustryEn") or ""), ksec=""))
+    return jobs
+
+
+def _run_scores(jobs: list, domestic: bool) -> None:
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    import outlook
+
+    ss = st.session_state
+    store = ss.setdefault("sc_scores", {})
+    dkey = None
+    if domestic:
+        try:
+            import kr
+
+            dkey = kr.dart_key()
+        except Exception:  # noqa: BLE001
+            dkey = None
+    bar = st.progress(0.0, text="준비 중...")
+    if not domestic:  # 같은 업종 대표 종목 사례 (업종 유형마다 한 번, 7일 재사용)
+        profs = sorted({outlook.screen_profile(False, j["sector"], j["industry"]) for j in jobs})
+        for i, p in enumerate(profs):
+            bar.progress(0.0, text=f"업종별 기준 사례 준비 중 ({i + 1}/{len(profs)}: {outlook.PROFILES[p]['name']}) — 처음 한 번만 1~2분씩 걸립니다")
+            try:
+                outlook.validate_profile(p)
+            except Exception:  # noqa: BLE001
+                pass
+    t0, done, ok = time.time(), 0, 0
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futs = {ex.submit(outlook.screen_score, j["sym"], domestic, j["sector"], j["industry"], j["ksec"], dkey): j for j in jobs}
+        for f in as_completed(futs):
+            j = futs[f]
+            done += 1
+            try:
+                store[(domestic, j["sym"])] = dict(j, **f.result(), err=None)
+                ok += 1
+            except Exception as e:  # noqa: BLE001
+                store[(domestic, j["sym"])] = dict(j, err=str(e)[:60])
+            el = time.time() - t0
+            eta = el / done * (len(jobs) - done)
+            bar.progress(done / len(jobs), text=f"{done}/{len(jobs)}종목 계산 (성공 {ok}) · 남은 시간 약 {eta / 60:.0f}분 {eta % 60:.0f}초")
+    bar.empty()
+
+
+def _render_scores(D: pd.DataFrame, domestic: bool) -> None:
+    import outlook
+
+    ui.section("매수·매도 점수 순위 (6개월)", "검색 결과 종목마다 기업 리서치와 같은 방식으로 점수를 계산해 상위 20종목")
+    st.markdown('<div style="font-size:11px;opacity:.6;margin-top:-8px">투자 권유 아님 · 과거 데이터로 계산한 모델 점수</div>',
+                unsafe_allow_html=True)
+    ss = st.session_state
+    jobs = _score_jobs(D, domestic)
+    store = ss.get("sc_scores", {})
+    have = [store[(domestic, j["sym"])] for j in jobs if (domestic, j["sym"]) in store]
+    todo = [j for j in jobs if (domestic, j["sym"]) not in store]
+    lab = f"검색 결과 {len(jobs):,}종목 점수 계산" if not have else (f"새로 걸린 {len(todo):,}종목 점수 추가 계산" if todo else "점수 다시 계산")
+    est = max(1, round(len(todo or jobs) * (6 if domestic else 4) / 3 / 60))
+    c1, c2 = st.columns([1.3, 2])
+    go_ = c1.button(lab, key="sc_score_btn", type="primary", use_container_width=True)
+    c2.caption(f"종목마다 10년치 주가·재무제표로 과거 판정을 다시 돌려 오래 걸립니다 (약 {est}분 예상). "
+               "계산한 점수는 6시간 동안 다시 쓰고, 계산 중에 다른 조작을 하면 거기서 멈춥니다(끝난 종목은 남음).")
+    if go_:
+        if not todo:  # 다시 계산: 저장된 결과를 지우고 처음부터 (6시간 캐시는 그대로라 빠름)
+            for j in jobs:
+                ss.get("sc_scores", {}).pop((domestic, j["sym"]), None)
+            todo = jobs
+        _run_scores(todo, domestic)
+        store = ss.get("sc_scores", {})
+        have = [store[(domestic, j["sym"])] for j in jobs if (domestic, j["sym"]) in store]
+    if not have:
+        return
+    good = [r for r in have if not r.get("err")]
+    if not good:
+        st.warning(f"{len(have)}종목 모두 점수를 내지 못했습니다 (재무제표·주가 이력 부족 등).")
+        return
+    basis = st.radio("정렬 기준", list(SCORE_COLS), format_func=SCORE_COLS.get, horizontal=True, key="sc_score_basis")
+    rows = []
+    for r in good:
+        mid, lo, hi, rel = r[basis]
+        rows.append({"종목": r["name"], "코드": r["code"], "업종 유형": outlook.PROFILES[r["prof"]]["name"],
+                     SCORE_COLS["abs"]: round(r["abs"][0]), SCORE_COLS["ind"]: round(r["ind"][0]), SCORE_COLS["capm"]: round(r["capm"][0]),
+                     "판정": outlook.score_label(mid), "80% 구간": f"{lo:.0f}–{hi:.0f}" if not rel else "-",
+                     "위험 신호": ", ".join(r["flags"]) if r["flags"] else "", "_k": mid})
+    top = pd.DataFrame(rows).sort_values("_k", ascending=False).head(20).drop(columns="_k").reset_index(drop=True)
+    top.insert(0, "순위", range(1, len(top) + 1))
+    nc = st.column_config.NumberColumn
+    cfg = {v: nc(v, format="%d") for v in SCORE_COLS.values()}
+    cfg["80% 구간"] = st.column_config.TextColumn("80% 구간", help=f"{SCORE_COLS[basis]} 점수의 80% 구간 (폭이 20점보다 넓을 때만)")
+    kw = dict(use_container_width=True, hide_index=True, column_config=cfg, height=min(38 * (len(top) + 1) + 4, 800))
+    try:
+        ev = st.dataframe(top, on_select="rerun", selection_mode="single-row", key="sc_score_table", **kw)
+        sel = ev.selection.rows if ev is not None and hasattr(ev, "selection") else []
+    except TypeError:
+        st.dataframe(top, **kw)
+        sel = []
+    if sel:
+        r = top.iloc[sel[0]]
+        if st.button(f"{r['종목']} 기업 리서치에서 보기", key="sc_score_go"):
+            _go("research", "rs_ticker", str(r["코드"]))
+    n_err = len(have) - len(good)
+    st.caption(f"{len(good):,}종목 중 상위 20 · {SCORE_COLS[basis]} 점수 순"
+               + (f" · {n_err}종목은 재무제표·주가 이력이 부족해 빠짐" if n_err else "")
+               + ". 기업 리서치 첫 화면의 기본 판정(직전 사업연도 EPS 기준 PER"
+               + ("" if domestic else " · 분기 TTM") + " · 모멘텀 · 위험 신호 · 추가 신호, 최근 10년)과 같은 규칙인데, "
+               "종목마다 Yahoo 요청을 줄이려고 컨센서스(12M 선행 PER)와 실적 서프라이즈는 뺐습니다. 그래서 리서치 화면 점수와 몇 점 다를 수 있습니다. "
+               "위험 신호가 있으면 50점이 상한입니다.")
+
