@@ -133,10 +133,13 @@ def _prefetch_chains(ticker: str, exps: list) -> None:
 
 def render_vol() -> None:
     st.caption("Yahoo 옵션 체인(약 15분 지연)으로 직접 계산한 값입니다. 만기를 많이 고를수록 조회가 오래 걸립니다.")
-    if hasattr(st, "pills"):
-        st.pills("빠른 선택", OPT_PRESETS, key="ov_pill",
-                 on_change=lambda: st.session_state.__setitem__("ov_ticker", st.session_state.get("ov_pill")) if st.session_state.get("ov_pill") else None)
-    ticker = (st.text_input("미국 티커", key="ov_ticker", placeholder="AAPL") or "").strip().upper()
+    if st.session_state.get("_opt_shared"):
+        ticker = (st.session_state.get("opt_ticker") or "").strip().upper()
+    else:
+        if hasattr(st, "pills"):
+            st.pills("빠른 선택", OPT_PRESETS, key="ov_pill",
+                     on_change=lambda: st.session_state.__setitem__("ov_ticker", st.session_state.get("ov_pill")) if st.session_state.get("ov_pill") else None)
+        ticker = (st.text_input("미국 티커", key="ov_ticker", placeholder="AAPL") or "").strip().upper()
     if not ticker:
         st.info("티커를 입력하거나 위에서 고르세요.")
         return
