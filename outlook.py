@@ -1294,6 +1294,102 @@ def summary_scores(sec, R, ticker, sel, daily_names, build_daily, opts, prof, do
     return res_
 
 
+# ----------------------------------------------------------------------
+# 스크리너용: 여러 종목 점수를 한꺼번에 (기업 리서치 첫 화면의 기본 설정과 같은 판정)
+# ----------------------------------------------------------------------
+GICS_YH = {"Information Technology": "Technology", "Health Care": "Healthcare", "Financials": "Financial Services",
+           "Consumer Discretionary": "Consumer Cyclical", "Consumer Staples": "Consumer Defensive", "Materials": "Basic Materials",
+           "Real Estate": "Real Estate", "Communication Services": "Communication Services", "Energy": "Energy",
+           "Industrials": "Industrials", "Utilities": "Utilities"}
+_GICS_IND = (("pharmaceuticals", "drug manufacturers"), ("automobile manufacturers", "auto manufacturers"),
+             ("automotive parts", "auto parts"))
+
+
+def screen_profile(domestic: bool, sector: str = "", industry: str = "", ksec: str = "", yinfo: dict | None = None) -> str:
+    if yinfo and (yinfo.get("sector") or yinfo.get("industry")):
+        return classify(yinfo.get("sector"), yinfo.get("industry"), ksec or None)
+    if domestic:
+        return classify(None, None, ksec)
+    ind = (industry or "").lower()
+    for a, b in _GICS_IND:
+        if a in ind:
+            ind = b
+    return classify(GICS_YH.get(sector, sector), ind)
+
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def screen_score(sym: str, domestic: bool, sector: str = "", industry: str = "", ksec: str = "", dart_key: str | None = None):
+    """한 종목의 6개월 점수 3개 (CAPM 미포함 · 업종 평균 대비 · CAPM 대비).
+    기업 리서치 첫 화면의 기본값(직전 사업연도 EPS 기준 PER · 분기 TTM · 모멘텀 · 위험 신호 · 추가 신호, 최근 10년)과 같은 규칙이며,
+    종목마다 Yahoo 요청을 줄이려고 컨센서스(12M 선행 PER)와 실적 서프라이즈는 뺀다."""
+    import yfinance as yf
+
+    import stats
+    from research_data import annual_per_series, load_sec_financials
+
+    h, sp = _hist_close(sym)
+    if len(h) < 300:
+        raise RuntimeError("주가 이력이 짧음")
+    yinfo = None
+    if domestic:
+        t = yf.Ticker(sym)
+        try:
+            yinfo = t.info or None
+        except Exception:  # noqa: BLE001
+            yinfo = None
+        sec = None
+        if dart_key:
+            try:
+                import kr
+
+                sec = kr.load_dart_financials(sym.split(".")[0], dart_key)
+                sec = sec if sec.shape[1] >= 2 else None
+            except Exception:  # noqa: BLE001
+                sec = None
+        if sec is None:
+            import kr
+
+            sec = kr.yahoo_frame({"income": t.income_stmt, "balance": t.balance_sheet, "cashflow": t.cashflow})
+    else:
+        sec = load_sec_financials(sym)
+    if sec is None or sec.shape[1] < 2:
+        raise RuntimeError("재무제표 없음")
+    prof = screen_profile(domestic, sector, industry, ksec, yinfo)
+    info = {"sector": (yinfo or {}).get("sector") or (None if domestic else GICS_YH.get(sector, sector))}
+    end = pd.Timestamp.now().normalize()
+    R = {"hist": h, "splits": sp, "_period": (end - pd.Timedelta(days=3652), end), "info": info}
+    daily = {}
+    ann = annual_per_series(h, sec, sp)
+    if ann is not None:
+        daily["PER"] = (ann, "배")
+    opts = dict(quarterly=not domestic, momentum=True, surprise=False, peers=False, flags=True, extra=True)
+    rf_now = stats.risk_free_for(domestic, pd.Timestamp.now().date())[0]
+    c = build_ctx(sec, R, sym, daily, opts, domestic=domestic)
+    rows, signals, _sk, flags = evaluate(c, prof, [], rf_now)
+    if not rows:
+        raise RuntimeError("판정할 수 있는 시점이 없음")
+    now_d = min(c["end"], c["h"].index[-1])
+    sg = signals(now_d)
+    sc, n = _score(sg)
+    if not n:
+        raise RuntimeError("지금 켜진 신호가 없음")
+    pool = None
+    if not domestic:
+        try:
+            pool = [tuple(p) for r in validate_profile(prof) if "pts" in r and r["종목"].upper() != sym.upper() for p in r["pts"]]
+        except Exception:  # noqa: BLE001
+            pool = None
+    fl = _flags_at(flags, c, now_d) if flags else []
+    out = {"prof": prof, "flags": list(fl)}
+    for m in ("abs", "ind", "capm"):
+        d = rec_score(rows, sc / n, pool, mode=m)
+        lo, mid, hi = d["lo"], d["mid"], d["hi"]
+        if fl:
+            lo, mid, hi = min(lo, 50), min(mid, 50), min(hi, 50)
+        out[m] = (float(mid), float(lo), float(hi), bool(d["hi"] - d["lo"] <= RELIABLE_WIDTH))
+    return out
+
+
 def score_label(x):
     return "매수" if x >= 65 else ("약한 매수" if x >= 55 else ("중립·보유" if x > 45 else ("약한 매도" if x > 35 else "매도")))
 
