@@ -319,14 +319,15 @@ def render_score_gauges(sec, R: dict, ticker: str, n_eps, src: str = "SEC 10-K")
     items = [("CAPM 미포함", S["abs"][0], S["abs"][1], sub("abs", "플러스")),
              ("업종 평균 대비", S["ind"][0], S["ind"][1], sub("ind", "업종보다 높음")),
              ("CAPM 대비", S["capm"][0], S["capm"][1], sub("capm", "CAPM 초과"))]
-    st.markdown(outlook.gauges_html(items), unsafe_allow_html=True)
+    td, trel = outlook.total_score([S[m][0] for m in ("abs", "ind", "capm")])
+    st.markdown(outlook.gauges_html(items, total=("종합 점수", td, trel, "세 점수의 평균")), unsafe_allow_html=True)
     names = {"PER (직전 사업연도 EPS)": "PER", "12M 선행 PER (컨센서스 추이)": "12M PER"}
     used = [names.get(k, _PER_TRACE.get(k, k)) for k in chosen if k != "주가"]
     extra = [x for x, on in (("모멘텀", opts["momentum"]), ("실적 서프라이즈", opts["surprise"]), ("추가 신호", opts["extra"])) if on]
     st.caption(f"판정 근거: {', '.join(used + extra) or '-'} · {outlook.PROFILES[prof]['name']} 기준 · 업종 평균 = {res['sname'] or '-'}"
                + (f" · 위험 신호: {', '.join(res['flags'])} (50점 상한)" if res["flags"] else "")
-               + ". 점수 = 지금과 판정 점수가 비슷했던 과거 시점들 가운데 이후 6개월 수익률이 0 · 업종 평균 · CAPM 기대수익률을 넘은 비율 "
-               "(겹치는 기간만큼 사례를 줄이고 50점 쪽으로 당김). 80% 구간이 20점보다 넓으면 범위로 표시합니다. "
+               + ". 종합 점수 = 세 점수의 평균. 각 점수 = 지금과 판정 점수가 비슷했던 과거 시점들 가운데 이후 6개월 수익률이 0 · 업종 평균 · CAPM 기대수익률을 넘은 비율 "
+               "(겹치는 기간만큼 사례를 줄이고 50점 쪽으로 당김). 80% 구간이 20점보다 넓으면 원 바깥 얇은 띠와 숫자 아래에 범위를 함께 표시합니다. "
                + (f"같은 업종 대표 종목 {res.get('pool_n', 0)}곳의 사례를 합쳐 계산. " if res["pooled"]
                   else "국내 종목은 같은 업종 대표 종목 목록이 없어 이 종목 사례만 씁니다. " if domestic else "")
                + "지표는 아래 그래프 항목에서 바꿀 수 있습니다.")
