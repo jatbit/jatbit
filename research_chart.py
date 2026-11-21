@@ -330,6 +330,26 @@ def render_score_gauges(sec, R: dict, ticker: str, n_eps, src: str = "SEC 10-K")
                + (f"같은 업종 대표 종목 {res.get('pool_n', 0)}곳의 사례를 합쳐 계산. " if res["pooled"]
                   else "국내 종목은 같은 업종 대표 종목 목록이 없어 이 종목 사례만 씁니다. " if domestic else "")
                + "지표는 아래 그래프 항목에서 바꿀 수 있습니다.")
+    if not domestic:
+        exp_r, op_r = ui.more("옵션 시장이 보는 6개월 뒤 확률 (위험중립)", key=f"rs_more_rnd_{ticker}")
+        if op_r:
+            with exp_r:
+                try:
+                    import hedgesim
+
+                    with st.spinner("옵션 체인으로 분포를 계산하는 중..."):
+                        Rn = hedgesim.rnd_6m(ticker)
+                except Exception as e:  # noqa: BLE001
+                    Rn = False
+                    st.caption(f"옵션 체인을 불러오지 못했습니다 ({e}).")
+                if Rn:
+                    ui.cards([("오를 확률", f"{Rn['p_up'] * 100:.0f}%", f"{Rn['expiry']} 만기 기준"),
+                              ("10% 넘게 오를 확률", f"{Rn['p_up10'] * 100:.0f}%"), ("10% 넘게 빠질 확률", f"{Rn['p_dn10'] * 100:.0f}%"),
+                              ("90% 구간", f"{Rn['q05']:,.0f} – {Rn['q95']:,.0f}")], cols=4)
+                    st.caption("옵션 가격에서 뽑은 위험중립 확률입니다. 실제 확률이 아니라 위험 프리미엄이 섞여 있어, 위 점수(과거 통계)와 "
+                               "같은 기준은 아닙니다. 자세한 분포는 옵션 페이지 → 변동성 탭에 있습니다.")
+                elif Rn is None:
+                    st.caption("이 종목은 6개월 근처 만기의 외가격 옵션 호가가 부족해 분포를 뽑지 못했습니다.")
 
 
 __all__ = [n for n in dir() if not n.startswith("__")]  # 밑줄로 시작하는 도우미도 다른 모듈에서 쓸 수 있게
