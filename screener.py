@@ -286,10 +286,25 @@ def render_screener() -> None:
             D = D[D["vol_ratio"] >= volx]
 
     # ---- 결과
-    ui.section(f"검색 결과 {len(D):,}종목", f"대상 {len(U):,}종목 중 · 표의 머리글을 누르면 정렬 · 행을 고르면 차트·리서치로 이동")
     if D.empty:
+        ui.section("검색 결과 0종목", f"대상 {len(U):,}종목 중")
         st.info("조건에 맞는 종목이 없습니다. 조건을 넓혀 보세요.")
         return
+    store = st.session_state.get("sc_scores", {})
+    scores = {s: _total(store[(domestic, s)]) for s in D["Symbol"].astype(str)
+              if (domestic, s) in store and not store[(domestic, s)].get("err")}
+    (t1, o1), (t2, o2) = ui.lazy_tabs(["검색 결과", "점수 순위 TOP 20"], key="sc_res_tabs")
+    if o2:
+        with t2:
+            _render_scores(D, domestic)
+    if not o1:
+        return
+    with t1:
+        _results(D, U, T, domestic, scores, rsi_n, ma_s, vol_n, hv_n)
+
+
+def _results(D, U, T, domestic, scores, rsi_n, ma_s, vol_n, hv_n) -> None:
+    ui.section(f"검색 결과 {len(D):,}종목", f"대상 {len(U):,}종목 중 · 머리글을 누르면 정렬 · 행을 고르면 차트·리서치로 이동")
     if domestic:
         out = pd.DataFrame({
             "종목": D["Name"], "코드": D["Code"], "섹터": D["Sector"], "업종": D["Industry"] if "Industry" in D.columns else D["Sector"],
@@ -302,6 +317,8 @@ def render_screener() -> None:
         out = out.assign(**{"1개월(%)": D["r1m"], "3개월(%)": D["r3m"], "1년(%)": D["r1y"], f"RSI({rsi_n})": D["rsi"],
                             f"{ma_s}일선 이격(%)": D["gap_s"], "52주 고점 대비(%)": D["dd52"], "거래량 배수": D["vol_ratio"],
                             "변동성(%)": D["hv"]})
+    if scores:
+        out.insert(2, "점수", [round(scores[s][0]) if s in scores else np.nan for s in D["Symbol"].astype(str)])
     out = out.reset_index(drop=True)
     for c in ("시가총액(억원)", "거래대금(억원)"):
         if c in out.columns:
@@ -309,7 +326,9 @@ def render_screener() -> None:
     if domestic:
         out["현재가"] = out["현재가"].round(0)
     pct = st.column_config.NumberColumn
-    cfg = {"현재가": pct("현재가", format="localized" if domestic else "%.2f"),
+    cfg = {"점수": st.column_config.ProgressColumn("점수", min_value=0, max_value=100, format="%d",
+                                                 help="'점수 순위' 탭에서 계산한 6개월 종합 점수 (0~100, 50 = 중립)"),
+           "현재가": pct("현재가", format="localized" if domestic else "%.2f"),
            "등락률(%)": pct("등락률(%)", format="%+.2f"), "시가총액(억원)": pct("시가총액(억원)", format="localized"),
            "거래대금(억원)": pct("거래대금(억원)", format="localized"),
            "1개월(%)": pct("1개월(%)", format="%+.1f"), "3개월(%)": pct("3개월(%)", format="%+.1f"),
@@ -336,8 +355,8 @@ def render_screener() -> None:
             _go("research", "rs_ticker", str(r["코드"]))
     st.download_button("결과 CSV 내려받기", out.to_csv(index=False).encode("utf-8-sig"), file_name="screener.csv", mime="text/csv")
     st.caption("국내는 KRX 당일 시세(장중엔 지연)와 Yahoo 일봉, 미국은 Yahoo 일봉 기준입니다. 기술적 지표는 1시간마다 새로 계산합니다. "
-               "조건에 맞는다는 것이 매수·매도 신호를 뜻하지는 않습니다.")
-    _render_scores(D, domestic)
+               "조건에 맞는다는 것이 매수·매도 신호를 뜻하지는 않습니다."
+               + ("" if scores else " 매수·매도 점수는 '점수 순위' 탭에서 계산하면 이 표에도 붙습니다."))
 
 
 # ----------------------------------------------------------------------
@@ -401,51 +420,71 @@ def _run_scores(jobs: list, domestic: bool) -> None:
     bar.empty()
 
 
+def _total(r: dict):
+    """점수 3개(CAPM 미포함 · 업종 평균 대비 · CAPM 대비)의 평균 → (점수, 80% 하단, 상단, 좁은지)."""
+    import outlook
+
+    mid = float(np.mean([r[m][0] for m in SCORE_COLS]))
+    lo = float(np.mean([r[m][1] for m in SCORE_COLS]))
+    hi = float(np.mean([r[m][2] for m in SCORE_COLS]))
+    return mid, lo, hi, hi - lo <= outlook.RELIABLE_WIDTH
+
+
 def _render_scores(D: pd.DataFrame, domestic: bool) -> None:
     import outlook
 
-    ui.section("매수·매도 점수 순위 (6개월)", "검색 결과 종목마다 기업 리서치와 같은 방식으로 점수를 계산해 상위 20종목")
-    st.markdown('<div style="font-size:11px;opacity:.6;margin-top:-8px">투자 권유 아님 · 과거 데이터로 계산한 모델 점수</div>',
-                unsafe_allow_html=True)
     ss = st.session_state
     jobs = _score_jobs(D, domestic)
     store = ss.get("sc_scores", {})
     have = [store[(domestic, j["sym"])] for j in jobs if (domestic, j["sym"]) in store]
     todo = [j for j in jobs if (domestic, j["sym"]) not in store]
-    lab = f"검색 결과 {len(jobs):,}종목 점수 계산" if not have else (f"새로 걸린 {len(todo):,}종목 점수 추가 계산" if todo else "점수 다시 계산")
     est = max(1, round(len(todo or jobs) * (6 if domestic else 4) / 3 / 60))
-    c1, c2 = st.columns([1.3, 2])
-    go_ = c1.button(lab, key="sc_score_btn", type="primary", use_container_width=True)
-    c2.caption(f"종목마다 10년치 주가·재무제표로 과거 판정을 다시 돌려 오래 걸립니다 (약 {est}분 예상). "
-               "계산한 점수는 6시간 동안 다시 쓰고, 계산 중에 다른 조작을 하면 거기서 멈춥니다(끝난 종목은 남음).")
+    if not have:
+        with st.container(border=True):
+            st.markdown(f"**검색 결과 {len(jobs):,}종목의 매수·매도 점수를 매겨 상위 20종목을 보여줍니다**")
+            st.caption(f"종목마다 10년치 주가·재무제표로 '6개월 뒤 오를지'를 판정합니다. 약 {est}분 걸리고, 그동안 이 화면을 그대로 두세요."
+                       + (" 조건을 좁혀 종목 수를 줄이면 빨라집니다." if len(jobs) > 150 else ""))
+            go_ = st.button("점수 계산 시작", key="sc_score_btn", type="primary")
+    else:
+        n_ok = sum(1 for r in have if not r.get("err"))
+        c1, c2 = st.columns([3, 1])
+        c1.caption(f"{n_ok:,}종목 점수 계산됨" + (f" · 조건을 바꿔 새로 걸린 {len(todo):,}종목은 아직 (약 {est}분)" if todo else ""))
+        go_ = c2.button(f"{len(todo):,}종목 추가 계산" if todo else "다시 계산", key="sc_score_btn",
+                        type="primary" if todo else "secondary", use_container_width=True)
     if go_:
-        if not todo:  # 다시 계산: 저장된 결과를 지우고 처음부터 (6시간 캐시는 그대로라 빠름)
+        if not todo:  # 다시 계산 (6시간 안이면 저장된 계산을 다시 써서 빠름)
             for j in jobs:
                 ss.get("sc_scores", {}).pop((domestic, j["sym"]), None)
             todo = jobs
         _run_scores(todo, domestic)
-        store = ss.get("sc_scores", {})
-        have = [store[(domestic, j["sym"])] for j in jobs if (domestic, j["sym"]) in store]
+        st.rerun()
     if not have:
         return
     good = [r for r in have if not r.get("err")]
     if not good:
         st.warning(f"{len(have)}종목 모두 점수를 내지 못했습니다 (재무제표·주가 이력 부족 등).")
         return
-    basis = st.radio("정렬 기준", list(SCORE_COLS), format_func=SCORE_COLS.get, horizontal=True, key="sc_score_basis")
+    detail = st.toggle("세부 점수 보기", key="sc_score_detail", help="종합 점수를 만든 세 점수와 80% 구간")
     rows = []
     for r in good:
-        mid, lo, hi, rel = r[basis]
-        rows.append({"종목": r["name"], "코드": r["code"], "업종 유형": outlook.PROFILES[r["prof"]]["name"],
-                     SCORE_COLS["abs"]: round(r["abs"][0]), SCORE_COLS["ind"]: round(r["ind"][0]), SCORE_COLS["capm"]: round(r["capm"][0]),
-                     "판정": outlook.score_label(mid), "80% 구간": f"{lo:.0f}–{hi:.0f}" if not rel else "-",
-                     "위험 신호": ", ".join(r["flags"]) if r["flags"] else "", "_k": mid})
+        mid, lo, hi, rel = _total(r)
+        row = {"종목": r["name"], "코드": r["code"], "업종 유형": outlook.PROFILES[r["prof"]]["name"], "종합 점수": round(mid),
+               "판정": outlook.score_label(mid)}
+        if detail:
+            row.update({SCORE_COLS[m]: round(r[m][0]) for m in SCORE_COLS})
+            row["80% 구간"] = f"{lo:.0f}–{hi:.0f}"
+        row["위험 신호"] = ", ".join(r["flags"]) if r["flags"] else ""
+        row["_k"] = mid
+        rows.append(row)
     top = pd.DataFrame(rows).sort_values("_k", ascending=False).head(20).drop(columns="_k").reset_index(drop=True)
     top.insert(0, "순위", range(1, len(top) + 1))
     nc = st.column_config.NumberColumn
-    cfg = {v: nc(v, format="%d") for v in SCORE_COLS.values()}
-    cfg["80% 구간"] = st.column_config.TextColumn("80% 구간", help=f"{SCORE_COLS[basis]} 점수의 80% 구간 (폭이 20점보다 넓을 때만)")
-    kw = dict(use_container_width=True, hide_index=True, column_config=cfg, height=min(38 * (len(top) + 1) + 4, 800))
+    cfg = {"순위": nc("순위", format="%d", width="small"),
+           "종합 점수": st.column_config.ProgressColumn("종합 점수", min_value=0, max_value=100, format="%d점",
+                                                     help="50 = 중립, 55 이상 약한 매수, 65 이상 매수, 45 이하 약한 매도, 35 이하 매도"),
+           "위험 신호": st.column_config.TextColumn("위험 신호", help="부실 위험 등이 켜지면 점수 상한이 50점")}
+    cfg.update({v: nc(v, format="%d") for v in SCORE_COLS.values()})
+    kw = dict(use_container_width=True, hide_index=True, column_config=cfg, height=min(36 * (len(top) + 1) + 4, 760))
     try:
         ev = st.dataframe(top, on_select="rerun", selection_mode="single-row", key="sc_score_table", **kw)
         sel = ev.selection.rows if ev is not None and hasattr(ev, "selection") else []
@@ -454,13 +493,15 @@ def _render_scores(D: pd.DataFrame, domestic: bool) -> None:
         sel = []
     if sel:
         r = top.iloc[sel[0]]
-        if st.button(f"{r['종목']} 기업 리서치에서 보기", key="sc_score_go"):
+        b1, b2, _ = st.columns([1, 1, 2])
+        if b1.button(f"{r['종목']} 기업 리서치", key="sc_score_go", type="primary", use_container_width=True):
             _go("research", "rs_ticker", str(r["코드"]))
+        if b2.button("차트 보기", key="sc_score_chart", use_container_width=True):
+            _go("chart", "single_query", str(r["종목"]) if domestic else str(r["코드"]))
+    else:
+        st.caption("행을 누르면 기업 리서치·차트로 바로 갈 수 있습니다.")
     n_err = len(have) - len(good)
-    st.caption(f"{len(good):,}종목 중 상위 20 · {SCORE_COLS[basis]} 점수 순"
-               + (f" · {n_err}종목은 재무제표·주가 이력이 부족해 빠짐" if n_err else "")
-               + ". 기업 리서치 첫 화면의 기본 판정(직전 사업연도 EPS 기준 PER"
-               + ("" if domestic else " · 분기 TTM") + " · 모멘텀 · 위험 신호 · 추가 신호, 최근 10년)과 같은 규칙인데, "
-               "종목마다 Yahoo 요청을 줄이려고 컨센서스(12M 선행 PER)와 실적 서프라이즈는 뺐습니다. 그래서 리서치 화면 점수와 몇 점 다를 수 있습니다. "
-               "위험 신호가 있으면 50점이 상한입니다.")
-
+    st.caption(f"{len(good):,}종목 중 상위 20" + (f" · {n_err}종목은 재무제표·주가 이력이 부족해 빠짐" if n_err else "")
+               + ". 종합 점수 = 기업 리서치의 세 점수(CAPM 미포함 · 업종 평균 대비 · CAPM 대비) 평균. "
+               "종목이 많아 컨센서스(12M 선행 PER)와 실적 서프라이즈 신호는 빼고 계산해 리서치 화면과 몇 점 다를 수 있습니다. "
+               "투자 권유가 아닌 과거 데이터 기반 모델 점수입니다.")
