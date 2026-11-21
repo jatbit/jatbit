@@ -302,7 +302,7 @@ def render_score_gauges(sec, R: dict, ticker: str, n_eps, src: str = "SEC 10-K")
     st.markdown('<div style="font-size:11px;opacity:.6;margin-top:-8px">투자 권유 아님 · 과거 데이터로 계산한 모델 점수</div>',
                 unsafe_allow_html=True)
     try:
-        with st.spinner("과거 시점마다 다시 판정해 점수를 계산하는 중..."):
+        with st.spinner("과거 시점마다 다시 판정해 점수를 계산하는 중... (같은 업종 대표 종목 사례를 처음 모을 때는 1~2분 걸립니다)"):
             res = outlook.summary_scores(sec, R, ticker, sel, daily_keys, build, opts, prof, domestic)
     except Exception as e:  # noqa: BLE001
         st.caption(f"점수를 계산하지 못했습니다 ({e}).")
@@ -327,7 +327,8 @@ def render_score_gauges(sec, R: dict, ticker: str, n_eps, src: str = "SEC 10-K")
                + (f" · 위험 신호: {', '.join(res['flags'])} (50점 상한)" if res["flags"] else "")
                + ". 점수 = 지금과 판정 점수가 비슷했던 과거 시점들 가운데 이후 6개월 수익률이 0 · 업종 평균 · CAPM 기대수익률을 넘은 비율 "
                "(겹치는 기간만큼 사례를 줄이고 50점 쪽으로 당김). 80% 구간이 20점보다 넓으면 범위로 표시합니다. "
-               + ("같은 업종 대표 종목 사례 포함. " if res["pooled"] else "")
+               + (f"같은 업종 대표 종목 {res.get('pool_n', 0)}곳의 사례를 합쳐 계산. " if res["pooled"]
+                  else "국내 종목은 같은 업종 대표 종목 목록이 없어 이 종목 사례만 씁니다. " if domestic else "")
                + "지표는 아래 그래프 항목에서 바꿀 수 있습니다.")
 
 
