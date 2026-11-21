@@ -152,7 +152,7 @@ def _grid(items, cols=4):
 
 
 def render_bonds() -> None:
-    st.caption("미국 국채는 FRED, 국고채는 FinanceDataReader 일별 금리입니다. 개별 회사채 시세는 무료 데이터가 없어 '내 채권'에 직접 넣습니다.")
+    st.caption("미국 국채는 FRED, 국고채는 한국은행 ECOS 일별 금리입니다. 개별 회사채 시세는 무료 데이터가 없어 '내 채권'에 직접 넣습니다.")
     try:
         ts = load_treasury()
     except Exception as e:  # noqa: BLE001
