@@ -84,7 +84,7 @@ def _hstrike(key: str, d: pd.DataFrame, is_call: bool, exp: str, S: float, mny: 
     return k, ks
 
 
-def render_hedge() -> None:
+def render_hedge(editor: bool = True) -> None:
     st.caption("보유 주식·옵션의 델타(주가 1달러 변화에 대한 손익 변화)와 감마(델타의 변화)를 0으로 만드는 헷지 거래를 자동으로 계산합니다. "
                "헷지 수단(옵션 만기·행사가)과 계산 방식은 각 종목의 '세부 계산'에서 바꿀 수 있습니다.")
     st.session_state["hedge_trades"] = {}
@@ -96,7 +96,8 @@ def render_hedge() -> None:
     n_o = int(len(opts.dropna(how="all"))) if len(opts) else 0
 
     # ---- 포지션 입력 (입력한 뒤에는 접어 둠)
-    exp_box, op = ui.more(f"보유 포지션 입력·수정 (주식 {n_s}종목 · 옵션 {n_o}건)", key="hedge_more_pos", expanded=(n_s + n_o == 0))
+    exp_box, op = ui.more(f"보유 포지션 입력·수정 (주식 {n_s}종목 · 옵션 {n_o}건)", key="hedge_more_pos", expanded=(n_s + n_o == 0)) \
+        if editor else (None, False)
     if op:
         with exp_box:
             res = st.session_state.get("pf_opt_result")
@@ -147,7 +148,8 @@ def render_hedge() -> None:
         under.setdefault(code, {"shares": 0.0, "opts": [], "name": code})
         under[code]["opts"].append({"exp": str(r["만기"])[:10], "is_call": r["종류"] == "콜", "K": float(k), "n": float(n)})
     if not under:
-        st.info("위 '보유 포지션 입력·수정'을 펼쳐 보유 주식이나 옵션을 넣으면 헷지를 자동으로 계산합니다.")
+        if editor:
+            st.info("위 '보유 포지션 입력·수정'을 펼쳐 보유 주식이나 옵션을 넣으면 헷지를 자동으로 계산합니다.")
         return
 
     summary, kr_only = [], []
@@ -160,7 +162,8 @@ def render_hedge() -> None:
             if out:
                 summary.append(out)
     if kr_only:
-        st.caption("국내 종목은 옵션 데이터가 없어 옵션 헷지를 계산하지 않았습니다 (델타 = 보유 주식 수, 감마 = 0): " + ", ".join(kr_only))
+        st.caption(("국내 종목은 아래 '국내 옵션' 칸에서 계산합니다: " if not editor else
+                    "국내 종목은 옵션 데이터가 없어 옵션 헷지를 계산하지 않았습니다 (델타 = 보유 주식 수, 감마 = 0): ") + ", ".join(kr_only))
     if len(summary) > 1:
         exp_s, op_s = ui.more("종목별 요약 표", key="hedge_more_sum")
         if op_s:
