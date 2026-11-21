@@ -1252,7 +1252,7 @@ def summary_scores(sec, R, ticker, sel, daily_names, build_daily, opts, prof, do
     import stats
 
     use = [k for k in sel if k in DIR or k in GROWTH]
-    pooled = bool(st.session_state.get(f"rs_val_{prof}")) and not domestic
+    pooled = not domestic  # 같은 업종 대표 종목 사례를 기본으로 합친다 (국내는 대표 종목 목록이 없어 이 종목만)
     per = R.get("_period")
     key = (ticker, prof, tuple(use), tuple(sorted(daily_names)), tuple(sorted(opts.items())), str(per), pooled,
            str(R["hist"].index[-1]) if isinstance(R.get("hist"), pd.Series) and len(R["hist"]) else "")
@@ -1272,11 +1272,12 @@ def summary_scores(sec, R, ticker, sel, daily_names, build_daily, opts, prof, do
     sc, n = _score(sg)
     if not n:
         return None
-    pool = None
+    pool, pool_n = None, 0
     if pooled:
         try:
-            res = validate_profile(prof)
-            pool = [tuple(p) for r in res if "pts" in r and r["종목"].upper() != ticker.upper() for p in r["pts"]]
+            res = [r for r in validate_profile(prof) if "pts" in r and r["종목"].upper() != ticker.upper()]
+            pool = [tuple(p) for r in res for p in r["pts"]]
+            pool_n = len(res)
         except Exception:  # noqa: BLE001
             pool = None
     fl = _flags_at(flags, c, now_d) if flags else []
@@ -1287,7 +1288,7 @@ def summary_scores(sec, R, ticker, sel, daily_names, build_daily, opts, prof, do
         if fl:
             d.update(mid=min(d["mid"], 50), lo=min(d["lo"], 50), hi=min(d["hi"], 50))
         out[m] = (d, rel)
-    res_ = dict(scores=out, verdict=_verdict(sc, n), flags=fl, sname=c["sname"], pooled=bool(pool), n_sig=len(sg))
+    res_ = dict(scores=out, verdict=_verdict(sc, n), flags=fl, sname=c["sname"], pooled=bool(pool), pool_n=pool_n, n_sig=len(sg))
     memo.clear()  # 최근 결과 하나만 보관
     memo[key] = res_
     return res_
