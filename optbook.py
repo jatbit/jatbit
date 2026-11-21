@@ -283,7 +283,7 @@ def render_book(ticker: str | None) -> None:
     if ns + no + nk == 0:
         st.info("위 '포지션 추가·수정'에서 주식이나 옵션을 넣으면 아래에 헷지와 손익이 계산됩니다.")
         return
-    (t1, o1), (t2, o2), (t3, o3) = ui.lazy_tabs(["헷지", "손익·위험", "헷지 시뮬레이션"], key="bk_tabs")
+    (t1, o1), (t2, o2), (t3, o3), (t4, o4) = ui.lazy_tabs(["헷지", "손익·위험", "헷지 시뮬레이션", "전체 위험 (채권 포함)"], key="bk_tabs")
     if o1:
         with t1:
             from hedge import render_hedge
@@ -310,6 +310,11 @@ def render_book(ticker: str | None) -> None:
                 hedgesim.render(ticker)
             except ImportError:
                 st.info("준비 중입니다.")
+    if o4:
+        with t4:
+            import riskall
+
+            riskall.render("ra_o")
 
 
 __all__ = [n for n in dir() if not n.startswith("__")]
