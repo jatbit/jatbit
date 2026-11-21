@@ -54,7 +54,7 @@ def _tip(row, ticker, T) -> str:
     return "<br>".join(lines)
 
 
-def chain_html(d: pd.DataFrame, ticker: str, T: float, S: float, dark: bool) -> str:
+def chain_html(d: pd.DataFrame, ticker: str, T: float, S: float, dark: bool, compact: bool = False) -> str:
     calls = d[d["is_call"]].set_index("strike", drop=False)
     puts = d[~d["is_call"]].set_index("strike", drop=False)
     strikes = sorted(set(calls.index).union(puts.index))
@@ -83,9 +83,12 @@ def chain_html(d: pd.DataFrame, ticker: str, T: float, S: float, dark: bool) -> 
                 cells.append(f"<td class='{cls} mut'>{'-' if not np.isfinite(v) else f'{v:,.0f}'}</td>")
         return "".join(cells)
 
-    left = ["openInterest", "volume", "delta", "iv", "theo", "mkt"]
-    right = ["mkt", "theo", "iv", "delta", "volume", "openInterest"]
-    head_l = ["미결제", "거래량", "델타", "IV", "이론가", "시장가"]
+    if compact:  # 모바일용: 콜 | 행사가 | 풋 에 꼭 필요한 것만
+        left, right, head_l = ["iv", "delta", "mkt"], ["mkt", "delta", "iv"], ["IV", "델타", "시장가"]
+    else:
+        left = ["openInterest", "volume", "delta", "iv", "theo", "mkt"]
+        right = ["mkt", "theo", "iv", "delta", "volume", "openInterest"]
+        head_l = ["미결제", "거래량", "델타", "IV", "이론가", "시장가"]
     rows = []
     for k in strikes:
         a = " atm" if k == atm else ""
@@ -116,7 +119,7 @@ padding:7px 9px;font-size:11.5px;line-height:1.45;box-shadow:0 4px 14px rgba(0,0
 #tip table.g td:nth-child(even){{text-align:right;font-variant-numeric:tabular-nums;padding-right:12px}}
 </style>
 <div class="wrap"><table class="c">
-<thead><tr><th class="grp" colspan="6">콜 (CALL)</th><th></th><th class="grp" colspan="6">풋 (PUT)</th></tr>
+<thead><tr><th class="grp" colspan="{len(head_l)}">콜 (CALL)</th><th></th><th class="grp" colspan="{len(head_l)}">풋 (PUT)</th></tr>
 <tr>{''.join(f'<th>{h}</th>' for h in head_l)}<th>행사가</th>{''.join(f'<th>{h}</th>' for h in reversed(head_l))}</tr></thead>
 <tbody>{''.join(rows)}</tbody></table></div>
 <div id="tip"></div>
@@ -160,6 +163,9 @@ def _add_position(ticker, expiry):
 
 
 def render_chain() -> None:
+    if st.session_state.get("_opt_shared"):
+        _render_chain_shared()
+        return
     pf = _pf_us_tickers()
     presets = list(dict.fromkeys(pf + OPT_PRESETS))[:10]
     if hasattr(st, "pills"):
@@ -197,8 +203,7 @@ def render_chain() -> None:
     first_i = next((i for i, e in enumerate(exps) if (pd.Timestamp(e) - today).days >= 7), 0)
     expiry = c1.selectbox("만기일", exps, index=first_i, key=f"opt_expiry_{ticker}",
                           format_func=lambda x: f"{x} (D-{(pd.Timestamp(x) - today).days})")
-    basis = c2.radio("그릭스 기준 변동성", ["IV", "HV"], horizontal=True, key="opt_greek_basis",
-                     format_func=lambda x: "내재(IV)" if x == "IV" else "역사적(HV)")
+    basis = st.session_state.get("opt_greek_basis", "IV")
     try:
         raw = load_chain_raw(ticker, expiry)
     except Exception as e:  # noqa: BLE001
@@ -246,6 +251,97 @@ def render_chain() -> None:
     msg = st.session_state.pop("opt_add_msg", None)
     if msg:
         st.success(msg + " '델타·감마 헷지' 탭에서 확인하세요.")
+
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def hist_us(ticker: str) -> pd.Series:
+    """백테스트용 수정주가 (분할·배당 반영), 최대 기간."""
+    h = _retry(lambda: yf.Ticker(ticker).history(period="max", auto_adjust=True), tries=3)
+    s = h["Close"].dropna()
+    s.index = pd.to_datetime(s.index).tz_localize(None)
+    return s[s > 0]
+
+
+def _render_chain_shared() -> None:
+    """공통 바의 티커로: 지표 카드 → 만기·보기·범위 → 체인 → 전략 만들기."""
+    import strat
+    from optbook import add_strategy_us
+
+    ticker = (st.session_state.get("opt_ticker") or "").strip().upper()
+    if not ticker:
+        st.info("맨 위에서 티커를 고르거나 입력하세요.")
+        return
+    if not is_us_ticker(ticker):
+        st.warning("체인은 미국 종목·ETF만 됩니다. 국내 옵션은 '내 포지션' 탭에서 KRX CSV를 올리거나 직접 입력하세요.")
+        return
+    try:
+        exps = load_expiries(ticker)
+    except Exception as e:  # noqa: BLE001
+        st.error(f"옵션 만기 목록을 불러오지 못했습니다: {e}. 잠시 후 다시 시도해 주세요.")
+        return
+    if not exps:
+        st.warning(f"{ticker}에 상장된 옵션이 없거나 Yahoo에서 조회되지 않았습니다.")
+        return
+    P = market_params(ticker, "chain")
+    if P is None:
+        return
+    today = pd.Timestamp.now().normalize()
+    c1, c2, c3 = st.columns([2, 1.3, 2.7])
+    first_i = next((i for i, e in enumerate(exps) if (pd.Timestamp(e) - today).days >= 7), 0)
+    expiry = c1.selectbox("만기일", exps, index=first_i, key=f"opt_expiry_{ticker}",
+                          format_func=lambda x: f"{x} (D-{(pd.Timestamp(x) - today).days})")
+    view = c2.radio("보기", ["간단히", "전체"], horizontal=True, key="opt_view")
+    try:
+        raw = load_chain_raw(ticker, expiry)
+    except Exception as e:  # noqa: BLE001
+        st.error(f"옵션 가격을 불러오지 못했습니다: {e}. 잠시 후 다시 시도해 주세요.")
+        return
+    T = years_to_expiry(expiry)
+    d = build_chain(raw, P, T, st.session_state.get("opt_greek_basis", "IV"))
+    if d.empty:
+        st.warning("해당 만기의 옵션 가격이 없습니다.")
+        return
+    lo, hi = float(d["strike"].min()), float(d["strike"].max())
+    S = P["S"]
+    d_lo, d_hi = max(lo, S * 0.9), min(hi, S * 1.1)
+    if d_lo >= d_hi:
+        d_lo, d_hi = lo, hi
+    rng = c3.slider("행사가 범위", min_value=lo, max_value=hi, value=(d_lo, d_hi), key=f"opt_rng_{ticker}_{expiry}")
+    v = d[d["strike"].between(*rng)]
+    st.caption("시장가를 누르면(마우스는 올리면) 그릭스가 뜹니다. 파란 칸 = 내가격, 노란 행사가 = 등가격.")
+    n_rows = len(set(v["strike"]))
+    components.html(chain_html(v, ticker, T, S, _is_dark(), compact=(view == "간단히")),
+                    height=min(560, 70 + 27 * n_rows), scrolling=False)
+    with st.expander("전체 수치 표 · CSV 내려받기"):
+        show = v[["is_call", "contractSymbol", "strike", "bid", "ask", "lastPrice", "mkt", "theo", "diff", "iv",
+                  "impliedVolatility", "delta", "gamma", "vega", "theta", "rho", "volume", "openInterest"]].copy()
+        show["is_call"] = show["is_call"].map(TYPE_KO)
+        show["iv"] *= 100
+        show["impliedVolatility"] *= 100
+        show.columns = ["종류", "계약코드", "행사가", "매수호가", "매도호가", "최근가", "시장가", "이론가(BSM)", "괴리",
+                        "IV 계산(%)", "IV Yahoo(%)", "델타", "감마", "베가(1%p)", "세타(1일)", "로(1%p)", "거래량", "미결제약정"]
+        st.dataframe(show.round(4), use_container_width=True, hide_index=True, height=420)
+        st.download_button("CSV 내려받기", show.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"{ticker}_{expiry}_chain.csv", mime="text/csv", key="opt_dl")
+    # ---- 전략 만들기
+    st.markdown("##### 전략 만들기")
+    atm = d.iloc[(d["strike"] - S).abs().argsort()[:2]]
+    atm_iv = float(np.nanmean(atm["iv"])) if len(atm) else float("nan")
+    hv60 = P["hv"].get("60일", float("nan"))
+    try:
+        hist = hist_us(ticker)
+    except Exception:  # noqa: BLE001
+        hist = None
+    krw = st.session_state.get("opt_krw")
+    fx = st.session_state.get("_opt_fx") or 1400.0
+    ctx = {"S": S, "T": T, "r": P["r"], "q": P["q"], "sig": atm_iv if np.isfinite(atm_iv) else P["sig_theo"],
+           "strikes": sorted(d["strike"].unique().tolist()), "chain": d, "mult": MULT * (fx if krw else 1.0),
+           "cur": "원" if krw else "$", "label": f"{ticker} {expiry}", "hist": hist,
+           "iv_hv": (atm_iv / hv60) if np.isfinite(atm_iv) and hv60 == hv60 and hv60 > 0 else 1.0}
+    strat.render_builder(ctx, key=f"sb_{ticker}", on_add=add_strategy_us(ticker, expiry))
+    msg = st.session_state.pop("chain_strat_addmsg", None)
+    if msg:
+        st.success(msg + " '내 포지션' 탭에서 헷지와 손익을 볼 수 있습니다.")
 
 
 # ======================================================================
