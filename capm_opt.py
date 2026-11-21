@@ -19,6 +19,9 @@ from options import (MULT, TYPE_KO, _row_for, build_chain, is_us_ticker, load_ch
 
 def _usd(x) -> str:
     x = float(x)
+    if st.session_state.get("opt_krw"):
+        v = x * float(st.session_state.get("_opt_fx") or 1400.0)
+        return ("-" if v < 0 else "") + f"{abs(v):,.0f}원"
     return ("-$" if x < 0 else "$") + f"{abs(x):,.0f}"
 
 
