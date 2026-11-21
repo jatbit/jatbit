@@ -38,10 +38,14 @@ def _am_iv_table(ticker: str, expiry: str, S: float, r: float, q: float, sig: fl
 
 def render_american() -> None:
     st.markdown("##### 아메리칸 옵션 계산기")
-    if hasattr(st, "pills"):
-        st.pills("빠른 선택", OPT_PRESETS, key="am_pill",
-                 on_change=lambda: st.session_state.__setitem__("am_ticker", st.session_state.get("am_pill")) if st.session_state.get("am_pill") else None)
-    ticker = (st.text_input("미국 티커 (비우면 직접 입력한 값으로만 계산)", key="am_ticker", placeholder="AAPL") or "").strip().upper()
+    if st.session_state.get("_opt_shared"):
+        ticker = (st.session_state.get("opt_ticker") or "").strip().upper()
+        st.caption("맨 위 티커의 현재가·변동성으로 시작합니다. 아래 값을 고치면 그 값으로 계산합니다.")
+    else:
+        if hasattr(st, "pills"):
+            st.pills("빠른 선택", OPT_PRESETS, key="am_pill",
+                     on_change=lambda: st.session_state.__setitem__("am_ticker", st.session_state.get("am_pill")) if st.session_state.get("am_pill") else None)
+        ticker = (st.text_input("미국 티커 (비우면 직접 입력한 값으로만 계산)", key="am_ticker", placeholder="AAPL") or "").strip().upper()
     S0, q0, r0, sig0 = 100.0, 0.0, 0.04, 0.3
     if ticker and is_us_ticker(ticker):
         try:
