@@ -106,9 +106,6 @@ def _add_panel(curves) -> None:
         c8.number_input("회수율(%)", value=40.0, step=5.0, min_value=0.0, max_value=100.0, key="bdc_rec", help="부도 시 액면 중 돌려받는 비율")
         c9.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
         c9.button("추가", key="bdb_add_corp", on_click=_add_corp, type="primary", use_container_width=True)
-    msg = st.session_state.pop("bdb_msg", None)
-    if msg:
-        st.success(msg)
 
 
 def _table() -> None:
@@ -196,6 +193,9 @@ def render_book(ts) -> None:
             _add_panel(curves)
             st.divider()
             _table()
+    msg = st.session_state.pop("bdb_msg", None)
+    if msg:
+        st.success(msg)
     b = _book()
     if not len(b.dropna(how="all")):
         st.info("위 '채권 추가·수정'에서 국채나 회사채를 넣으면 계산이 시작됩니다.")
