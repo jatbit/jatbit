@@ -1,6 +1,8 @@
-"""옵션 탭
-1) 옵션 체인: 미국 상장 종목·ETF의 콜/풋 시장가, 블랙-숄즈-머튼 이론가, 내재변동성, 역사적 변동성, 그릭스(마우스 오버 팝업)
-2) 델타·감마 헷지: 최적 포트폴리오(또는 직접 입력한 보유 주식) + 옵션 포지션의 그릭스를 구하고, 델타와 감마를 동시에 0으로 만드는 헷지 수량 계산
+"""옵션 페이지 — 맨 위 공통 바(티커 한 번 입력)와 탭 4개
+1) 체인·전략: 콜/풋 시장가·BSM 이론가·IV·그릭스(간단히/전체 보기) + 전략 만들기(템플릿·손익·이익 확률·합성 백테스트)
+2) 내 포지션: 주식·미국 옵션·국내 옵션(KRX CSV·직접 입력) 장부 → 헷지 / 손익·위험 / 헷지 시뮬레이션
+3) 변동성: 기간구조·스마일·곡면·스큐·GEX, 모형 보정, 위험중립 분포
+4) 계산기: 유럽식(BSM)·미국식(이항트리) 단일 옵션
 데이터: 옵션 = Yahoo Finance(yfinance, 약 15분 지연), 기초자산 가격 = FinanceDataReader, 무위험금리 = FRED 3개월 국채.
 """
 # 파일 구성: options_data.py(데이터·계산) · options_chain.py(옵션 체인) · hedge.py(델타·감마 헷지) · 이 파일(탭 묶기)
@@ -39,31 +41,54 @@ from options_chain import *  # noqa: F401,F403
 from hedge import *  # noqa: F401,F403
 
 
+def _ticker_bar() -> str:
+    """모든 탭이 같이 쓰는 티커 (opt_ticker). 국내 옵션은 '내 포지션' 탭에서 CSV·직접 입력."""
+    ss = st.session_state
+    ss["_opt_shared"] = True
+    pf = _pf_us_tickers()
+    presets = list(dict.fromkeys(pf + OPT_PRESETS))[:10]
+    c1, c2, c3 = st.columns([3.2, 1.6, 1])
+    with c1:
+        if hasattr(st, "pills"):
+            st.pills("빠른 선택", presets, key="opt_pill", label_visibility="collapsed",
+                     on_change=lambda: _set_ticker(ss.get("opt_pill")) if ss.get("opt_pill") else None)
+    c2.text_input("미국 티커", key="opt_ticker", placeholder="AAPL", label_visibility="collapsed")
+    fxv = load_usdkrw()
+    ss["_opt_fx"] = fxv[0] if fxv else 1400.0
+    c3.toggle("원화", key="opt_krw", help=f"달러 금액을 원화로 표시 (원/달러 {ss['_opt_fx']:,.1f})")
+    return (ss.get("opt_ticker") or "").strip().upper()
+
+
 def render_options() -> None:
     if yf is None:
         st.error("yfinance 패키지가 설치되지 않았습니다. requirements.txt에 yfinance를 추가해 주세요.")
         return
-    st.caption("미국 상장 종목·ETF 옵션 (Yahoo Finance, 약 15분 지연). 국내 개별주식옵션은 무료 데이터가 없어 지원하지 않습니다. "
-               "조회는 느릴 수 있으며, 실패하면 자동으로 여러 번 다시 시도합니다.")
-    from capm_opt import render_capm_opt
-
+    from american import render_american
+    from optbook import render_book
     from optvol import render_vol
 
-    from american import render_american
-
-    (t1, t1_open), (t4, t4_open), (t5, t5_open), (t2, t2_open), (t3, t3_open) = ui.lazy_tabs(["옵션 체인", "변동성·수급 분석", "아메리칸 옵션", "델타·감마 헷지", "옵션 포함 CAPM·손익"], key="opt_tabs")
-    if t1_open:
+    ticker = _ticker_bar()
+    st.caption("미국 옵션은 Yahoo Finance(약 15분 지연). 국내 옵션은 '내 포지션' 탭에서 KRX CSV를 올리거나 직접 입력합니다.")
+    (t1, o1), (t2, o2), (t3, o3), (t4, o4) = ui.lazy_tabs(["체인·전략", "내 포지션", "변동성", "계산기"], key="opt_tabs4")
+    if o1:
         with t1:
             render_chain()
-    if t4_open:
-        with t4:
-            render_vol()
-    if t5_open:
-        with t5:
-            render_american()
-    if t2_open:
+    if o2:
         with t2:
-            render_hedge()
-    if t3_open:
+            render_book(ticker)
+    if o3:
         with t3:
-            render_capm_opt()
+            render_vol()
+            if ticker and is_us_ticker(ticker):
+                exp, op = ui.more("옵션이 말하는 주가 분포 (위험중립, Breeden–Litzenberger)", key="opt_more_rnd")
+                if op:
+                    with exp:
+                        import hedgesim
+
+                        with st.spinner("만기별 체인을 불러오는 중..."):
+                            P, chains = hedgesim._chains_for(ticker, n=8)
+                        if chains:
+                            hedgesim.render_rnd(ticker, chains, P["S"], P["r"], P["q"])
+    if o4:
+        with t4:
+            render_american()
