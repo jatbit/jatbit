@@ -188,7 +188,9 @@ def market_params(ticker: str, key: str, show: bool = True) -> dict | None:
     mgrid([("기초자산 가격", f"{u['spot']:,.2f}", f"기준: {u['asof']}")] +
           [(f"HV {k}", f"{v * 100:.1f}%" if v == v else "-", f"역사적 변동성 {k}") for k, v in hv.items()], cols=5)
 
-    c1, c2, c3 = st.columns(3)
+    box = st.popover("설정 · 금리·배당·변동성") if hasattr(st, "popover") else st.expander("설정 · 금리·배당·변동성")
+    with box:
+        c1, c2, c3 = st.columns(3)
     r_pct = c1.number_input("무위험금리 r (%)", value=round(r_default * 100, 3), step=0.05, format="%.3f",
                             key=f"{key}_r_{ticker}",
                             help=(f"FRED 미 국채 3개월 {rr[0] * 100:.2f}% ({rr[1]} 기준)" if rr else "FRED 조회 실패로 4% 기본값") + ", 연속복리로 환산해 사용")
@@ -197,10 +199,13 @@ def market_params(ticker: str, key: str, show: bool = True) -> dict | None:
     hv_opts = list(HV_WINDOWS) + ["직접 입력"]
     hv_pick = c3.selectbox("이론가에 쓸 변동성", hv_opts, index=1, key=f"{key}_hvpick_{ticker}")
     if hv_pick == "직접 입력":
-        sig_theo = st.number_input("이론가 변동성 (%)", value=round((hv["60일"] if hv["60일"] == hv["60일"] else 0.3) * 100, 2),
+        sig_theo = box.number_input("이론가 변동성 (%)", value=round((hv["60일"] if hv["60일"] == hv["60일"] else 0.3) * 100, 2),
                                    step=0.5, key=f"{key}_hvman_{ticker}") / 100
     else:
         sig_theo = hv[hv_pick]
+    if key == "chain":
+        box.radio("그릭스 기준 변동성", ["IV", "HV"], horizontal=True, key="opt_greek_basis",
+                  format_func=lambda x: "내재(IV)" if x == "IV" else "역사적(HV)", help="IV: 각 옵션의 내재변동성으로 그릭스 계산 · HV: 위에서 고른 역사적 변동성으로 계산")
     if not (sig_theo == sig_theo) or sig_theo <= 0:
         sig_theo = 0.3
     return {"S": u["spot"], "asof": u["asof"], "r": math.log1p(r_pct / 100), "r_simple": r_pct / 100,
@@ -270,6 +275,10 @@ def mgrid(items, cols: int = 4) -> None:
 
 
 # 보유 포지션 표의 빈 양식 (옵션 체인의 "포지션에 추가"와 헷지 화면이 같이 씀)
+def settings_box():
+    return st.popover("설정 · 금리·배당·변동성") if hasattr(st, "popover") else st.expander("설정 · 금리·배당·변동성")
+
+
 def _empty_opts() -> pd.DataFrame:
     return pd.DataFrame({"기초자산": pd.Series(dtype=str), "만기": pd.Series(dtype=str), "종류": pd.Series(dtype=str),
                          "행사가": pd.Series(dtype=float), "수량(계약)": pd.Series(dtype=int)})
