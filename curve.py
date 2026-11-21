@@ -9,37 +9,99 @@ import streamlit as st
 import bondmath as bm
 import ui
 
-KR_TENORS = {"1Y": ("1년", 1.0), "3Y": ("3년", 3.0), "5Y": ("5년", 5.0), "10Y": ("10년", 10.0), "20Y": ("20년", 20.0),
-             "30Y": ("30년", 30.0)}
+KR_TENORS = {"1Y": ("1년", 1.0), "2Y": ("2년", 2.0), "3Y": ("3년", 3.0), "5Y": ("5년", 5.0), "10Y": ("10년", 10.0),
+             "20Y": ("20년", 20.0), "30Y": ("30년", 30.0)}
+ECOS_KR = {"1Y": "010190000", "2Y": "010195000", "3Y": "010200000", "5Y": "010200001", "10Y": "010210000",
+           "20Y": "010220000", "30Y": "010230000"}  # 한국은행 ECOS 817Y002 시장금리(일별)
 
 
-@st.cache_data(ttl=6 * 60 * 60, show_spinner="국고채 금리를 불러오는 중...")
-def load_kr_curve(years: int = 5) -> pd.DataFrame | None:
-    """국고채 만기별 금리 (FinanceDataReader, 키 없이). 못 받으면 None."""
+def _ecos(code: str, s: str, e: str) -> list:
+    """ECOS 공개 sample 키 (한 번에 10건) — 키 없이 쓸 수 있는 범위만."""
+    import json
+    import time
+    import urllib.request
+
+    url = f"https://ecos.bok.or.kr/api/StatisticSearch/sample/json/kr/1/10/817Y002/D/{s}/{e}/{code}"
+    for i in range(3):
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                rows = json.loads(resp.read().decode("utf-8")).get("StatisticSearch", {}).get("row", [])
+            return [(r["TIME"], float(r["DATA_VALUE"])) for r in rows if r.get("DATA_VALUE")]
+        except Exception:  # noqa: BLE001
+            time.sleep(0.4 * (i + 1))
+    return []
+
+
+def _windows(start, end, days=13):
+    out, cur = [], start
+    while cur <= end:
+        w = min(cur + timedelta(days=days), end)
+        out.append((cur.strftime("%Y%m%d"), w.strftime("%Y%m%d")))
+        cur = w + timedelta(days=1)
+    return out
+
+
+def _fdr_kr(start: str) -> pd.DataFrame | None:
     import concurrent.futures as cf
 
     import FinanceDataReader as fdr
-
-    start = (datetime.now() - timedelta(days=365 * years + 30)).strftime("%Y-%m-%d")
 
     def one(t):
         s = fdr.DataReader(f"KR{t}T=RR", start)["Close"].dropna()
         s.index = pd.to_datetime(s.index).tz_localize(None)
         return t, s / 100
 
-    out = {}
+    try:  # 하나 먼저 시험해 보고 안 되면 바로 포기
+        t0, s0 = one("10Y")
+        if len(s0) < 20:
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    out = {t0: s0}
     with cf.ThreadPoolExecutor(max_workers=6) as ex:
-        for f in cf.as_completed([ex.submit(one, t) for t in KR_TENORS]):
+        for f in cf.as_completed([ex.submit(one, t) for t in KR_TENORS if t != "10Y"]):
             try:
                 t, s = f.result()
                 if len(s) > 20:
                     out[t] = s
             except Exception:  # noqa: BLE001
                 pass
-    if len(out) < 3:
-        return None
-    df = pd.DataFrame(out).sort_index()
+    return pd.DataFrame(out).sort_index() if len(out) >= 3 else None
+
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner="국고채 금리를 불러오는 중 (한국은행)...")
+def load_kr_curve(months: int = 6) -> pd.DataFrame | None:
+    """국고채 만기별 일별 금리 (소수). FinanceDataReader가 되면 5년치, 아니면 한국은행 ECOS 최근 months개월. 못 받으면 None."""
+    import concurrent.futures as cf
+
+    df = _fdr_kr((datetime.now() - timedelta(days=365 * 5 + 30)).strftime("%Y-%m-%d"))
+    if df is None:
+        end = datetime.now().date()
+        wins = _windows(end - timedelta(days=int(months * 30.5)), end)
+        jobs = [(t, w) for t in KR_TENORS for w in wins]
+        data = {t: {} for t in KR_TENORS}
+        with cf.ThreadPoolExecutor(max_workers=8) as ex:
+            for (t, _), rows in zip(jobs, ex.map(lambda j: _ecos(ECOS_KR[j[0]], *j[1]), jobs)):
+                for d, v in rows:
+                    data[t][pd.Timestamp(d)] = v / 100
+        cols = {t: pd.Series(v).sort_index() for t, v in data.items() if len(v) > 20}
+        if len(cols) < 3:
+            return None
+        df = pd.DataFrame(cols).sort_index()
     return df[[c for c in KR_TENORS if c in df.columns]]
+
+
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def load_kr_year_ago() -> pd.Series | None:
+    """1년 전 국고채 곡선 (ECOS, 1년 전 2주 구간의 마지막 값)."""
+    end = datetime.now().date() - timedelta(days=365)
+    s, e = (end - timedelta(days=13)).strftime("%Y%m%d"), end.strftime("%Y%m%d")
+    row = {}
+    for t, code in ECOS_KR.items():
+        r = _ecos(code, s, e)
+        if r:
+            row[t] = r[-1][1] / 100
+    return pd.Series(row) if len(row) >= 3 else None
 
 
 def us_curve(ts: pd.DataFrame, asof=None) -> bm.Curve | None:
@@ -89,11 +151,13 @@ def curves(ts) -> dict:
 # ----------------------------------------------------------------------
 # 화면
 # ----------------------------------------------------------------------
-def _yield_chart(ts, names: dict, title_unit="금리(%)"):
+def _yield_chart(ts, names: dict, title_unit="금리(%)", year_ago=None):
     asof = ts.dropna(how="all").index[-1]
     last = ts.dropna(how="all").ffill().iloc[-1]
 
     def at(days):
+        if days >= 365 and year_ago is not None and (ts.index[0] > asof - pd.Timedelta(days=days)):
+            return year_ago.reindex(ts.columns)
         sub = ts[ts.index <= asof - pd.Timedelta(days=days)].ffill()
         return sub.iloc[-1] if len(sub) else None
 
@@ -123,20 +187,24 @@ def _zero_fwd(C: bm.Curve) -> None:
                       xaxis=dict(title="만기(년)"), yaxis=dict(title="금리(%)", ticksuffix="%"),
                       legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
     st.plotly_chart(fig, use_container_width=True)
-    b0, b1, b2, b3, l1, l2 = C.p
     f = lambda a, b: float(np.exp(-(C.zero(a) * a))) / float(np.exp(-(C.zero(b) * b)))  # noqa: E731
     fwd = lambda a, b: (np.log(f(a, b)) / (b - a))  # noqa: E731
-    ui.cards([("장기 수준 β0", f"{b0 * 100:.2f}%"), ("단기 − 장기 β1", f"{b1 * 100:+.2f}%p"),
-              ("1년 뒤 1년 금리", f"{fwd(1, 2) * 100:.2f}%", "지금 곡선이 말하는 값"),
+    ui.cards([("1년 뒤 1년 금리", f"{fwd(1, 2) * 100:.2f}%", "지금 곡선이 말하는 값"),
               ("2년 뒤 1년 금리", f"{fwd(2, 3) * 100:.2f}%"),
-              ("5년 뒤 5년 금리", f"{fwd(5, 10) * 100:.2f}%")], cols=5)
+              ("5년 뒤 5년 금리", f"{fwd(5, 10) * 100:.2f}%")], cols=3)
     st.caption(f"만기수익률(액면가 채권 금리)에서 할인계수를 차례로 풀어(부트스트랩) 제로금리를 구하고, 넬슨-시겔-스벤슨 식으로 "
                f"매끈하게 이었습니다 (적합 오차 {C.rmse * 1e4:.1f}bp). 선도금리는 '지금 곡선대로라면 그때 시작할 금리'로, "
                "기대 금리에 기간 프리미엄이 더해진 값입니다.")
 
 
 def _pca(ts, names) -> None:
-    yrs = st.radio("기간", [3, 5, 10], index=1, horizontal=True, key="cv_pca_y", format_func=lambda x: f"최근 {x}년")
+    span = (ts.index[-1] - ts.index[0]).days / 365
+    if span > 2.5:
+        yrs = st.radio("기간", [y for y in (3, 5, 10) if y <= span + 0.5] or [3], horizontal=True, key="cv_pca_y",
+                       format_func=lambda x: f"최근 {x}년")
+    else:
+        yrs = span
+        st.caption(f"최근 {span * 12:.0f}개월 일별 금리 변화 기준")
     R = bm.curve_pca(ts, yrs)
     if R is None:
         st.info("데이터가 부족해 계산하지 못했습니다.")
@@ -175,15 +243,23 @@ def render_curve_tab(ts) -> None:
             st.warning("국고채 금리를 받지 못했습니다 (FinanceDataReader). 잠시 뒤 다시 시도해 주세요.")
             return
         names, C = KR_TENORS, kr_curve(data)
-    asof, last = _yield_chart(data, names)
-    long_ = data.columns[-1] if mkt == "한국 국고채" else "DGS10"
+    ya = None
+    if mkt == "한국 국고채":
+        try:
+            ya = load_kr_year_ago()
+        except Exception:  # noqa: BLE001
+            ya = None
+    asof, last = _yield_chart(data, names, year_ago=ya)
+    long_ = "10Y" if mkt == "한국 국고채" else "DGS10"
     two = "DGS2" if mkt == "미국 국채" else "3Y"
     if long_ in last and two in last:
         spr = (data[long_] - data[two]).dropna() * 100
+        months = (spr.index[-1] - spr.index[0]).days / 30.4
+        rng_lab = "최근 1년 범위" if months >= 12 else f"최근 {months:.0f}개월 범위"
         ui.cards([("기준일", f"{asof:%Y-%m-%d}"), (f"{names[two][0]}", f"{last[two] * 100:.2f}%"),
                   (f"{names[long_][0]}", f"{last[long_] * 100:.2f}%"),
                   (f"{names[long_][0]}−{names[two][0]}", f"{(last[long_] - last[two]) * 1e4:+.0f}bp", "음수면 장단기 금리 역전"),
-                  ("1년 범위", f"{spr.iloc[-252:].min() * 100:+.0f} ~ {spr.iloc[-252:].max() * 100:+.0f}bp")], cols=5)
+                  (rng_lab, f"{spr.iloc[-252:].min() * 100:+.0f} ~ {spr.iloc[-252:].max() * 100:+.0f}bp")], cols=5)
         f2 = go.Figure(go.Scatter(x=spr.index, y=spr.values, mode="lines", line=dict(color="#4C9BE8", width=1.4),
                                   name=f"{names[long_][0]}−{names[two][0]}"))
         f2.add_hline(y=0, line_color="#888", line_dash="dot")
@@ -204,7 +280,9 @@ def render_curve_tab(ts) -> None:
             with exp:
                 _treasury_lookup(ts)
     else:
-        st.caption("국고채 금리는 FinanceDataReader(Investing.com 경유) 일별 종가입니다.")
+        span = (data.index[-1] - data.index[0]).days
+        st.caption("국고채 금리는 FinanceDataReader 일별 종가입니다." if span > 400 else
+                   "국고채 금리는 한국은행 ECOS 시장금리(일별)입니다. 키 없이 받을 수 있는 범위라 최근 6개월치이며, 1년 전 곡선만 따로 받았습니다.")
 
 
 __all__ = [n for n in dir() if not n.startswith("__")]
