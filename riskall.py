@@ -32,7 +32,15 @@ def load_fx_hist() -> pd.Series | None:
     try:
         s = fdr.DataReader("USD/KRW", (datetime.now() - timedelta(days=800)).strftime("%Y-%m-%d"))["Close"].dropna()
         s.index = pd.to_datetime(s.index).tz_localize(None)
-        return s[s > 0]
+        if len(s) > 100:
+            return s[s > 0]
+    except Exception:  # noqa: BLE001
+        pass
+    try:  # FRED 원/달러 (DEXKOUS)
+        from bonds import _fred_one
+
+        s = _fred_one("DEXKOUS")
+        return s[s.index >= pd.Timestamp.now() - pd.Timedelta(days=800)]
     except Exception:  # noqa: BLE001
         return None
 
