@@ -235,7 +235,9 @@ def totals(G) -> dict:
 
 
 def _won(x):
-    return "-" if not np.isfinite(x) else f"{x:,.0f}원"
+    if not np.isfinite(x):
+        return "-"
+    return "0원" if abs(x) < 0.5 else f"{x:,.0f}원"
 
 
 def render(key: str = "ra") -> None:
@@ -250,13 +252,23 @@ def render(key: str = "ra") -> None:
     T = totals(G)
     tv = sum(T["value"].values())
     gk = T["greeks"]
-    ui.cards([("전체 평가액", _won(tv), f"원/달러 {G['fx']:,.1f}"),
-              ("주가 1% 상승 시", _won(gk["delta1"]), "모든 주식·기초자산이 같이 1%"),
-              ("주가 ±5% 시 감마 효과", _won(gk["gamma5"]), "델타로 설명 안 되는 부분"),
-              ("변동성 1%p 상승 시", _won(gk["vega"]))], cols=4)
-    ui.cards([("미 금리 1bp 상승 시", _won(-gk["dv01_usd"]), "달러 채권"), ("국내 금리 1bp 상승 시", _won(-gk["dv01_krw"]), "원화 채권"),
-              ("원/달러 1% 상승 시", _won(gk["fx1"]), f"달러 자산 ${gk['usd']:,.0f}"),
-              ("자산 구성", " · ".join(f"{k.split()[0]} {v / tv * 100:.0f}%" for k, v in T["value"].items() if abs(v) > 0) if tv else "-")], cols=4)
+    has_eq = bool(G["us"] or G["kr"])
+    has_opt = any(u["legs"] for u in list(G["us"].values()) + list(G["kr"].values()))
+    cards = [("전체 평가액", _won(tv), f"원/달러 {G['fx']:,.1f}")]
+    if has_eq:
+        cards.append(("주가 1% 상승 시", _won(gk["delta1"]), "모든 주식·기초자산이 같이 1%"))
+    if has_opt:
+        cards += [("주가 ±5% 시 감마 효과", _won(gk["gamma5"]), "델타로 설명 안 되는 부분"), ("변동성 1%p 상승 시", _won(gk["vega"]))]
+    if "USD" in G["bonds"]:
+        cards.append(("미 금리 1bp 상승 시", _won(-gk["dv01_usd"]), "달러 채권"))
+    if "KRW" in G["bonds"]:
+        cards.append(("국내 금리 1bp 상승 시", _won(-gk["dv01_krw"]), "원화 채권"))
+    if gk["usd"]:
+        cards.append(("원/달러 1% 상승 시", _won(gk["fx1"]), f"달러 자산 ${gk['usd']:,.0f}"))
+    cards.append(("자산 구성", " · ".join(f"{k} {v / tv * 100:.0f}%" for k, v in T["value"].items() if abs(v) > 0) if tv else "-"))
+    ui.cards(cards[:4], cols=4)
+    if len(cards) > 4:
+        ui.cards(cards[4:], cols=4)
 
     c1, c2, c3 = st.columns(3)
     h = c1.selectbox("기간", [1, 5, 10, 20], index=0, key=f"{key}_h", format_func=lambda x: f"{x}거래일")
@@ -306,8 +318,9 @@ def render(key: str = "ra") -> None:
         st.dataframe(df.style.format({"평가액": "{:,.0f}", "단독 VaR": "{:,.0f}", "ES 기여": "{:,.0f}", "ES 기여 비중(%)": "{:.0f}"}),
                      hide_index=True, use_container_width=True)
         div = df["단독 VaR"].sum() - var
-        st.caption(f"단독 VaR 합계 {df['단독 VaR'].sum():,.0f}원 − 전체 VaR {var:,.0f}원 = 분산 효과 {div:,.0f}원. "
-                   "ES 기여는 전체가 크게 잃은 경우들에서 각 자산군이 평균적으로 잃은 금액이라 다 더하면 ES와 같습니다.")
+        if len(df) > 1:
+            st.caption(f"단독 VaR 합계 {df['단독 VaR'].sum():,.0f}원 − 전체 VaR {var:,.0f}원 = 분산 효과 {div:,.0f}원. "
+                       "ES 기여는 전체가 크게 잃은 경우들에서 각 자산군이 평균적으로 잃은 금액이라 다 더하면 ES와 같습니다.")
     fig = go.Figure(go.Histogram(x=tot, nbinsx=80, marker_color="#4C9BE8", opacity=0.8))
     fig.add_vline(x=q, line_color="#E5534B", line_dash="dash", annotation_text=f"VaR {conf * 100:.0f}%")
     fig.update_layout(height=240, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), xaxis_title=f"{h}거래일 손익(원)",
