@@ -1211,39 +1211,58 @@ def _show_score(col, title, d, reliable, note=""):
         col.caption(f"근거가 부족해 범위로 표시 (가운데 {d['mid']:.0f}점). " + note)
 
 
-def _gauge_svg(title, d, reliable, sub=""):
-    """0~100 원형 점수. 믿을 만하면 한 점(채운 호), 아니면 범위(옅은 호 + 가운데 표시)."""
+def _gauge_svg(title, d, reliable, sub="", px=132):
+    """0~100 원형 점수. 호는 언제나 0에서 점수까지 채운다(100점 = 한 바퀴).
+    80% 구간이 넓으면 바깥 얇은 띠로 범위를 함께 그린다."""
     import html as _h
 
     r, sw, C = 44, 10, 2 * np.pi * 44
     lo, hi, mid = (max(0.0, min(100.0, d[k])) for k in ("lo", "hi", "mid"))
     if reliable:
         col = "#1B9E5A" if mid >= 55 else ("#D9534F" if mid <= 45 else "#8A8F98")
-        arc = (f'<circle cx="60" cy="60" r="{r}" fill="none" stroke="{col}" stroke-width="{sw}" stroke-linecap="round" '
-               f'stroke-dasharray="{mid / 100 * C:.1f} {C:.1f}" transform="rotate(-90 60 60)"/>')
-        big, lab = f"{mid:.0f}", score_label(mid)
+        lab, small = score_label(mid), "점"
     else:
         col = "#1B9E5A" if lo >= 55 else ("#D9534F" if hi <= 45 else "#8A8F98")
-        a = (max(hi - lo, 1.5)) / 100 * C
-        arc = (f'<circle cx="60" cy="60" r="{r}" fill="none" stroke="{col}" stroke-opacity=".45" stroke-width="{sw}" '
-               f'stroke-dasharray="{a:.1f} {C:.1f}" stroke-dashoffset="{-lo / 100 * C:.1f}" transform="rotate(-90 60 60)"/>'
-               f'<circle cx="60" cy="60" r="{r}" fill="none" stroke="{col}" stroke-width="{sw + 4}" '
-               f'stroke-dasharray="2 {C:.1f}" stroke-dashoffset="{-mid / 100 * C + 1:.1f}" transform="rotate(-90 60 60)"/>')
-        big, lab = f"{lo:.0f}–{hi:.0f}", ("매수 쪽" if lo >= 55 else ("매도 쪽" if hi <= 45 else "판단 보류"))
-    fs = 26 if reliable else 19
-    return (f'<div style="flex:1 1 150px;max-width:220px;text-align:center">'
-            f'<svg viewBox="0 0 120 120" width="132" height="132" role="img" aria-label="{_h.escape(title)} {big}점">'
-            f'<circle cx="60" cy="60" r="{r}" fill="none" stroke="rgba(128,128,128,.22)" stroke-width="{sw}"/>{arc}'
-            f'<text x="60" y="62" text-anchor="middle" font-size="{fs}" font-weight="700" fill="currentColor">{big}</text>'
-            f'<text x="60" y="82" text-anchor="middle" font-size="11" fill="currentColor" opacity=".7">점</text></svg>'
-            f'<div style="font-weight:600;font-size:14px;margin-top:-4px">{_h.escape(title)}</div>'
-            f'<div style="font-size:13px;color:{col};font-weight:600">{lab}</div>'
-            f'<div style="font-size:11px;opacity:.65;line-height:1.35;margin-top:2px">{_h.escape(sub)}</div></div>')
+        lab, small = ("매수 쪽" if lo >= 55 else ("매도 쪽" if hi <= 45 else "판단 보류")), f"{lo:.0f}–{hi:.0f}"
+    arc = ""
+    if mid > 0.5:
+        arc = (f'<circle cx="60" cy="60" r="{r}" fill="none" stroke="{col}" stroke-width="{sw}" '
+               + ('' if mid >= 99.5 else 'stroke-linecap="round" ')
+               + f'stroke-dasharray="{mid / 100 * C:.2f} {C:.2f}" transform="rotate(-90 60 60)"/>')
+    band = ""
+    if not reliable:
+        r2 = 55
+        C2 = 2 * np.pi * r2
+        band = (f'<circle cx="60" cy="60" r="{r2}" fill="none" stroke="{col}" stroke-opacity=".5" stroke-width="3" '
+                f'stroke-dasharray="{max(hi - lo, 1.0) / 100 * C2:.2f} {C2:.2f}" stroke-dashoffset="{-lo / 100 * C2:.2f}" '
+                f'transform="rotate(-90 60 60)"/>')
+    big = px >= 150
+    return (f'<div style="flex:0 1 {px + 30}px;text-align:center;min-width:{px}px">'
+            f'<svg viewBox="0 0 120 120" width="{px}" height="{px}" role="img" aria-label="{_h.escape(title)} {mid:.0f}점">'
+            f'<circle cx="60" cy="60" r="{r}" fill="none" stroke="rgba(128,128,128,.22)" stroke-width="{sw}"/>{band}{arc}'
+            f'<text x="60" y="66" text-anchor="middle" font-size="30" font-weight="700" fill="currentColor">{mid:.0f}</text>'
+            f'<text x="60" y="84" text-anchor="middle" font-size="{11 if reliable else 10}" fill="currentColor" opacity=".7">{small}</text></svg>'
+            f'<div style="font-weight:{700 if big else 600};font-size:{16 if big else 12}px;margin-top:-4px">{_h.escape(title)}</div>'
+            f'<div style="font-size:{15 if big else 12}px;color:{col};font-weight:600">{lab}</div>'
+            + (f'<div style="font-size:{11 if big else 10}px;opacity:.65;line-height:1.3;margin-top:2px">{_h.escape(sub)}</div>' if sub else "")
+            + '</div>')
 
 
-def gauges_html(items):
-    return ('<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:space-around;margin:4px 0 2px">'
-            + "".join(_gauge_svg(*it) for it in items) + "</div>")
+def total_score(ds):
+    """여러 점수(dict lo·mid·hi)를 같은 비중으로 평균 → (dict, 80% 구간이 좁은지)."""
+    d = {k: float(np.mean([x[k] for x in ds])) for k in ("lo", "mid", "hi")}
+    return d, d["hi"] - d["lo"] <= RELIABLE_WIDTH
+
+
+def gauges_html(items, total=None):
+    """total = (제목, d, reliable, 설명) 이면 크게, items는 작은 원으로."""
+    small = "".join(_gauge_svg(*it, px=92 if total else 132) for it in items)
+    if not total:
+        return ('<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:space-around;margin:4px 0 2px">' + small + "</div>")
+    return ('<div style="display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;justify-content:center;margin:4px 0 2px">'
+            + _gauge_svg(*total, px=176)
+            + '<div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:space-around;flex:1 1 300px;max-width:460px">'
+            + small + "</div></div>")
 
 
 def summary_scores(sec, R, ticker, sel, daily_names, build_daily, opts, prof, domestic=False):
