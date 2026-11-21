@@ -1,7 +1,7 @@
-"""채권 탭
-1) 미국 국채 금리 곡선 (FRED): 만기별 금리, 1개월·1년 전과 비교, 장단기 금리차
-2) 국채 조회: 만기를 고르면 현재 금리 기준 가격·듀레이션·볼록성·DV01 등
-3) 채권 계산기: 쿠폰·만기·금리(또는 가격)를 넣으면 가격, YTM, 맥컬리/수정 듀레이션, 볼록성, DV01, 경과이자, 현금흐름표
+"""채권 페이지 — 탭 4개
+1) 금리 곡선: 미국(FRED)·한국(국고채) 만기별 금리, 장단기 금리차, 제로·선도금리(부트스트랩 + NSS), 주성분(수준·기울기·곡률)
+2) 내 채권: 보유 국채·회사채 장부 → 평가액·듀레이션·DV01·키 레이트 듀레이션·곡선 시나리오·부도확률, 면역화
+3) 계산기: 일반 채권(가격 ↔ 만기수익률, 듀레이션·볼록성, 현금흐름) / 콜·풋옵션부 채권(헐-화이트 트리, OAS)
 4) 채권 ETF: 가격·분배수익률과 금리 변화에 대한 실증 듀레이션(회귀)
 """
 import io
@@ -152,28 +152,36 @@ def _grid(items, cols=4):
 
 
 def render_bonds() -> None:
-    st.caption("미국 국채 금리는 FRED(미 연준 경제 데이터) 일별 수익률 곡선 기준입니다. 개별 회사채·국내 채권 시세는 무료 데이터가 없어, "
-               "직접 입력하는 채권 계산기와 채권 ETF로 대신합니다.")
+    st.caption("미국 국채는 FRED, 국고채는 FinanceDataReader 일별 금리입니다. 개별 회사채 시세는 무료 데이터가 없어 '내 채권'에 직접 넣습니다.")
     try:
         ts = load_treasury()
     except Exception as e:  # noqa: BLE001
         ts = None
-        st.error(f"국채 금리를 불러오지 못했습니다: {e}")
+        st.error(f"미국 국채 금리를 불러오지 못했습니다: {e}")
     if ts is not None:
         _summary(ts)
-    (t1, t1_open), (t2, t2_open), (t3, t3_open), (t4, t4_open) = ui.lazy_tabs(["국채 금리 곡선", "국채 조회 (듀레이션)", "채권 계산기", "채권 ETF"], key="bd_tabs")
-    if t1_open:
+    (t1, o1), (t2, o2), (t3, o3), (t4, o4) = ui.lazy_tabs(["금리 곡선", "내 채권", "계산기", "채권 ETF"], key="bd_tabs4")
+    if o1:
         with t1:
-            if ts is not None:
-                _curve(ts)
-    if t2_open:
+            from curve import render_curve_tab
+
+            render_curve_tab(ts)
+    if o2:
         with t2:
-            if ts is not None:
-                _treasury_lookup(ts)
-    if t3_open:
+            from bondbook import render_book
+
+            render_book(ts)
+    if o3:
         with t3:
-            _calculator(ts)
-    if t4_open:
+            mode = st.radio("계산기", ["일반 채권", "콜·풋옵션부 채권 (헐-화이트)"], horizontal=True, key="bd_calc_mode",
+                            label_visibility="collapsed")
+            if mode == "일반 채권":
+                _calculator(ts)
+            else:
+                from bondbook import render_callable
+
+                render_callable(ts)
+    if o4:
         with t4:
             _etf(ts)
 
@@ -198,41 +206,6 @@ def _summary(ts: pd.DataFrame) -> None:
     ui.cards([item("DGS3MO", "3개월물"), item("DGS2", "2년물"), item("DGS10", "10년물"), item("DGS30", "30년물"),
               ("10년−2년 금리차", f"{s_now:+.0f}bp", ("장단기 금리 역전" if s_now < 0 else "정상 (우상향 곡선)") + f" · 전일 {s_prev:+.0f}bp")],
              cols=5)
-
-
-def _curve(ts: pd.DataFrame) -> None:
-    last = ts.dropna(how="all").ffill().iloc[-1]
-    asof = ts.dropna(how="all").index[-1]
-
-    def at(days):
-        sub = ts[ts.index <= asof - pd.Timedelta(days=days)].ffill()
-        return sub.iloc[-1] if len(sub) else None
-
-    xs = [TENORS[c][1] for c in ts.columns]
-    labels = [TENORS[c][0] for c in ts.columns]
-    fig = go.Figure()
-    for nm, row, color, dash in (("오늘", last, "#E5534B", "solid"), ("1개월 전", at(30), "#F2A93B", "dash"),
-                                 ("1년 전", at(365), "#4C9BE8", "dot")):
-        if row is None:
-            continue
-        fig.add_trace(go.Scatter(x=xs, y=row.values * 100, name=nm, mode="lines+markers", line=dict(color=color, dash=dash),
-                                 text=labels, hovertemplate="%{text} %{y:.2f}%<extra>" + nm + "</extra>"))
-    fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
-                      xaxis=dict(title="만기(년)", type="log", tickvals=xs, ticktext=labels),
-                      yaxis=dict(title="금리(%)", ticksuffix="%"), legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-    st.plotly_chart(fig, use_container_width=True)
-    s10, s2, s3m = last.get("DGS10"), last.get("DGS2"), last.get("DGS3MO")
-    _grid([("기준일", f"{asof:%Y-%m-%d}"), ("10년물", _fmt_pct(s10)), ("2년물", _fmt_pct(s2)), ("3개월물", _fmt_pct(s3m)),
-           ("10년−2년", f"{(s10 - s2) * 1e4:+.0f}bp", "음수면 장단기 금리 역전"), ("10년−3개월", f"{(s10 - s3m) * 1e4:+.0f}bp")])
-    spr = (ts["DGS10"] - ts["DGS2"]).dropna() * 100
-    spr2 = (ts["DGS10"] - ts["DGS3MO"]).dropna() * 100
-    f2 = go.Figure()
-    f2.add_trace(go.Scatter(x=spr.index, y=spr.values, name="10년−2년", mode="lines", line=dict(color="#4C9BE8", width=1.4)))
-    f2.add_trace(go.Scatter(x=spr2.index, y=spr2.values, name="10년−3개월", mode="lines", line=dict(color="#F2A93B", width=1.2)))
-    f2.add_hline(y=0, line_color="#888", line_dash="dot")
-    f2.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
-                     yaxis=dict(title="금리차(%p)"), legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-    st.plotly_chart(f2, use_container_width=True)
 
 
 def _treasury_lookup(ts: pd.DataFrame) -> None:
@@ -295,17 +268,40 @@ def _detail(coupon: float, T: float, ytm: float, freq: int, label: str) -> None:
         st.dataframe(cft.round(4), use_container_width=True, hide_index=True)
 
 
+def _preset(ts):
+    ss = st.session_state
+    pick = ss.get("bd_preset")
+    if not pick or pick == "직접 입력" or ts is None:
+        return
+    code = next((c for c in TENORS if TENORS[c][0] == pick.replace("미 국채 ", "")), None)
+    if code is None or code not in ts:
+        return
+    y = float(ts[code].dropna().iloc[-1])
+    T = TENORS[code][1]
+    ss["bd_cpn"] = 0.0 if T < 1 else round(y * 100, 3)
+    ss["bd_T"] = float(T)
+    ss["bd_f"] = 1 if T < 1 else 2
+    ss["bd_mode"] = "만기수익률로 가격 계산"
+    ss["bd_y"] = round(y * 100, 3)
+
+
 def _calculator(ts) -> None:
+    if ts is not None:
+        st.selectbox("불러오기", ["직접 입력"] + [f"미 국채 {TENORS[c][0]}" for c in TENORS if c in ts.columns], key="bd_preset",
+                     on_change=_preset, args=(ts,), help="고르면 그 만기 미 국채의 현재 금리로 쿠폰·만기·수익률을 채웁니다 (액면가 발행 가정)")
+    ss = st.session_state
+    for k, v in (("bd_cpn", 4.0), ("bd_T", 10.0), ("bd_f", 2), ("bd_mode", "만기수익률로 가격 계산"), ("bd_px", 100.0)):
+        ss.setdefault(k, v)
     c1, c2, c3 = st.columns(3)
-    coupon = c1.number_input("표면이자율(쿠폰, %)", value=4.0, step=0.125, format="%.3f",
-                             key="bd_cpn") / 100
-    T = c2.number_input("잔존만기(년)", value=10.0, min_value=0.01, step=0.25, key="bd_T")
-    freq = c3.selectbox("이자 지급 횟수(연)", [1, 2, 4, 12], index=1, key="bd_f", format_func=lambda x: f"연 {x}회")
+    coupon = c1.number_input("표면이자율(쿠폰, %)", step=0.125, format="%.3f", key="bd_cpn") / 100
+    T = c2.number_input("잔존만기(년)", min_value=0.01, step=0.25, key="bd_T")
+    freq = c3.selectbox("이자 지급 횟수(연)", [1, 2, 4, 12], key="bd_f", format_func=lambda x: f"연 {x}회")
     mode = st.radio("입력 기준", ["만기수익률로 가격 계산", "가격으로 만기수익률 계산"], horizontal=True, key="bd_mode")
     if mode.startswith("만기"):
-        y = st.number_input("만기수익률(%)", value=float(coupon * 100), step=0.05, format="%.3f", key="bd_y") / 100
+        ss.setdefault("bd_y", float(coupon * 100))
+        y = st.number_input("만기수익률(%)", step=0.05, format="%.3f", key="bd_y") / 100
     else:
-        px = st.number_input("깨끗한 가격(액면 100 기준)", value=100.0, step=0.25, format="%.4f", key="bd_px")
+        px = st.number_input("깨끗한 가격(액면 100 기준)", step=0.25, format="%.4f", key="bd_px")
         y = ytm_from_price(px, coupon, T, freq)
         st.info(f"가격 {px:.4f} → 만기수익률 {y * 100:.4f}%")
     _detail(coupon, T, y, freq, f"쿠폰 {coupon * 100:.3f}% · 잔존 {T:g}년")
