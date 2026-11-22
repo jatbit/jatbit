@@ -32,6 +32,7 @@
 ## 2. 파트별 파일
 
 **시장 (첫 화면)**: `market.py` → 세계 지도 → `geomap.py`(나라 지도 화면) + `geodata.py`(본사 위치·경계·값 계산). 업종 분류는 `sectors.py`
+지도 색: 상승·하락 색표는 `geomap.UPDOWN` (세계 지도도 같이 씀), 시장 지도(트리맵) 색은 `market.HEAT_SCALE`.
 
 **주가 조회 · 비교 · 포트폴리오 · 백테스트**: `page_single.py` · `page_compare.py` · `page_portfolio.py` · `backtest.py` + `risklab.py`
 
