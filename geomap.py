@@ -324,8 +324,7 @@ def _render(iso: str, inside: pd.DataFrame, outside: pd.DataFrame, gj, per: str,
 
     ss = st.session_state
     p = f"gm_{iso.lower()}"
-    gd.set_universe(iso, pd.concat([inside["ysym"], outside["ysym"]]))
-    gd.prewarm(iso)
+    gd.set_universe(iso, pd.concat([inside["ysym"], outside["ysym"]]))  # 전체 일봉 미리 받기는 화면을 다 그린 뒤 (market.render_market 끝)
     basis, sec, rng = _controls(iso, p, gd.sectors_by_cap(inside, outside))
     if sec:
         inside, outside = inside[inside["Sector"] == sec], outside[outside["Sector"] == sec]
