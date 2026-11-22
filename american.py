@@ -12,7 +12,8 @@ import streamlit as st
 import ui
 
 import bsm
-from options import OPT_PRESETS, is_us_ticker, load_expiries, load_underlying, load_us_rate_3m, mgrid, years_to_expiry
+from options_data import OPT_PRESETS, is_us_ticker, load_expiries, load_underlying, load_us_rate_3m, years_to_expiry
+from ui import mgrid
 
 
 @st.cache_data(ttl=300, show_spinner=False)
