@@ -14,7 +14,7 @@ import streamlit as st
 
 import ui
 
-from options import mgrid
+from ui import mgrid
 
 try:
     import yfinance as yf
