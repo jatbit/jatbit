@@ -10,10 +10,11 @@ import os
 import sys
 
 # 다른 모듈을 가져다 쓰는 모듈일수록 뒤에 둔다 (먼저 다시 불러온 모듈을 뒤의 모듈이 가져가도록)
-ORDER = ["bsm", "glossary", "tvchart", "ui", "ta", "money", "rates", "data_load", "period", "stats", "common",
+ORDER = ["bsm", "garch", "glossary", "tvchart", "ui", "ta", "money", "rates", "data_load", "period", "stats", "common",
          "options_data", "options_chain", "strat", "kropt", "hedge", "optbook", "options", "volmodels", "capm_opt", "bondmath", "curve", "hw",
          "bondbook", "bonds", "riskall", "news", "valuation", "kr", "sectors", "dcf", "insider",
-         "credit", "optvol", "american", "hedgesim", "risklab", "backtest", "peers", "earnings", "research_data", "data_check", "outlook", "research_chart", "research", "market", "screener",
+         "credit_model", "credit", "optvol", "american", "hedgesim", "risklab", "backtest", "peers", "earnings", "research_data", "data_check", "outlook_rules", "outlook_data", "outlook_signals", "outlook_score", "outlook", "research_chart", "research",
+         "geodata", "geomap", "market", "screener",
          "drawings", "page_single", "page_compare", "page_portfolio"]
 _BASE = os.path.dirname(os.path.abspath(__file__))
 _SELF = os.path.abspath(__file__)
