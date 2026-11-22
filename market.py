@@ -46,9 +46,9 @@ def load_quotes() -> pd.DataFrame:
 @st.cache_data(ttl=300, show_spinner=False)
 def load_krx_snapshot() -> pd.DataFrame:
     """KRX 전 종목 당일 시세 (현재가·등락률·거래대금·시가총액)."""
-    import FinanceDataReader as fdr
+    from data_load import krx_listing_raw
 
-    df = fdr.StockListing("KRX")
+    df = krx_listing_raw().copy()
     if "Symbol" in df.columns and "Code" not in df.columns:
         df = df.rename(columns={"Symbol": "Code"})
     if "ChagesRatio" in df.columns and "ChangesRatio" not in df.columns:
@@ -471,22 +471,42 @@ def _world_map(close) -> str:
     return ss["mk_country"]
 
 
+def _preload(country: str) -> dict:
+    """처음 열 때 오래 걸리는 자료를 한꺼번에 동시에 받는다 (전에는 지수 → 지역 정보 → 지도 경계 → 업종 분류 순서로 차례차례 받았음).
+    여기서 실패한 것은 그 자료를 쓰는 곳에서 다시 시도한다 (실패는 캐시되지 않음)."""
+    import geodata as gd
+    import sectors
+
+    jobs = {"quotes": load_quotes, "snap": load_krx_snapshot}
+    if country == "한국":
+        jobs.update(regions=gd.kr_regions, geo=gd.kr_geojson, wics=sectors.wics_map)
+    elif country == "미국":
+        jobs.update(usmap=gd.us_frame)
+    out = {}
+    with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+        futs = {k: ex.submit(ui.with_ctx(fn)) for k, fn in jobs.items()}
+        for k, f in futs.items():
+            try:
+                out[k] = f.result()
+            except Exception as e:  # noqa: BLE001
+                out[k] = e
+    return out
+
+
 def render_market() -> None:
+    country0 = st.session_state.get("mk_country", COUNTRIES["KOR"][0])
     with st.spinner("시장 데이터를 불러오는 중..."):
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            f_q, f_x = (ex.submit(ui.with_ctx(fn)) for fn in (load_quotes, load_krx_snapshot))
-            close = kr3y = snap = None
-            errs = []
-            for nm, f in (("해외·지수", f_q), ("국내 종목", f_x)):
-                try:
-                    v = f.result()
-                except Exception as e:  # noqa: BLE001
-                    errs.append(f"{nm}: {e}")
-                    continue
-                if nm == "해외·지수":
-                    close = v
-                else:
-                    snap = v
+        got = _preload(country0)
+    close = kr3y = snap = None
+    errs = []
+    for nm, k in (("해외·지수", "quotes"), ("국내 종목", "snap")):
+        v = got.get(k)
+        if isinstance(v, Exception):
+            errs.append(f"{nm}: {v}")
+        elif k == "quotes":
+            close = v
+        else:
+            snap = v
 
     asof = close.index[-1].strftime("%Y-%m-%d") if close is not None and len(close) else ""
     st.markdown(f'<div class="qh-n">시장 개요 <span class="qh-code">{asof} 기준 · 일봉 종가(장중엔 지연 시세)</span></div>',
@@ -502,6 +522,15 @@ def render_market() -> None:
     if errs:
         st.caption("일부 데이터를 불러오지 못했습니다: " + " · ".join(errs))
     st.caption("출처: Yahoo Finance · KRX(FinanceDataReader) · WICS(와이즈인덱스) · 나스닥 · S&P 500(GICS). 투자 판단의 참고 자료로만 사용하세요.")
+    # 화면을 다 그린 뒤에 그 나라 전 종목 2년 일봉을 뒤에서 받기 시작 (먼저 시작하면 첫 화면 다운로드와 겹쳐 느려짐)
+    try:
+        import geodata as gd
+
+        iso = {v[0]: k for k, v in COUNTRIES.items()}.get(country)
+        if iso:
+            gd.prewarm(iso)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # 아래 부분들은 각각 따로 다시 그린다 (ui.fragment): 한 곳의 버튼을 눌러도 다른 지도·표를 다시 계산하지 않아 빠르다.
