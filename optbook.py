@@ -167,7 +167,7 @@ def _tables() -> None:
                        "종류": st.column_config.SelectboxColumn(options=["콜", "풋"]),
                        "만기": st.column_config.TextColumn(help="YYYY-MM-DD (둘째 목요일)"),
                        "수량(계약)": st.column_config.NumberColumn(step=1), "행사가": st.column_config.NumberColumn(format="%.2f"),
-                       "가격": st.column_config.NumberColumn(format="%.2f", help="비우면 HV 60일 이론가")})
+                       "가격": st.column_config.NumberColumn(format="%.2f", help="비우면 GARCH(1,1) 예측 변동성 이론가")})
 
 
 # ----------------------------------------------------------------------
@@ -201,7 +201,7 @@ def render_kr_section() -> None:
             unit = "원/포인트" if code == kropt.KS200 else "주"
             ui.cards([("포지션 가치", f"{val:,.0f}원"), ("델타", f"{d_tot:,.1f}{unit}", f"기초자산 1 오르면 {d_tot:,.0f}원"),
                       ("감마", f"{g_tot:,.4f}"), ("베가 (1%p)", f"{v_tot:,.0f}원"), ("세타 (1일)", f"{th_tot:,.0f}원")], cols=5)
-            tb = pd.DataFrame([{"옵션": lg["label"], "수량": f"{lg['n']:+g}", "가격": lg["mkt"], "IV(%)": lg["sig"] * 100, "IV 기준": lg["src"],
+            tb = pd.DataFrame([{"옵션": lg["label"], "수량": f"{lg['n']:+g}", "가격": lg["mkt"], "변동성(%)": lg["sig"] * 100, "변동성 기준": lg["src"],
                                 "델타": lg["delta"], "감마": lg["gamma"]} for lg in u["legs"]])
             st.dataframe(tb.round(4), hide_index=True, use_container_width=True)
             # 헷지
@@ -247,7 +247,7 @@ def render_kr_section() -> None:
             fig.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="기초자산 가격", yaxis_title="손익(원)",
                               hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
             st.plotly_chart(fig, use_container_width=True)
-    st.caption(f"국내 옵션은 유럽형 BSM으로 계산합니다 (무위험금리 {r_lab}, 배당 0 가정). 가격을 넣지 않은 옵션은 HV 60일 이론가입니다.")
+    st.caption(f"국내 옵션은 유럽형 BSM으로 계산합니다 (무위험금리 {r_lab}, 배당 0 가정). 가격을 넣지 않은 옵션은 GARCH(1,1)로 예측한 만기까지 평균 변동성으로 계산한 이론가입니다 (주가 이력이 짧으면 HV 60일).")
 
 
 def _today(u, g, sh):
