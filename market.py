@@ -219,6 +219,11 @@ def _sector_map() -> pd.DataFrame:
     return sectors.kr_sector_map()[0]
 
 
+# 시장 지도 색 (−3% 이하 진한 파랑 ~ 0% 회색 ~ +3% 이상 진한 빨강). 작은 등락도 색이 바로 보이게 가운데를 좁게.
+HEAT_SCALE = [[0, "#0033CC"], [0.3, "#1A56E0"], [0.44, "#3559B0"], [0.5, "#41454F"],
+              [0.56, "#B23A44"], [0.7, "#E61E2B"], [1, "#D4000F"]]
+
+
 def _treemap(m: pd.DataFrame, title: str, sub: str, money_fmt, height: int = 560) -> None:
     """Finviz식 시장 지도: 섹터 → 업종 → 종목. 칸 크기 = 시가총액, 색 = 오늘 등락률 (상승 빨강, 하락 파랑).
     m: Key(고유), Name, Sector, Industry, Marcap, ChangesRatio, Close."""
@@ -251,7 +256,7 @@ def _treemap(m: pd.DataFrame, title: str, sub: str, money_fmt, height: int = 560
         texttemplate="<b>%{label}</b><br>%{customdata[0]:+.2f}%",
         hovertemplate="<b>%{label}</b><br>등락률 %{customdata[0]:+.2f}%<br>시가총액 %{customdata[1]}<br>%{customdata[2]}<extra></extra>",
         marker=dict(colors=[float(x) for x in np.clip(chg, -3, 3)], cmin=-3, cmax=3, showscale=False,
-                    colorscale=[[0, "#1E5BC6"], [0.35, "#4F7CC9"], [0.5, "#4A4F5A"], [0.65, "#CF5A5D"], [1, "#C8232C"]],
+                    colorscale=HEAT_SCALE,
                     line=dict(width=1, color="rgba(0,0,0,0.35)")),
         tiling=dict(pad=1), pathbar=dict(visible=True), maxdepth=4, textfont=dict(color="white"),
     ))
