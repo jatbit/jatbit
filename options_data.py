@@ -1,4 +1,4 @@
-"""옵션 데이터: 만기·체인·기초자산·금리·환율 불러오기, 시장 변수, 체인 계산(그릭스), 지표 카드(mgrid)."""
+"""옵션 데이터: 만기·체인·기초자산·금리·환율 불러오기, 시장 변수, 체인 계산(그릭스). (지표 격자 mgrid는 ui.py로 옮김)"""
 import html
 import io
 import math
@@ -32,6 +32,7 @@ except Exception:  # noqa: BLE001
 MULT = 100  # 미국 주식옵션 1계약 = 100주
 OPT_PRESETS = ["AAPL", "NVDA", "TSLA", "MSFT", "SPY", "QQQ"]
 HV_WINDOWS = {"20일": 20, "60일": 60, "120일": 120, "1년(252일)": 252}
+GARCH_PICK = "GARCH(1,1) 예측"
 TYPE_KO = {True: "콜", False: "풋"}
 
 
@@ -171,6 +172,13 @@ def market_params(ticker: str, key: str, show: bool = True) -> dict | None:
         st.error(f"{ticker} 기초자산 가격을 불러오지 못했습니다: {e}")
         return None
     hv = {k: bsm.hist_vol(u["close"], w) for k, w in HV_WINDOWS.items()}
+    try:
+        import garch
+
+        gf = garch.fit_close(u["close"])
+    except Exception:  # noqa: BLE001
+        gf = None
+    g63 = garch.term_vol(gf, 63) if gf else float("nan")
     rr = load_us_rate_3m()
     r_default = rr[0] if rr else 0.04
     q_default = u["div12"] / u["spot"] if u["spot"] > 0 else 0.0
@@ -178,15 +186,17 @@ def market_params(ticker: str, key: str, show: bool = True) -> dict | None:
         ss = st.session_state
         r_pct = float(ss.get(f"{key}_r_{ticker}", round(r_default * 100, 3)))
         q_pct = float(ss.get(f"{key}_q_{ticker}", round(q_default * 100, 3)))
-        hv_pick = ss.get(f"{key}_hvpick_{ticker}", list(HV_WINDOWS)[1])
-        sig_theo = (float(ss.get(f"{key}_hvman_{ticker}", 30.0)) / 100 if hv_pick == "직접 입력" else hv.get(hv_pick, float("nan")))
+        hv_pick = ss.get(f"{key}_hvpick_{ticker}", GARCH_PICK if gf else list(HV_WINDOWS)[1])
+        sig_theo = (float(ss.get(f"{key}_hvman_{ticker}", 30.0)) / 100 if hv_pick == "직접 입력" else
+                    g63 if hv_pick == GARCH_PICK else hv.get(hv_pick, float("nan")))
         if not (sig_theo == sig_theo) or sig_theo <= 0:
-            sig_theo = 0.3
+            sig_theo = hv.get("60일", 0.3) if hv.get("60일", 0) == hv.get("60일", 0) else 0.3
         return {"S": u["spot"], "asof": u["asof"], "r": math.log1p(r_pct / 100), "r_simple": r_pct / 100,
-                "q": q_pct / 100, "sig_theo": sig_theo, "hv": hv, "hv_pick": hv_pick}
+                "q": q_pct / 100, "sig_theo": sig_theo, "hv": hv, "hv_pick": hv_pick, "garch": gf}
 
     mgrid([("기초자산 가격", f"{u['spot']:,.2f}", f"기준: {u['asof']}")] +
-          [(f"HV {k}", f"{v * 100:.1f}%" if v == v else "-", f"역사적 변동성 {k}") for k, v in hv.items()], cols=5)
+          [(f"HV {k}", f"{v * 100:.1f}%" if v == v else "-", f"역사적 변동성 {k}") for k, v in hv.items()]
+          + ([("GARCH 3개월", f"{g63 * 100:.1f}%", "GARCH(1,1)로 예측한 앞으로 63거래일 평균 변동성")] if gf else []), cols=6 if gf else 5)
 
     box = st.popover("설정 · 금리·배당·변동성") if hasattr(st, "popover") else st.expander("설정 · 금리·배당·변동성")
     with box:
@@ -196,20 +206,25 @@ def market_params(ticker: str, key: str, show: bool = True) -> dict | None:
                             help=(f"FRED 미 국채 3개월 {rr[0] * 100:.2f}% ({rr[1]} 기준)" if rr else "FRED 조회 실패로 4% 기본값") + ", 연속복리로 환산해 사용")
     q_pct = c2.number_input("배당수익률 q (%)", value=round(q_default * 100, 3), step=0.05, format="%.3f",
                             key=f"{key}_q_{ticker}", help=f"최근 12개월 배당 {u['div12']:.2f} ÷ 현재가")
-    hv_opts = list(HV_WINDOWS) + ["직접 입력"]
-    hv_pick = c3.selectbox("이론가에 쓸 변동성", hv_opts, index=1, key=f"{key}_hvpick_{ticker}")
+    hv_opts = ([GARCH_PICK] if gf else []) + list(HV_WINDOWS) + ["직접 입력"]
+    if st.session_state.get(f"{key}_hvpick_{ticker}") not in hv_opts:
+        st.session_state.pop(f"{key}_hvpick_{ticker}", None)
+    hv_pick = c3.selectbox("이론가에 쓸 변동성", hv_opts, index=0 if gf else 1, key=f"{key}_hvpick_{ticker}",
+                           help="GARCH(1,1): 최근 3년 수익률로 추정해 '만기까지 평균 변동성'을 예측 (체인에서는 고른 만기에 맞춤)")
     if hv_pick == "직접 입력":
         sig_theo = box.number_input("이론가 변동성 (%)", value=round((hv["60일"] if hv["60일"] == hv["60일"] else 0.3) * 100, 2),
                                    step=0.5, key=f"{key}_hvman_{ticker}") / 100
+    elif hv_pick == GARCH_PICK:
+        sig_theo = g63
     else:
         sig_theo = hv[hv_pick]
     if key == "chain":
         box.radio("그릭스 기준 변동성", ["IV", "HV"], horizontal=True, key="opt_greek_basis",
-                  format_func=lambda x: "내재(IV)" if x == "IV" else "역사적(HV)", help="IV: 각 옵션의 내재변동성으로 그릭스 계산 · HV: 위에서 고른 역사적 변동성으로 계산")
+                  format_func=lambda x: "내재(IV)" if x == "IV" else "이론가 변동성", help="IV: 각 옵션의 내재변동성으로 그릭스 계산 · 이론가 변동성: 위에서 고른 변동성(GARCH 또는 HV)으로 계산")
     if not (sig_theo == sig_theo) or sig_theo <= 0:
         sig_theo = 0.3
     return {"S": u["spot"], "asof": u["asof"], "r": math.log1p(r_pct / 100), "r_simple": r_pct / 100,
-            "q": q_pct / 100, "sig_theo": sig_theo, "hv": hv, "hv_pick": hv_pick}
+            "q": q_pct / 100, "sig_theo": sig_theo, "hv": hv, "hv_pick": hv_pick, "garch": gf}
 
 
 def build_chain(raw: pd.DataFrame, P: dict, T: float, greek_basis: str = "IV") -> pd.DataFrame:
@@ -252,26 +267,7 @@ def _is_dark() -> bool:
     return (st.get_option("theme.base") or "dark") != "light"
 
 
-def mgrid(items, cols: int = 4) -> None:
-    """지표를 가로 격자로 나열 (휴대폰에서도 세로로 길게 쌓이지 않게). items: (라벨, 값[, 보조 설명])
-    라벨 옆 ⓘ(동그라미 ?)에 마우스를 올리거나 탭하면 값이 높을 때·낮을 때의 의미가 뜬다."""
-    import re
-
-    from glossary import CSS, icon, tip
-
-    cells = ""
-    for i, it in enumerate(items):
-        lab, val = it[0], it[1]
-        extra = it[2] if len(it) > 2 and it[2] else ""
-        t = tip(lab)
-        if extra and not re.search(r"[÷×=√]| [+−] |N\(", extra):  # 계산식이 아닌 보조 정보(기준일 등)만 덧붙임
-            t = f"{t} ({extra})" if t else extra
-        right = " qr" if cols > 1 and (i % cols) >= cols / 2 else ""
-        cells += (f'<div class="kc-c{right}"><div class="kc-l"><span>{html.escape(lab)}</span>{icon(t)}</div>'
-                  f'<div class="kc-v">{html.escape(val)}</div></div>')
-    cells = cells.replace("$", "&#36;")  # 마크다운 수식($...$)으로 해석되지 않게
-    st.markdown(CSS + f'<div class="kc" style="grid-template-columns:repeat({cols},minmax(0,1fr))">{cells}</div>',
-                unsafe_allow_html=True)
+from ui import mgrid  # noqa: E402,F401  지표 격자는 ui.py로 옮김 (예전 이름 그대로 쓸 수 있게)
 
 
 # 보유 포지션 표의 빈 양식 (옵션 체인의 "포지션에 추가"와 헷지 화면이 같이 씀)
