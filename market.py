@@ -30,9 +30,14 @@ COUNTRIES = {"KOR": ("한국", "^KS11", "코스피"), "USA": ("미국", "^GSPC",
 PERIODS = {"1일": None, "1주": 7, "1개월": 30, "3개월": 91, "연초 이후": "ytd", "1년": 365}
 
 
-@st.cache_data(ttl=300, show_spinner=False)
 def load_quotes() -> pd.DataFrame:
-    """Yahoo 일별 종가 (최근 2년). 열 = 심볼."""
+    """Yahoo 일별 종가 (최근 2년). 열 = 심볼. 5분이 지나면 직전 값을 먼저 쓰고 뒤에서 새로 받는다."""
+    from data_load import swr
+
+    return swr("market_quotes", _quotes_raw).copy()
+
+
+def _quotes_raw() -> pd.DataFrame:
     import yfinance as yf
 
     syms = [s for _, items in GROUPS for s, _, _ in items]
@@ -43,8 +48,7 @@ def load_quotes() -> pd.DataFrame:
     return close.sort_index()
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def load_krx_snapshot() -> pd.DataFrame:
+def load_krx_snapshot() -> pd.DataFrame:  # 캐시는 krx_listing_raw (뒤에서 새로 고침)가 맡음
     """KRX 전 종목 당일 시세 (현재가·등락률·거래대금·시가총액)."""
     from data_load import krx_listing_raw
 
