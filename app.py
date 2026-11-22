@@ -21,10 +21,9 @@ import ui  # 화면 공통 요소 (ui.py)
 
 ui.apply_theme()
 
-# 파일 구성 (하나 고칠 때 그 파일만 올리면 되도록 나눔)
-#   common.py          종목 목록·주가 불러오기·기간 입력·CAPM/위험 지표
-#   page_single.py     주가 조회        page_compare.py   수익률 비교      page_portfolio.py  포트폴리오
-#   market.py 시장 · research.py 기업 리서치 · screener.py · backtest.py · options.py · bonds.py
+# 파일 구성은 ARCHITECTURE.md (파트별 파일 지도 · 공통 도우미 · 세션 키 접두어 · 고칠 때 순서)
+#   페이지 진입점: market.py 시장 · page_single.py 주가 조회 · research.py 기업 리서치 · screener.py 스크리너
+#                  page_compare.py 수익률 비교 · page_portfolio.py 포트폴리오 · backtest.py · options.py 옵션 · bonds.py 채권
 from common import find_candidates, load_listing, load_prices, risk_free_for
 
 # ======================================================================
