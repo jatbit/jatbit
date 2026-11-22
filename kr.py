@@ -454,7 +454,7 @@ def _num_col(s):
 def render_kr_ownership(code: str, R: dict) -> None:
     """국내 종목 '내부자 거래·지분 구조' 탭."""
     from glossary import col_help
-    from options import mgrid
+    from ui import mgrid
 
     key = dart_key()
     info = R.get("info") or {}
