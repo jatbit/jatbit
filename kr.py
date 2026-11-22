@@ -26,16 +26,16 @@ DART = "https://opendart.fss.or.kr/api/"
 # ----------------------------------------------------------------------
 @st.cache_data(ttl=24 * 60 * 60, show_spinner="국내 종목 목록을 불러오는 중...")
 def load_krx() -> pd.DataFrame:
-    import FinanceDataReader as fdr
+    from data_load import krx_desc_raw, krx_listing_raw
 
-    df = fdr.StockListing("KRX")
+    df = krx_listing_raw().copy()
     if "Symbol" in df.columns and "Code" not in df.columns:
         df = df.rename(columns={"Symbol": "Code"})
     keep = [c for c in ["Code", "Name", "Market", "Marcap", "Stocks"] if c in df.columns]
     df = df[keep].dropna(subset=["Code", "Name"]).copy()
     df["Code"] = df["Code"].astype(str).str.zfill(6)
     try:  # 업종(산업) 정보
-        desc = fdr.StockListing("KRX-DESC")
+        desc = krx_desc_raw().copy()
         if "Symbol" in desc.columns and "Code" not in desc.columns:
             desc = desc.rename(columns={"Symbol": "Code"})
         desc["Code"] = desc["Code"].astype(str).str.zfill(6)
