@@ -197,6 +197,8 @@ def render_backtest(load_prices, find_candidates, listing, risk_free_for) -> Non
 
     # ---- 가격
     series = {}
+    from data_load import prefetch_prices
+    prefetch_prices([it["code"] for it in items] + ([b_opts[bench_name]] if b_opts[bench_name] else []), start.isoformat())
     with st.spinner("가격을 불러오는 중..."):
         for it in items:
             try:
