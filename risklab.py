@@ -11,7 +11,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from glossary import table_html
-from options import mgrid
+from ui import mgrid
 
 SCENARIOS = {  # 이름: (시작, 끝) — 미국·글로벌 주가 고점→저점 기준
     "글로벌 금융위기": ("2007-10-09", "2009-03-09"),
