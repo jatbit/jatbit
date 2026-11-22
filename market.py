@@ -275,24 +275,9 @@ def _usd(v, kind):
     return f"${v / 1e12:,.2f}T" if v >= 1e12 else f"${v / 1e9:,.1f}B"
 
 
-def _map_controls(prefix: str, markets: list | None, sizes: list, default_n: int):
-    """시장 선택 + 종목 수(상위 N) 선택. 선택된 '상위 N'을 한 번 더 누르면 선택이 풀리고 n=None(그 시장의 모든 종목)."""
-    try:
-        c1, c2 = st.columns([2, 1], vertical_alignment="bottom")
-    except TypeError:
-        c1, c2 = st.columns([2, 1])
-    mk, n = (markets[0] if markets else None), default_n
-    if markets:
-        with c1:
-            mk = ui.seg("시장", markets, default=markets[0], key=f"{prefix}_mk") or markets[0]
-    with c2:
-        n = ui.seg("종목 수", sizes, default=default_n, key=f"{prefix}_n", format_func=lambda x: f"상위 {x}")
-    return mk, (int(n) if n else None)
-
-
-def _size_note(n, total: int, what: str) -> str:
-    return (f"시가총액 상위 {n}개 · 선택한 '상위 {n}'을 다시 누르면 {what} 전체 {total:,}개를 봅니다" if n
-            else f"{what} 전체 {total:,}개 종목 · 위 버튼을 누르면 상위 종목만 봅니다")
+def _map_controls(prefix: str, markets: list) -> str:
+    """시장 선택 (종목은 항상 전체)."""
+    return ui.seg("시장", markets, default=markets[0], key=f"{prefix}_mk") or markets[0]
 
 
 def _heatmap(snap: pd.DataFrame) -> None:
@@ -300,18 +285,15 @@ def _heatmap(snap: pd.DataFrame) -> None:
     if not need.issubset(snap.columns):
         return
     ui.section("국내 시장 지도", "섹터 → 업종 → 종목 · 칸 크기 = 시가총액 · 색 = 오늘 등락률 · 칸을 누르면 확대")
-    mk, n = _map_controls("mk_map", ["전체", "KOSPI", "KOSDAQ"], [100, 200, 400], 200)
+    mk = _map_controls("mk_map", ["전체", "KOSPI", "KOSDAQ"])
     m = snap.dropna(subset=["Marcap", "ChangesRatio"]).copy()
     if mk != "전체" and "Market" in m.columns:
         m = m[m["Market"].astype(str).str.upper().str.startswith(mk)]
     m["Code"] = m["Code"].astype(str).str.zfill(6)
     m = m[m["Code"].str.endswith("0")]  # 우선주 제외
-    total = len(m)
-    if n:
-        m = m.nlargest(int(n), "Marcap")
     if m.empty:
         return
-    st.caption(_size_note(n, total, mk if mk != "전체" else "코스피·코스닥"))
+    st.caption(f"{mk if mk != '전체' else '코스피·코스닥'} 전체 {len(m):,}개 종목 (우선주 제외)")
     import sectors
 
     try:
@@ -320,7 +302,7 @@ def _heatmap(snap: pd.DataFrame) -> None:
     except Exception as e:  # noqa: BLE001
         m["Sector"], m["Industry"], src = "분류 없음", "분류 없음", f"업종 분류를 받지 못함 ({e})"
     m["Key"] = m["Code"]
-    _treemap(m, "국내 시장 지도", f"분류: {src}", _krw, height=560 if n else 760)
+    _treemap(m, "국내 시장 지도", f"분류: {src}", _krw, height=760)
 
 
 def _us_movers_table(df: pd.DataFrame, title: str) -> str:
@@ -369,15 +351,11 @@ def _us_market() -> None:
     ui.cards(items, cols=4)
 
     ui.section("미국 시장 지도 (S&P 500)", "섹터 → 업종(GICS) → 종목 · 칸 크기 = 시가총액 · 색 = 오늘 등락률 · 칸을 누르면 확대")
-    _mk, n = _map_controls("us_map", None, [100, 250], 250)
     m = sp.dropna(subset=["Marcap"]).copy()
-    total = len(m)
-    if n:
-        m = m.nlargest(n, "Marcap").copy()
-    st.caption(_size_note(n, total, "S&P 500"))
+    st.caption(f"S&P 500 전체 {len(m):,}개 종목")
     m["Key"], m["Sector"] = m["Symbol"], m["SectorKo"]
     m["FullName"], m["Name"] = m["Name"], m["Symbol"]
-    _treemap(m, "미국 시장 지도", f"분류: GICS 섹터·세부 업종 · 시세: {src}", _usd, height=560 if n else 760)
+    _treemap(m, "미국 시장 지도", f"분류: GICS 섹터·세부 업종 · 시세: {src}", _usd, height=760)
 
     c1, c2 = st.columns(2)
     with c1:
@@ -472,8 +450,9 @@ def _world_map(close) -> str:
                     showcoastlines=False, showland=True, landcolor="rgba(128,128,128,.12)", showocean=False,
                     showframe=False, lataxis_range=[-50, 78], bgcolor="rgba(0,0,0,0)")
     fig.update_layout(height=360, margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor="rgba(0,0,0,0)", showlegend=False,
-                      dragmode=False, clickmode="event+select")
-    hit = ui.new_click(ui.chart_points(fig, "mk_world"), "mk_world")
+                      dragmode="pan", clickmode="event+select")
+    hit = ui.new_click(ui.chart_points(fig, "mk_world", config={"displayModeBar": False, "scrollZoom": True, "doubleClick": "reset"}),
+                       "mk_world")
     if hit and 0 <= hit[1] < len(names):
         ss["mk_country"] = names[hit[1]]
     ss["mk_country_seg"] = ss["mk_country"]
