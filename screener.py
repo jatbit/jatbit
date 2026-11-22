@@ -170,25 +170,16 @@ def _kr_universe(top_n: int) -> pd.DataFrame:
 # ----------------------------------------------------------------------
 # 화면
 # ----------------------------------------------------------------------
-def _go(page_key: str, state_key: str, value: str) -> None:
-    """다른 페이지로 넘어가면서 그 페이지의 종목 입력칸을 채운다."""
-    st.session_state[state_key] = value
-    pg = getattr(ui, "PAGE_OBJS", {}).get(page_key)
-    if pg is not None and hasattr(st, "switch_page"):
-        st.switch_page(pg)
-    else:
-        st.info("위 메뉴에서 해당 페이지를 열면 이 종목이 입력되어 있습니다.")
+_go = ui.go  # 다른 페이지로 넘어가면서 입력칸 채우기 (ui.py)
 
 
 def render_screener() -> None:
-    seg = getattr(st, "segmented_control", None) or getattr(st, "pills", None)
     try:
         c1, c2, c3 = st.columns([1.6, 1.2, 1], vertical_alignment="bottom")
     except TypeError:
         c1, c2, c3 = st.columns([1.6, 1.2, 1])
     with c1:
-        uni = (seg("시장", ["국내 (KRX)", "미국 (S&P 500)"], default="국내 (KRX)", key="sc_uni", label_visibility="collapsed")
-               if seg else st.radio("시장", ["국내 (KRX)", "미국 (S&P 500)"], horizontal=True, key="sc_uni")) or "국내 (KRX)"
+        uni = ui.seg("시장", ["국내 (KRX)", "미국 (S&P 500)"], default="국내 (KRX)", key="sc_uni") or "국내 (KRX)"
     domestic = uni.startswith("국내")
     with c2:
         top_n = st.selectbox("검색 대상", [200, 400, 800], index=1, key="sc_topn", format_func=lambda x: f"시가총액 상위 {x}종목",
@@ -339,14 +330,9 @@ def _results(D, U, T, domestic, scores, rsi_n, ma_s, vol_n, hv_n) -> None:
            "거래량 배수": pct("거래량 배수", format="%.1f배", help=f"오늘 거래량 ÷ 최근 {vol_n}일 평균. 2배 이상이면 관심이 몰린 것"),
            "변동성(%)": pct("변동성(%)", format="%.0f", help=f"최근 {hv_n}일 일별 수익률의 연환산 표준편차")}
     kw = dict(use_container_width=True, hide_index=True, column_config=cfg, height=min(38 * (len(out) + 1) + 4, 620))
-    try:
-        ev = st.dataframe(out, on_select="rerun", selection_mode="single-row", key="sc_table", **kw)
-        rows = ev.selection.rows if ev is not None and hasattr(ev, "selection") else []
-    except TypeError:
-        st.dataframe(out, **kw)
-        rows = []
-    if rows:
-        r = out.iloc[rows[0]]
+    i = ui.table_pick(out, "sc_table", **kw)
+    if i is not None:
+        r = out.iloc[i]
         q = str(r["종목"]) if domestic else str(r["코드"])
         b1, b2, _ = st.columns([1, 1, 2])
         if b1.button(f"{r['종목']} 차트 보기", key="sc_go_chart", use_container_width=True):
@@ -485,14 +471,9 @@ def _render_scores(D: pd.DataFrame, domestic: bool) -> None:
            "위험 신호": st.column_config.TextColumn("위험 신호", help="부실 위험 등이 켜지면 점수 상한이 50점")}
     cfg.update({v: nc(v, format="%d") for v in SCORE_COLS.values()})
     kw = dict(use_container_width=True, hide_index=True, column_config=cfg, height=min(36 * (len(top) + 1) + 4, 760))
-    try:
-        ev = st.dataframe(top, on_select="rerun", selection_mode="single-row", key="sc_score_table", **kw)
-        sel = ev.selection.rows if ev is not None and hasattr(ev, "selection") else []
-    except TypeError:
-        st.dataframe(top, **kw)
-        sel = []
-    if sel:
-        r = top.iloc[sel[0]]
+    i = ui.table_pick(top, "sc_score_table", **kw)
+    if i is not None:
+        r = top.iloc[i]
         b1, b2, _ = st.columns([1, 1, 2])
         if b1.button(f"{r['종목']} 기업 리서치", key="sc_score_go", type="primary", use_container_width=True):
             _go("research", "rs_ticker", str(r["코드"]))
