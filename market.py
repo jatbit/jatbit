@@ -448,7 +448,8 @@ def _world_map(close) -> str:
         hov.append(f"{nm} · {inm} {lv}<br>{per} {r:+.2f}%" if r == r else f"{nm} · {inm}")
     vals = np.array([x if x == x else 0.0 for x in rets])
     m = max(float(np.nanmax(np.abs(vals))) if len(vals) else 1.0, 0.5)
-    scale = [[0, ui.DOWN], [0.5, "#D9D6CF"], [1, ui.UP]]
+    from geomap import UPDOWN as scale  # 나라 지도와 같은 진한 색
+
     fig = go.Figure()
     fig.add_trace(go.Choropleth(locations=iso, z=vals, locationmode="ISO-3", colorscale=scale, zmin=-m, zmax=m,
                                 marker_line_color="rgba(255,255,255,.6)", marker_line_width=0.6, text=hov,
