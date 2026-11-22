@@ -13,7 +13,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from glossary import col_help
-from options import mgrid
+from ui import mgrid
 
 try:
     import yfinance as yf
@@ -368,7 +368,7 @@ def render_earnings(ticker: str, R: dict, domestic: bool = False) -> None:
 
 def _render_event_iv(ticker: str, nxt, kind: str, rx: pd.DataFrame) -> None:
     from optvol import _chain_cached, _params, expiry_stats
-    from options import load_expiries, years_to_expiry
+    from options_data import load_expiries, years_to_expiry
 
     try:
         exps = load_expiries(ticker)
