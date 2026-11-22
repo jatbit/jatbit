@@ -1,4 +1,5 @@
-"""화면 공통 요소: 테마, 페이지를 오가도 입력값 유지, 지연 로딩 탭·더보기, 시세 헤더, 핵심 지표 카드.
+"""화면 공통 요소: 테마, 페이지를 오가도 입력값 유지, 지연 로딩 탭·더보기, 시세 헤더, 핵심 지표 카드(cards·mgrid),
+상호작용 도우미(seg 버튼 줄 · go 페이지 이동 · chart_points/new_click 그림 클릭 · table_pick 표 행 고르기 · stock_buttons · with_ctx).
 
 - 지연 로딩: Streamlit 1.55+의 st.tabs / st.expander(on_change="rerun")로 열린 탭·펼친 더보기만 계산한다.
   (예전 버전이면 자동으로 일반 탭·펼침으로 돌아가 모두 계산한다)
@@ -238,6 +239,28 @@ def cards(items: list, cols: int = 4) -> None:
                 unsafe_allow_html=True)
 
 
+def mgrid(items, cols: int = 4) -> None:
+    """지표를 가로 격자로 나열 (휴대폰에서도 세로로 길게 쌓이지 않게). items: (라벨, 값[, 보조 설명])
+    라벨 옆 ⓘ(동그라미 ?)에 마우스를 올리거나 탭하면 값이 높을 때·낮을 때의 의미가 뜬다."""
+    import re
+
+    from glossary import CSS, icon, tip
+
+    cells = ""
+    for i, it in enumerate(items):
+        lab, val = it[0], it[1]
+        extra = it[2] if len(it) > 2 and it[2] else ""
+        t = tip(lab)
+        if extra and not re.search(r"[÷×=√]| [+−] |N\(", extra):  # 계산식이 아닌 보조 정보(기준일 등)만 덧붙임
+            t = f"{t} ({extra})" if t else extra
+        right = " qr" if cols > 1 and (i % cols) >= cols / 2 else ""
+        cells += (f'<div class="kc-c{right}"><div class="kc-l"><span>{html.escape(lab)}</span>{icon(t)}</div>'
+                  f'<div class="kc-v">{html.escape(val)}</div></div>')
+    cells = cells.replace("$", "&#36;")  # 마크다운 수식($...$)으로 해석되지 않게
+    st.markdown(CSS + f'<div class="kc" style="grid-template-columns:repeat({cols},minmax(0,1fr))">{cells}</div>',
+                unsafe_allow_html=True)
+
+
 def section(title: str, sub: str = "") -> None:
     s = f'<span class="sec-s">{html.escape(sub)}</span>' if sub else ""
     st.markdown(f'<div class="sec-t">{html.escape(title)}{s}</div>', unsafe_allow_html=True)
@@ -266,6 +289,102 @@ def popover(label: str, icon: str | None = None, help: str | None = None):
             except TypeError:
                 continue
     return st.expander(label)
+
+
+# ----------------------------------------------------------------------
+# 상호작용 도우미 (여러 페이지가 같이 씀)
+# ----------------------------------------------------------------------
+PAGE_OBJS: dict = {}  # app.py가 채움: url 이름 → st.Page
+
+
+def seg(label: str, options: list, default=None, key: str | None = None, format_func=None, collapsed: bool = True, **kw):
+    """버튼 줄 하나 고르기 (segmented_control → pills → 가로 라디오). 선택이 풀리면 None."""
+    fn = getattr(st, "segmented_control", None) or getattr(st, "pills", None)
+    vis = "collapsed" if collapsed else "visible"
+    ff = {"format_func": format_func} if format_func else {}
+    if fn:
+        return fn(label, options, default=default, key=key, label_visibility=vis, **ff, **kw)
+    idx = options.index(default) if default in options else 0
+    return st.radio(label, options, index=idx, horizontal=True, key=key, label_visibility=vis, **ff)
+
+
+def go(page_key: str, state_key: str, value: str) -> None:
+    """다른 페이지로 넘어가면서 그 페이지의 입력칸(state_key)을 채운다. page_key: chart · research · ... (app.py PAGES)"""
+    st.session_state[state_key] = value
+    pg = PAGE_OBJS.get(page_key)
+    if pg is not None and hasattr(st, "switch_page"):
+        st.switch_page(pg)
+    else:
+        st.info("위 메뉴에서 해당 페이지를 열면 이 종목이 입력되어 있습니다.")
+
+
+def with_ctx(fn):
+    """작업 스레드에서도 Streamlit 캐시가 경고 없이 동작하도록 현재 실행 정보를 붙인다 (ThreadPoolExecutor에 넘길 함수에 씌움)."""
+    try:
+        from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+
+        ctx = get_script_run_ctx()
+    except Exception:  # noqa: BLE001
+        return fn
+
+    def run(*a, **k):
+        import threading
+
+        try:
+            add_script_run_ctx(threading.current_thread(), ctx)
+        except Exception:  # noqa: BLE001
+            pass
+        return fn(*a, **k)
+
+    return run
+
+
+def chart_points(fig, key: str, config: dict | None = None) -> list:
+    """plotly 그림을 그리고, 사용자가 누른 점 목록을 돌려준다 (클릭을 못 받는 옛 버전이면 빈 목록).
+    각 점: dict(curve_number, point_index, ...)."""
+    cfg = config or {"displayModeBar": False, "scrollZoom": False}
+    try:
+        ev = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode="points", key=key, config=cfg)
+        return list((ev.selection.get("points") if ev is not None and hasattr(ev, "selection") else None) or [])
+    except TypeError:
+        st.plotly_chart(fig, use_container_width=True, config=cfg)
+        return []
+
+
+def new_click(points: list, key: str):
+    """chart_points 결과에서 '새로 누른' 점 하나 → (curve, index). 같은 선택이 다시 넘어오면 None.
+    선택이 풀리면 기억을 지워, 같은 곳을 다시 눌러도 알아듣는다."""
+    sk = f"_{key}_sig"
+    if not points:
+        st.session_state.pop(sk, None)
+        return None
+    p = points[0]
+    cn = p.get("curve_number", p.get("curveNumber"))
+    i = p.get("point_index", p.get("pointIndex", p.get("point_number")))
+    if i is None or (cn, i) == st.session_state.get(sk):
+        return None
+    st.session_state[sk] = (cn, i)
+    return int(cn or 0), int(i)
+
+
+def table_pick(df, key: str, **kw):
+    """표를 그리고, 사용자가 고른 행 번호(0부터)를 돌려준다. 없으면 None."""
+    try:
+        ev = st.dataframe(df, on_select="rerun", selection_mode="single-row", key=key, **kw)
+        rows = ev.selection.rows if ev is not None and hasattr(ev, "selection") else []
+    except TypeError:
+        st.dataframe(df, **kw)
+        rows = []
+    return rows[0] if rows else None
+
+
+def stock_buttons(name: str, research_key: str, chart_query: str, key: str, research_first: bool = True) -> None:
+    """'기업 리서치' · '차트 보기' 버튼 한 줄."""
+    b1, b2, _ = st.columns([1, 1, 2])
+    if b1.button(f"{name} 기업 리서치", key=f"{key}_rs", type="primary" if research_first else "secondary", use_container_width=True):
+        go("research", "rs_ticker", str(research_key))
+    if b2.button("차트 보기", key=f"{key}_ch", use_container_width=True):
+        go("chart", "single_query", str(chart_query))
 
 
 try:  # 날짜 축 차트를 트레이딩뷰처럼 (끌어서 이동·휠 확대·세로축 자동 맞춤·스크롤바)
