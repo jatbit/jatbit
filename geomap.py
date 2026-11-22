@@ -422,7 +422,7 @@ def _detail(iso, p, d, out, reg, basis, per, label, cap_fmt) -> None:
             items.append((f"{per} 수익률", fmt("수익률", r["Ret"]), "", r["Ret"]))
         items.append(("시가총액", r["CapTxt"], str(r.get("Sector") or "")))
         ui.cards(items, cols=len(items))
-        ui.stock_buttons(str(r["Label"]), r["RsKey"], r["Query"], key=f"{p}_pt")
+        _chart_button(str(r["Label"]), r["Query"], key=f"{p}_pt")
         if st.button("선택 해제", key=f"{p}_clr"):
             ss.pop(f"{p}_point", None)
             st.rerun()
@@ -461,6 +461,12 @@ def _detail(iso, p, d, out, reg, basis, per, label, cap_fmt) -> None:
                 st.dataframe(t, use_container_width=True, hide_index=True)
 
 
+def _chart_button(name: str, query: str, key: str) -> None:
+    c1, _ = st.columns([1, 3])
+    if c1.button(f"{name} 차트 보기", key=f"{key}_ch", use_container_width=True):
+        ui.go("chart", "single_query", str(query))
+
+
 def _list(sub: pd.DataFrame, p: str, basis: str, per: str, label: str) -> None:
     s = sub.sort_values("Marcap", ascending=False).reset_index(drop=True)
     out = pd.DataFrame({"종목": s["Label"], "본사": s["Place"]})
@@ -472,9 +478,9 @@ def _list(sub: pd.DataFrame, p: str, basis: str, per: str, label: str) -> None:
                       column_config={f"{per} 수익률(%)": st.column_config.NumberColumn(format="%+.2f")})
     if i is not None:
         r = s.iloc[i]
-        ui.stock_buttons(str(r["Label"]), r["RsKey"], r["Query"], key=f"{p}_tbl")
+        _chart_button(str(r["Label"]), r["Query"], key=f"{p}_tbl")
     else:
-        st.caption("행을 누르면 기업 리서치·차트로 바로 갈 수 있습니다.")
+        st.caption("행을 누르면 그 종목 차트로 바로 갈 수 있습니다.")
 
 
 # ----------------------------------------------------------------------
