@@ -31,11 +31,49 @@ def series_color(i: int) -> str:
 
 
 
+# ---- 기다리지 않는 새로 고침: 5분이 지난 자료는 우선 직전 값을 보여 주고 뒤에서 새로 받는다.
+# (전에는 5분마다 처음 들어온 사람이 KRX·Yahoo 다운로드를 통째로 기다렸음) 30분 넘게 묵은 자료는 기다려서 새로 받는다.
+@st.cache_resource
+def _swr_store() -> dict:
+    import threading
+    return {"d": {}, "lock": threading.Lock(), "locks": {}}
+
+
+def swr(key: str, fn, ttl: float = 300, max_stale: float = 1800):
+    """fn()의 결과를 key로 저장해 두고 돌려준다. fn 안에서는 st를 쓰지 않는다 (뒤 스레드에서도 돌기 때문)."""
+    import threading
+
+    S = _swr_store()
+    with S["lock"]:
+        klock = S["locks"].setdefault(key, threading.Lock())
+    e = S["d"].get(key)
+    age = time.time() - e["t"] if e else None
+    if e is None or age > max_stale:
+        with klock:  # 같은 자료를 두 곳에서 동시에 받지 않게
+            e = S["d"].get(key)
+            if e is None or time.time() - e["t"] > max_stale:
+                v = fn()
+                S["d"][key] = e = {"v": v, "t": time.time(), "busy": False}
+        return e["v"]
+    if age > ttl and not e["busy"]:
+        e["busy"] = True
+
+        def run():
+            try:
+                with klock:
+                    v = fn()
+                S["d"][key] = {"v": v, "t": time.time(), "busy": False}
+            except Exception:  # noqa: BLE001
+                e["busy"] = False
+
+        threading.Thread(target=run, daemon=True).start()
+    return e["v"]
+
+
 # KRX 원자료는 여기서만 받는다: 종목 목록·시장 개요 시세·업종이 같은 다운로드를 함께 쓴다 (전에는 같은 자료를 2~3번 받았음).
-@st.cache_data(ttl=300, show_spinner=False)
 def krx_listing_raw() -> pd.DataFrame:
-    """KRX 전 종목 당일 시세 원자료 (5분마다 새로)."""
-    return fdr.StockListing("KRX")
+    """KRX 전 종목 당일 시세 원자료 (5분마다 뒤에서 새로)."""
+    return swr("krx_listing", lambda: fdr.StockListing("KRX"))
 
 
 @st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
