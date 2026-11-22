@@ -148,6 +148,9 @@ def render_single(listing: pd.DataFrame) -> None:
     else:
         chosen = candidates[0]
 
+    # 종목과 CAPM 벤치마크 지수를 동시에 받아 둔다 (종목 하나는 한 번만 받고 기간·지표·52주는 잘라 씀)
+    prefetch_prices([chosen["code"], benchmark_for(chosen.get("market", ""), chosen["domestic"])[0]],
+                    min(start_d, kst_today() - timedelta(days=372)).isoformat())
     try:
         df = load_prices(chosen["code"], start_d.isoformat(), end_d.isoformat())
     except Exception as e:  # noqa: BLE001
