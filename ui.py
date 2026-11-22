@@ -308,6 +308,24 @@ def seg(label: str, options: list, default=None, key: str | None = None, format_
     return st.radio(label, options, index=idx, horizontal=True, key=key, label_visibility=vis, **ff)
 
 
+def fragment(fn):
+    """이 부분만 다시 그리게 한다 (안의 버튼·선택을 눌러도 페이지 전체를 다시 계산하지 않음). 옛 버전이면 그대로."""
+    f = getattr(st, "fragment", None)
+    return f(fn) if f else fn
+
+
+def rerun_here() -> None:
+    """지금 그리는 부분(fragment)만 다시 그린다. fragment 밖이거나 안 되는 버전이면 페이지 전체."""
+    try:
+        st.rerun(scope="fragment")
+    except TypeError:
+        st.rerun()
+    except Exception as e:  # noqa: BLE001
+        if type(e).__name__ in ("RerunException", "StopException"):
+            raise
+        st.rerun()
+
+
 def go(page_key: str, state_key: str, value: str) -> None:
     """다른 페이지로 넘어가면서 그 페이지의 입력칸(state_key)을 채운다. page_key: chart · research · ... (app.py PAGES)"""
     st.session_state[state_key] = value
