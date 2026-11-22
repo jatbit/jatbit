@@ -14,8 +14,10 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import bsm
-from options import (MULT, TYPE_KO, _row_for, build_chain, is_us_ticker, load_chain_raw, load_expiries,
-                     load_underlying, load_us_rate_3m, mgrid, years_to_expiry)
+from hedge import _row_for
+from options_data import (MULT, TYPE_KO, build_chain, is_us_ticker, load_chain_raw, load_expiries, load_underlying,
+                          load_us_rate_3m, years_to_expiry)
+from ui import mgrid
 
 def _usd(x) -> str:
     x = float(x)
@@ -166,6 +168,21 @@ def simulate(book: dict, h_days: float, drifts: dict, n_sims: int = 20000, seed:
         cov = np.diag([book[c]["P"]["sig_theo"] ** 2 for c in codes])
     else:
         cov = rets.cov().values * 252
+        # 변동성은 GARCH(1,1)로 예측한 '이 기간 평균 변동성', 상관은 최근 1년
+        try:
+            import garch
+
+            td = h_days if trading_day else h_days * 252 / 365
+            sd = np.sqrt(np.diag(cov))
+            gv = []
+            for i, c in enumerate(codes):
+                f = garch.fit_close(book[c]["P"]["close"])
+                gv.append(garch.term_vol(f, max(td, 1)) if f else sd[i])
+            gv = np.array(gv)
+            R = cov / np.outer(sd, sd)
+            cov = R * np.outer(gv, gv)
+        except Exception:  # noqa: BLE001
+            pass
     h = h_days / 365.0
     h_diff = h_days / 252.0 if trading_day else h
     rng = np.random.default_rng(seed)
@@ -288,7 +305,7 @@ def render_capm_opt() -> None:
 
     st.subheader("위험 수치 (1일)")
     mgrid([("VaR 95%", _usd(v95)), ("ES 95%", _usd(e95)), ("VaR 99%", _usd(v99)), ("ES 99%", _usd(e99))])
-    st.caption(f"몬테카를로 {n_sims:,}회, 최근 1년 수익률 상관 반영, 옵션은 전체 재평가")
+    st.caption(f"몬테카를로 {n_sims:,}회 · 변동성은 종목별 GARCH(1,1) 예측, 상관은 최근 1년 수익률 · 옵션은 전체 재평가")
 
     if h_days > 0:
         st.subheader(f"{h_days:g}일 뒤 손익 분포 (CAPM 기대수익률을 추세로 사용)")
