@@ -22,7 +22,9 @@ import streamlit as st
 import geodata as gd
 import ui
 
-UPDOWN = [[0, ui.DOWN], [0.5, "#D9D6CF"], [1, ui.UP]]
+# 상승 빨강 · 하락 파랑. 가운데(0)만 밝고 양 끝은 아주 진하게 (색 범위 끝 = 진한 빨강/파랑).
+UPDOWN = [[0, "#0A2A8F"], [0.15, "#1344D6"], [0.33, "#4F7FE6"], [0.5, "#D9D6CF"],
+          [0.67, "#F06A6A"], [0.85, "#D9142A"], [1, "#8A0712"]]
 SCALES = {
     "수익률": UPDOWN, "지수 대비": UPDOWN, "종합 점수": UPDOWN,
     "거래대금 증가율": [[0, "#7D8696"], [0.5, "#DEDAD2"], [1, "#E8912D"]],
@@ -60,10 +62,16 @@ def to_z(basis: str, vals, ref: float = np.nan) -> np.ndarray:
 
 
 def z_range(basis: str, zs) -> float:
+    """색 범위 (±이 값에서 가장 진한 색). 구역 값의 75% 지점으로 잡아 큰 등락은 확실히 진하게 보이게 한다."""
     a = np.abs(np.asarray([x for x in zs if x == x], dtype=float))
     lo = {"수익률": 0.5, "지수 대비": 0.5, "거래대금 증가율": 0.4, "PER": 0.5, "종합 점수": 10}[basis]
     hi = {"PER": 2.0, "거래대금 증가율": 2.0, "종합 점수": 40}.get(basis, np.inf)
-    return float(min(max(float(np.percentile(a, 90)) if len(a) else lo, lo), hi))
+    return float(min(max(float(np.percentile(a, 75)) if len(a) else lo, lo), hi))
+
+
+def _label_colors(zs, zm) -> list:
+    """진한 칸 위 글자는 흰색, 옅은 칸 위 글자는 검정."""
+    return ["#FFFFFF" if (z == z and zm and abs(z) / zm > 0.45) else "#111" for z in zs]
 
 
 def _nz(z) -> list:
@@ -111,9 +119,10 @@ def _traces(iso, reg, pts, gj, basis, label, ref, zm, sel, lab_index, static_pts
     t1 = go.Scattergeo(lat=list(pts["plat"]), lon=list(pts["plon"]), mode="markers", text=ptxt, hoverinfo="text",
                        marker=_pt_marker(pts, pz, scale, zm, cap_max))
     lab = reg.loc[lab_index]
+    lab_c = _label_colors(list(to_z(basis, lab["V"], ref)), zm) if gj is not None or iso == "USA" else "#111"
     t2 = go.Scattergeo(lat=list(lab["lat"]), lon=list(lab["lon"]), mode="text", hoverinfo="skip",
                        text=[f"<b>{r.Short}</b><br>{fmt(basis, r.V, short=True)}" for r in lab.itertuples()],
-                       textfont=dict(size=11 if iso == "USA" else 12, color="#111"))
+                       textfont=dict(size=11 if iso == "USA" else 12, color=lab_c))
     return [t0, t1, t2]
 
 
@@ -156,10 +165,10 @@ def _add_player(fig, frames: list, start: str) -> None:
                                                     transition=dict(duration=0))]),
                               dict(label="❚❚", method="animate", args=[[None], anim])])],
         sliders=[dict(active=names.index(start) if start in names else len(names) - 1, x=0.1, y=0.0, len=0.9, yanchor="top",
-                      pad=dict(t=8), currentvalue=dict(prefix="", font=dict(size=13)), ticklen=3,
+                      pad=dict(t=8, b=10), currentvalue=dict(prefix="", font=dict(size=13)), ticklen=3, font=dict(size=10),
                       steps=[dict(label=nm[5:] if len(nm) == 10 else nm, name=nm, method="animate", args=[[nm], anim]) for nm in names])],
-        margin=dict(l=0, r=0, t=0, b=80))
-    fig.update_layout(height=(fig.layout.height or 500) + 80)
+        margin=dict(l=0, r=0, t=0, b=120))  # 아래 날짜 글자가 잘리지 않게 여백을 넉넉히
+    fig.update_layout(height=(fig.layout.height or 500) + 120)
 
 
 # ----------------------------------------------------------------------
@@ -305,8 +314,7 @@ def _date_frames(iso, d, reg, gj, basis, rng, close, idx_sym, ref, sel, lab_inde
         if iso == "USA":
             rq["Abbr"] = reg["Abbr"]
         scenes.append((f"{dt:%Y-%m-%d}", rq, dq.dropna(subset=["plat", "plon"]).reset_index(drop=True)))
-    zs = [z for _n, rq, pq in scenes for z in list(to_z(basis, rq["V"], ref)) + list(to_z(basis, pq["V"], ref))]
-    zm = z_range(basis, zs)
+    zm = z_range(basis, [z for _n, rq, _pq in scenes for z in to_z(basis, rq["V"], ref)])  # 색 범위는 구역 값 기준 (종목 점은 넘치면 가장 진한 색)
     start = scenes[0][0]
     word = "수익률" if basis == "수익률" else f"{INDEX[iso][1]} 대비"
     frames = []
@@ -360,7 +368,7 @@ def _render(iso: str, inside: pd.DataFrame, outside: pd.DataFrame, gj, per: str,
         _layout(fig, iso, gj)
         _add_player(fig, frames, frames[-1][0])
     else:
-        zm = z_range(basis, list(to_z(basis, reg["V"], ref)) + list(to_z(basis, pts["V"], ref)))
+        zm = z_range(basis, list(to_z(basis, reg["V"], ref)) if reg["V"].notna().sum() >= 4 else list(to_z(basis, pts["V"], ref)))
         fig = go.Figure(data=_traces(iso, reg, pts, gj, basis, label, ref, zm, sel, lab_index))
         _layout(fig, iso, gj)
 
