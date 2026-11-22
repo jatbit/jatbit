@@ -84,23 +84,98 @@ def _extend_back(code: str, start: str, d):
         return d
 
 
-@st.cache_data(ttl=300, show_spinner="주가 데이터를 불러오는 중...")
-def load_prices(code: str, start: str, end: str) -> pd.DataFrame:
-    """일시적인 네트워크 오류로 데이터가 빠지지 않도록 최대 3번까지 다시 시도한다. (성공한 결과만 캐시됨)"""
+# ---- 주가 저장소: 종목마다 한 번 넉넉한 구간(최근 5년 이상)을 받아 두고, 기간·지표·52주 계산은 잘라서 쓴다.
+# (전에는 기간·보조지표·52주마다 따로 내려받아 한 종목에 3~4번 다운로드했음)
+PRICE_TTL = 300          # 초. 장중 시세가 갱신되도록 5분마다 새로 받음
+_PRICE_MAX = 400         # 저장해 두는 (종목, 시작 연도) 개수
+
+
+@st.cache_resource
+def _price_store() -> dict:
+    import threading
+    return {"d": {}, "lock": threading.Lock()}
+
+
+def _bucket(start) -> str:
+    """받을 시작일: 요청 시작일과 5년 전 중 이른 쪽의 1월 1일 (같은 종목의 여러 요청이 한 번의 다운로드를 같이 쓰게)."""
+    now = datetime.now(timezone(timedelta(hours=9)))
+    five = pd.Timestamp(now.date()) - pd.DateOffset(years=5)
+    b = min(pd.Timestamp(start), five)
+    return f"{b.year}-01-01"
+
+
+def _cached(code: str, b: str):
+    """b보다 같거나 이른 시작일로 받아 둔 최신 데이터가 있으면 돌려준다."""
+    now = time.time()
+    best = None
+    for (c, bb), (t, d) in list(_price_store()["d"].items()):
+        if c == code and bb <= b and now - t < PRICE_TTL and (best is None or bb > best[0]):
+            best = (bb, d)
+    return None if best is None else best[1]
+
+
+def _fetch_prices(code: str, b: str, S: dict | None = None) -> pd.DataFrame:
+    """일시적인 네트워크 오류로 데이터가 빠지지 않도록 최대 3번까지 다시 시도한다. (성공한 결과만 저장)"""
     last_err = None
     for attempt in range(3):
         try:
-            d = _extend_back(code, start, fdr.DataReader(code, start, end))
+            d = _extend_back(code, b, fdr.DataReader(code, b))
             if d is not None and "Close" in d.columns:
                 d = d[d["Close"] != 0].copy()  # 오래된 구간의 0원(거래정지 등) 행 제거
                 for _c in ("Open", "High", "Low"):
                     if _c in d.columns:
                         d[_c] = d[_c].where(d[_c] != 0, d["Close"])
+            if d is not None and getattr(d.index, "tz", None) is not None:
+                d.index = d.index.tz_localize(None)
+            if d is not None and len(d):
+                S = S or _price_store()  # 스레드에서는 미리 받은 저장소를 넘겨받음 (스레드에서 st 호출 안 함)
+                with S["lock"]:
+                    S["d"][(code, b)] = (time.time(), d)
+                    if len(S["d"]) > _PRICE_MAX:  # 오래된 것부터 지움
+                        for k, _v in sorted(S["d"].items(), key=lambda kv: kv[1][0])[: len(S["d"]) - _PRICE_MAX]:
+                            S["d"].pop(k, None)
             return d
         except Exception as e:  # noqa: BLE001
             last_err = e
             time.sleep(1.5 * (attempt + 1))
     raise last_err
+
+
+def _slice(d, start: str, end: str):
+    if d is None or len(d) == 0:
+        return d
+    m = (d.index >= pd.Timestamp(start)) & (d.index < pd.Timestamp(end) + pd.Timedelta(days=1))
+    return d[m].copy()
+
+
+def load_prices(code: str, start: str, end: str) -> pd.DataFrame:
+    b = _bucket(start)
+    d = _cached(code, b)
+    if d is None:
+        with st.spinner("주가 데이터를 불러오는 중..."):
+            d = _fetch_prices(code, b)
+    return _slice(d, start, end)
+
+
+def prefetch_prices(codes, start: str) -> None:
+    """여러 종목을 동시에(최대 8개씩) 받아 둔다. 실패한 종목은 이후 load_prices가 다시 시도하고 오류를 알린다."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    b = _bucket(start)
+    S = _price_store()
+    miss = [c for c in dict.fromkeys(str(x) for x in codes if x) if _cached(c, b) is None]
+    if len(miss) < 2:
+        return
+
+    def one(c):
+        try:
+            _fetch_prices(c, b, S)
+        except Exception:  # noqa: BLE001
+            pass
+
+    with st.spinner(f"주가 데이터를 불러오는 중... ({len(miss)}종목 동시에)"):
+        with ThreadPoolExecutor(max_workers=min(8, len(miss))) as ex:
+            list(ex.map(one, miss))
 
 
 # 해외 선물: Yahoo 연속(근월물 이어붙인) 시세. 티커 → (표시 이름, 한글 별칭들). 목록에 없는 '=F' 심볼도 그대로 조회는 된다.
