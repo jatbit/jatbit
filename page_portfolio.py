@@ -139,6 +139,7 @@ def render_portfolio(listing: pd.DataFrame) -> None:
 
     # 가격 불러오기 → 공통 거래일로 정렬
     series = {}
+    prefetch_prices([it["code"] for it in items] + [bench_code], start_d.isoformat())  # 여러 종목을 동시에 받아 둠
     for it in items + [{"code": bench_code, "name": bench_name}]:
         try:
             d = load_prices(it["code"], start_d.isoformat(), end_d.isoformat())
