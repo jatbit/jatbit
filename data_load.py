@@ -31,9 +31,22 @@ def series_color(i: int) -> str:
 
 
 
+# KRX 원자료는 여기서만 받는다: 종목 목록·시장 개요 시세·업종이 같은 다운로드를 함께 쓴다 (전에는 같은 자료를 2~3번 받았음).
+@st.cache_data(ttl=300, show_spinner=False)
+def krx_listing_raw() -> pd.DataFrame:
+    """KRX 전 종목 당일 시세 원자료 (5분마다 새로)."""
+    return fdr.StockListing("KRX")
+
+
+@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
+def krx_desc_raw() -> pd.DataFrame:
+    """KRX 상장회사 정보 원자료 (업종·지역, 하루 한 번)."""
+    return fdr.StockListing("KRX-DESC")
+
+
 @st.cache_data(ttl=60 * 60 * 24, show_spinner="종목 목록을 불러오는 중...")
 def load_listing() -> pd.DataFrame:
-    df = fdr.StockListing("KRX")
+    df = krx_listing_raw().copy()
     if "Symbol" in df.columns and "Code" not in df.columns:
         df = df.rename(columns={"Symbol": "Code"})
     cols = [c for c in ["Code", "Name", "Market", "Marcap"] if c in df.columns]
