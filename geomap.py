@@ -194,7 +194,7 @@ def _score_button(d: pd.DataFrame, domestic: bool, p: str) -> None:
     if c2.button(f"점수 계산 ({len(todo):,}종목)", key=f"{p}_score_btn", type="primary", use_container_width=True):
         jobs = screener._score_jobs(todo.assign(Symbol=todo["ysym"], Code=todo["Key"] if domestic else todo["ysym"]), domestic)
         screener._run_scores(jobs, domestic)
-        st.rerun()
+        ui.rerun_here()
 
 
 def _pe_button(d: pd.DataFrame, domestic: bool, p: str) -> None:
@@ -207,7 +207,7 @@ def _pe_button(d: pd.DataFrame, domestic: bool, p: str) -> None:
         bar = st.progress(0.0, text="준비 중...")
         gd.fetch_pe(need, domestic, progress=lambda f, t: bar.progress(min(max(f, 0.0), 1.0), text=t))
         bar.empty()
-        st.rerun()
+        ui.rerun_here()
 
 
 def _values(d: pd.DataFrame, basis: str, per: str, ret: pd.DataFrame, idx: dict, iso: str, p: str) -> pd.DataFrame:
@@ -220,7 +220,7 @@ def _values(d: pd.DataFrame, basis: str, per: str, ret: pd.DataFrame, idx: dict,
     elif basis == "지수 대비":
         d["V"] = d["Ret"] - idx.get(per, np.nan)
     elif basis == "거래대금 증가율":
-        a = gd.amount_ratio(d)
+        a = gd.amount_ratio(d, iso)
         d["A1"], d["A0"] = a["A1"], a["A0"]
         d["V"] = (d["A1"] / d["A0"] - 1) * 100
     elif basis == "PER":
@@ -291,7 +291,7 @@ def _date_frames(iso, d, reg, gj, basis, rng, close, idx_sym, ref, sel, lab_inde
     import plotly.graph_objects as go
 
     with st.spinner(f"{rng} 날짜별 수익률을 계산하는 중 (전 종목 일봉을 처음 받을 때는 1~2분 걸릴 수 있습니다)..."):
-        ds, cum = gd.stock_path(d, rng)
+        ds, cum = gd.stock_path(d, rng, iso)
         ipath = gd.index_path(close, idx_sym, rng, ds) if basis == "지수 대비" else None
     if len(ds) == 0 or cum.empty:
         st.caption("일봉을 받지 못해 날짜별로 보기를 할 수 없습니다.")
@@ -324,6 +324,8 @@ def _render(iso: str, inside: pd.DataFrame, outside: pd.DataFrame, gj, per: str,
 
     ss = st.session_state
     p = f"gm_{iso.lower()}"
+    gd.set_universe(iso, pd.concat([inside["ysym"], outside["ysym"]]))
+    gd.prewarm(iso)
     basis, sec, rng = _controls(iso, p, gd.sectors_by_cap(inside, outside))
     if sec:
         inside, outside = inside[inside["Sector"] == sec], outside[outside["Sector"] == sec]
@@ -338,7 +340,7 @@ def _render(iso: str, inside: pd.DataFrame, outside: pd.DataFrame, gj, per: str,
         _score_button(pd.concat([inside, outside]), iso == "KOR", p)
     quick = per == "1일" and not rng and basis in ("수익률", "지수 대비", "PER", "종합 점수")
     with st.spinner("값 계산 중..." if quick else "일봉을 받아 계산하는 중..."):
-        ret_in, ret_out = gd.returns_for(inside, pers), gd.returns_for(outside, [per]) if len(outside) else None
+        ret_in, ret_out = gd.returns_for(inside, pers, iso), gd.returns_for(outside, [per], iso) if len(outside) else None
         idx = gd.index_returns(close, idx_sym, pers)
         d = _cap_txt(_values(inside, basis, per, ret_in, idx, iso, p), cap_fmt)
         out = _cap_txt(_values(outside, basis, per, ret_out, idx, iso, p), cap_fmt) if len(outside) else outside
@@ -370,16 +372,16 @@ def _render(iso: str, inside: pd.DataFrame, outside: pd.DataFrame, gj, per: str,
             k = reg.index[i]
             ss[f"{p}_region"] = None if k == sel else k
             ss.pop(f"{p}_point", None)
-            st.rerun()
+            ui.rerun_here()
         if cn == 1 and i < len(pts):
             ss[f"{p}_point"] = str(pts.loc[i, "Key"])
             ss[f"{p}_region"] = pts.loc[i, "Region"]
-            st.rerun()
+            ui.rerun_here()
         if cn == 2 and i < len(lab_index):
             k = lab_index[i]
             ss[f"{p}_region"] = None if k == sel else k
             ss.pop(f"{p}_point", None)
-            st.rerun()
+            ui.rerun_here()
     if frames:
         st.caption(f"색 = {rng} 시작일부터 슬라이더 날짜까지의 누적 {'수익률' if basis == '수익률' else INDEX[iso][1] + ' 대비 초과수익'} "
                    "(빨강 상승 · 파랑 하락) · 슬라이더를 끌어서 날짜를 넘기고 ▶로 자동 재생 · 아래 카드·목록은 세계 지도에서 고른 기간 기준")
@@ -425,7 +427,7 @@ def _detail(iso, p, d, out, reg, basis, per, label, cap_fmt) -> None:
         _chart_button(str(r["Label"]), r["Query"], key=f"{p}_pt")
         if st.button("선택 해제", key=f"{p}_clr"):
             ss.pop(f"{p}_point", None)
-            st.rerun()
+            ui.rerun_here()
 
     if cur == "해외 본사":
         sub, rname = out, "해외 본사"
