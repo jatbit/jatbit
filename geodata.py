@@ -435,6 +435,7 @@ def _spread_all(d: pd.DataFrame, radius_fn) -> pd.DataFrame:
     return d.drop(columns=["_k", "_n"])
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def us_frame() -> tuple:
     """(지도 안 종목 표, 해외 본사 종목 표, 도시 좌표를 찾은 수)."""
     import sectors
@@ -463,6 +464,7 @@ def us_frame() -> tuple:
     return inside, outside, int(inside["Exact"].fillna(False).astype(bool).sum())
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def kr_frame(snap: pd.DataFrame, n: int | None, dart_key: str | None) -> tuple:
     """(지도 안 종목 표, 해외·지역 미상 표, 시군구 좌표를 찾은 수). snap: KRX 당일 시세."""
     import sectors
@@ -528,17 +530,80 @@ def history(symbols: tuple) -> tuple:
     return c, v
 
 
+UNIVERSE: dict = {}  # 나라 → 그 나라 지도 전체 종목의 Yahoo 심볼 튜플 (섹터를 골라도 같은 일봉 캐시를 쓰려고)
+
+
+@st.cache_resource(show_spinner=False)
+def _locks() -> dict:
+    return {}
+
+
+def _lock(key):
+    import threading
+
+    L = _locks()
+    if key not in L:
+        L[key] = threading.Lock()
+    return L[key]
+
+
+def set_universe(iso: str, syms) -> tuple:
+    u = tuple(sorted(set(str(x) for x in syms)))
+    UNIVERSE[iso] = u
+    return u
+
+
+def hist(syms, iso: str | None = None) -> tuple:
+    """일봉 (종가, 거래량). 나라 전체 종목을 한 번에 받아 두고(1시간 캐시) 필요한 열만 꺼낸다.
+    같은 묶음을 두 곳에서 동시에 받지 않도록 잠근다 (미리 받기와 겹칠 때 기다렸다 캐시를 씀)."""
+    syms = [str(x) for x in syms]
+    u = UNIVERSE.get(iso) if iso else None
+    key = u if u and set(syms) <= set(u) else tuple(syms)
+    with _lock(key):
+        c, v = history(key)
+    cols = [x for x in syms if x in c.columns]
+    return c[cols] if len(c) else c, (v[[x for x in cols if x in v.columns]] if len(v) else v)
+
+
+@st.cache_resource(show_spinner=False)
+def _prewarm_started() -> dict:
+    return {}
+
+
+def prewarm(iso: str) -> None:
+    """나라 전체 일봉을 뒤에서 미리 받아 둔다 (기간을 바꾸거나 날짜별로 볼 때 기다리지 않게). 1시간에 한 번."""
+    import threading
+    import time
+
+    u = UNIVERSE.get(iso)
+    if not u:
+        return
+    started = _prewarm_started()
+    if time.time() - started.get(u, 0) < 3600:
+        return
+    started[u] = time.time()
+
+    def run():
+        try:
+            with _lock(u):
+                history(u)
+        except Exception:  # noqa: BLE001
+            pass
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 def period_ret(s: pd.Series, per: str) -> float:
     import market
 
     return market._period_ret(s.dropna(), per) if s is not None else np.nan
 
 
-def returns_for(d: pd.DataFrame, pers: list) -> pd.DataFrame:
+def returns_for(d: pd.DataFrame, pers: list, iso: str | None = None) -> pd.DataFrame:
     """종목별 기간 수익률(%) 표 (열 = 기간). 1일은 시세표의 등락률."""
     out = pd.DataFrame(index=d.index)
     need = [p for p in pers if p != "1일"]
-    close = history(tuple(d["ysym"].astype(str)))[0] if need else pd.DataFrame()
+    close = hist(d["ysym"], iso)[0] if need else pd.DataFrame()
     for p in pers:
         if p == "1일":
             out[p] = pd.to_numeric(d["ChangesRatio"], errors="coerce")
@@ -547,9 +612,9 @@ def returns_for(d: pd.DataFrame, pers: list) -> pd.DataFrame:
     return out
 
 
-def amount_ratio(d: pd.DataFrame) -> pd.DataFrame:
+def amount_ratio(d: pd.DataFrame, iso: str | None = None) -> pd.DataFrame:
     """최근 거래일 거래대금(A1)과 직전 20거래일 평균(A0). 거래대금 = 종가 × 거래량."""
-    close, vol = history(tuple(d["ysym"].astype(str)))
+    close, vol = hist(d["ysym"], iso)
     a1, a0 = [], []
     for s in d["ysym"].astype(str):
         if s in close.columns and s in vol.columns:
@@ -603,9 +668,9 @@ def cum_path(close: pd.DataFrame, cols: list, rng: str) -> tuple:
     return ds, cum.T
 
 
-def stock_path(d: pd.DataFrame, rng: str) -> tuple:
+def stock_path(d: pd.DataFrame, rng: str, iso: str | None = None) -> tuple:
     """d 종목들의 날짜별 누적 수익률. 반환 (날짜들, 표[행 = d.index, 열 = 날짜])."""
-    close = history(tuple(d["ysym"].astype(str)))[0]
+    close = hist(d["ysym"], iso)[0]
     ds, cum = cum_path(close, list(d["ysym"].astype(str)), rng)
     cum.index = d.index
     return ds, cum
