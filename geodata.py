@@ -455,13 +455,15 @@ def us_frame() -> tuple:
     return inside, outside, int(inside["Exact"].fillna(False).astype(bool).sum())
 
 
-def kr_frame(snap: pd.DataFrame, n: int, dart_key: str | None) -> tuple:
+def kr_frame(snap: pd.DataFrame, n: int | None, dart_key: str | None) -> tuple:
     """(지도 안 종목 표, 해외·지역 미상 표, 시군구 좌표를 찾은 수). snap: KRX 당일 시세."""
     import sectors
 
     m = snap.dropna(subset=["Marcap"]).copy()
     m["Code"] = m["Code"].astype(str).str.zfill(6)
-    m = m[m["Code"].str.endswith("0")].nlargest(int(n), "Marcap")  # 우선주 제외
+    m = m[m["Code"].str.endswith("0")]  # 우선주 제외
+    if n:
+        m = m.nlargest(int(n), "Marcap")
     m = m.merge(kr_regions()[["Code", "Sido", "RegionRaw"]], on="Code", how="left")
     try:
         smap, _src = sectors.kr_sector_map()
@@ -557,6 +559,60 @@ def index_returns(close: pd.DataFrame | None, sym: str, pers: list) -> dict:
     if close is None or sym not in getattr(close, "columns", []):
         return {p: np.nan for p in pers}
     return {p: period_ret(close[sym], p) for p in pers}
+
+
+# ----------------------------------------------------------------------
+# 날짜별 누적 수익률 (지도 슬라이더용)
+# ----------------------------------------------------------------------
+PATH_RANGES = {"1개월": 31, "3개월": 92, "6개월": 183, "연초 이후": "ytd", "1년": 366, "2년": 730}
+MAX_FRAMES = 70
+
+
+def _path_dates(idx: pd.DatetimeIndex, rng: str) -> tuple:
+    """(시작 기준일, 장면 날짜들). 장면은 많아야 MAX_FRAMES개, 마지막 거래일은 꼭 넣는다."""
+    last = idx[-1]
+    v = PATH_RANGES[rng]
+    start = pd.Timestamp(last.year, 1, 1) - pd.Timedelta(days=1) if v == "ytd" else last - pd.Timedelta(days=v)
+    ds = idx[idx > start]
+    if len(ds) > MAX_FRAMES:
+        step = int(np.ceil(len(ds) / MAX_FRAMES))
+        ds = ds[::-1][::step][::-1]
+    if len(ds) == 0 or ds[-1] != last:
+        ds = ds.append(pd.DatetimeIndex([last]))
+    return start, ds
+
+
+def cum_path(close: pd.DataFrame, cols: list, rng: str) -> tuple:
+    """(장면 날짜들, 표[행 = cols, 열 = 날짜] 시작 기준일 대비 누적 수익률 %)."""
+    if close is None or close.empty:
+        return pd.DatetimeIndex([]), pd.DataFrame(index=cols)
+    c = close.reindex(columns=cols).sort_index().ffill()
+    start, ds = _path_dates(c.index, rng)
+    before = c[c.index <= start]
+    base = before.iloc[-1] if len(before) else c.bfill().iloc[0]
+    base = base.where(base.notna(), c.bfill().iloc[0])
+    cum = (c.loc[ds] / base - 1) * 100
+    return ds, cum.T
+
+
+def stock_path(d: pd.DataFrame, rng: str) -> tuple:
+    """d 종목들의 날짜별 누적 수익률. 반환 (날짜들, 표[행 = d.index, 열 = 날짜])."""
+    close = history(tuple(d["ysym"].astype(str)))[0]
+    ds, cum = cum_path(close, list(d["ysym"].astype(str)), rng)
+    cum.index = d.index
+    return ds, cum
+
+
+def index_path(close: pd.DataFrame | None, sym: str, rng: str, dates) -> pd.Series:
+    """대표지수의 같은 범위 누적 수익률(%)을 종목 장면 날짜들에 맞춘다."""
+    if close is None or sym not in getattr(close, "columns", []) or len(dates) == 0:
+        return pd.Series(np.nan, index=dates)
+    c = close[[sym]].dropna()
+    c = c.reindex(c.index.union(dates)).sort_index().ffill()
+    start, _ds = _path_dates(c.index, rng)
+    before = c[c.index <= start][sym]
+    base = float(before.iloc[-1]) if len(before) else float(c[sym].dropna().iloc[0])
+    return (c[sym].reindex(dates) / base - 1) * 100
 
 
 # ----------------------------------------------------------------------
