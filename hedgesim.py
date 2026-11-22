@@ -338,8 +338,9 @@ def render(ticker: str | None) -> None:
             try:
                 u = load_underlying(ticker)
                 S0 = float(u["spot"])
-                sig0 = bsm.hist_vol(u["close"], 60)
-                sig0 = sig0 if sig0 == sig0 else 0.3
+                import garch
+
+                sig0 = garch.vol_for(u["close"], 42)[0]
             except Exception:  # noqa: BLE001
                 pass
         rr = load_us_rate_3m()
