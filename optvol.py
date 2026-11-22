@@ -14,8 +14,9 @@ import streamlit as st
 import ui
 
 import bsm
-from options import (MULT, OPT_PRESETS, build_chain, is_us_ticker, load_chain_raw, load_expiries, load_underlying,
-                     load_us_rate_3m, mgrid, years_to_expiry)
+from options_data import (MULT, OPT_PRESETS, build_chain, is_us_ticker, load_chain_raw, load_expiries, load_underlying,
+                          load_us_rate_3m, years_to_expiry)
+from ui import mgrid
 
 
 def _params(ticker: str) -> dict:
@@ -116,7 +117,7 @@ def _prefetch_chains(ticker: str, exps: list) -> None:
     """만기별 옵션 체인을 동시에 받아 캐시에 넣어 둔다 (차례로 받으면 만기 수만큼 오래 걸림)."""
     from concurrent.futures import ThreadPoolExecutor
 
-    from options import load_chain_raw
+    from options_data import load_chain_raw
 
     def one(e):
         try:
