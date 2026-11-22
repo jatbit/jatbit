@@ -254,9 +254,9 @@ def us_hq() -> pd.DataFrame:
 @st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
 def kr_regions() -> pd.DataFrame:
     """종목코드 → 본사 시도 (KRX 상장회사 정보의 '지역')."""
-    import FinanceDataReader as fdr
+    from data_load import krx_desc_raw
 
-    desc = fdr.StockListing("KRX-DESC")
+    desc = krx_desc_raw().copy()
     if "Symbol" in desc.columns and "Code" not in desc.columns:
         desc = desc.rename(columns={"Symbol": "Code"})
     if "Region" not in desc.columns:
