@@ -73,8 +73,9 @@ def _nz(z) -> list:
 # ----------------------------------------------------------------------
 # 그림
 # ----------------------------------------------------------------------
-def _traces(iso, reg, pts, gj, basis, label, ref, zm, sel, lab_index):
-    """지도 그림의 trace 3개: [구역 색칠, 종목 점, 구역 글자]. 재생 장면(frame)도 같은 함수로 만든다."""
+def _traces(iso, reg, pts, gj, basis, label, ref, zm, sel, lab_index, static_pts: bool = False):
+    """지도 그림의 trace 3개: [구역 색칠, 종목 점, 구역 글자]. 날짜 장면(frame)도 같은 함수로 만든다.
+    static_pts: 점에 마우스를 올렸을 때 값은 빼고 이름·본사·시가총액만 (장면마다 글자를 다시 보내지 않으려고)."""
     import plotly.graph_objects as go
 
     scale = SCALES[basis]
@@ -102,16 +103,23 @@ def _traces(iso, reg, pts, gj, basis, label, ref, zm, sel, lab_index):
     cap_max = float(pts["Marcap"].max()) if len(pts) else 1.0
     pz = _nz(to_z(basis, pts["V"], ref))
     extra_ret = basis != "수익률"
-    ptxt = [f"<b>{_html.escape(str(r.Label))}</b><br>본사 {_html.escape(str(r.Place))}<br>{label} {fmt(basis, r.V)}"
-            + (f"<br>수익률 {fmt('수익률', r.Ret)}" if extra_ret else "") + f"<br>시가총액 {r.CapTxt}" for r in pts.itertuples()]
+    if static_pts:
+        ptxt = [f"<b>{_html.escape(str(r.Label))}</b><br>본사 {_html.escape(str(r.Place))}<br>시가총액 {r.CapTxt}" for r in pts.itertuples()]
+    else:
+        ptxt = [f"<b>{_html.escape(str(r.Label))}</b><br>본사 {_html.escape(str(r.Place))}<br>{label} {fmt(basis, r.V)}"
+                + (f"<br>수익률 {fmt('수익률', r.Ret)}" if extra_ret else "") + f"<br>시가총액 {r.CapTxt}" for r in pts.itertuples()]
     t1 = go.Scattergeo(lat=list(pts["plat"]), lon=list(pts["plon"]), mode="markers", text=ptxt, hoverinfo="text",
-                       marker=dict(size=[4 + 22 * math.sqrt(max(c, 0) / cap_max) for c in pts["Marcap"]], color=pz, colorscale=scale,
-                                   cmin=-zm, cmax=zm, opacity=.9, line=dict(width=.8, color="rgba(20,20,20,.55)")))
+                       marker=_pt_marker(pts, pz, scale, zm, cap_max))
     lab = reg.loc[lab_index]
     t2 = go.Scattergeo(lat=list(lab["lat"]), lon=list(lab["lon"]), mode="text", hoverinfo="skip",
                        text=[f"<b>{r.Short}</b><br>{fmt(basis, r.V, short=True)}" for r in lab.itertuples()],
                        textfont=dict(size=11 if iso == "USA" else 12, color="#111"))
     return [t0, t1, t2]
+
+
+def _pt_marker(pts, pz, scale, zm, cap_max) -> dict:
+    return dict(size=[4 + 22 * math.sqrt(max(c, 0) / cap_max) for c in pts["Marcap"]], color=pz, colorscale=scale,
+                cmin=-zm, cmax=zm, opacity=.9, line=dict(width=.8, color="rgba(20,20,20,.55)"))
 
 
 def _layout(fig, iso: str, gj) -> None:
@@ -128,28 +136,30 @@ def _layout(fig, iso: str, gj) -> None:
             fig.update_geos(fitbounds="locations", visible=False)
         h = 600
     fig.update_layout(height=h, margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor="rgba(0,0,0,0)", showlegend=False,
-                      dragmode=False, clickmode="event+select")
+                      dragmode="pan", clickmode="event+select")
 
 
 def _add_player(fig, frames: list, start: str) -> None:
-    """재생 버튼과 기간 슬라이더 (브라우저 안에서 넘어가므로 다시 계산하지 않는다)."""
+    """날짜 슬라이더(끌어서 넘기기)와 재생 버튼. 브라우저 안에서 넘어가므로 다시 계산하지 않는다.
+    frames: [(이름 'YYYY-MM-DD', [trace, ...]), ...]"""
     import plotly.graph_objects as go
 
     fig.frames = [go.Frame(name=nm, data=tr, traces=[0, 1, 2]) for nm, tr in frames]
     names = [nm for nm, _ in frames]
     anim = dict(mode="immediate", frame=dict(duration=0, redraw=True), transition=dict(duration=0))
+    dur = 1300 if len(names) <= 8 else (400 if len(names) <= 30 else 220)
     fig.update_layout(
-        updatemenus=[dict(type="buttons", direction="left", x=0.0, y=0.0, xanchor="left", yanchor="top", pad=dict(t=6, r=6),
+        updatemenus=[dict(type="buttons", direction="left", x=0.0, y=0.0, xanchor="left", yanchor="top", pad=dict(t=30, r=6),
                           showactive=False, buttons=[
-                              dict(label="▶ 재생", method="animate",
-                                   args=[None, dict(mode="immediate", fromcurrent=True, frame=dict(duration=1300, redraw=True),
+                              dict(label="▶", method="animate",
+                                   args=[None, dict(mode="immediate", fromcurrent=True, frame=dict(duration=dur, redraw=True),
                                                     transition=dict(duration=0))]),
                               dict(label="❚❚", method="animate", args=[[None], anim])])],
-        sliders=[dict(active=names.index(start) if start in names else 0, x=0.12, y=0.0, len=0.86, yanchor="top",
-                      pad=dict(t=6), currentvalue=dict(prefix="기간 ", font=dict(size=12)),
-                      steps=[dict(label=nm, method="animate", args=[[nm], anim]) for nm in names])],
-        margin=dict(l=0, r=0, t=0, b=70))
-    fig.update_layout(height=(fig.layout.height or 500) + 70)
+        sliders=[dict(active=names.index(start) if start in names else len(names) - 1, x=0.1, y=0.0, len=0.9, yanchor="top",
+                      pad=dict(t=8), currentvalue=dict(prefix="", font=dict(size=13)), ticklen=3,
+                      steps=[dict(label=nm[5:] if len(nm) == 10 else nm, name=nm, method="animate", args=[[nm], anim]) for nm in names])],
+        margin=dict(l=0, r=0, t=0, b=80))
+    fig.update_layout(height=(fig.layout.height or 500) + 80)
 
 
 # ----------------------------------------------------------------------
@@ -240,17 +250,21 @@ def _label(basis: str, per: str, iso: str, idx: dict) -> tuple:
 # 한 나라 화면
 # ----------------------------------------------------------------------
 def _controls(iso: str, p: str, sectors_list: list) -> tuple:
-    """(색 기준, 섹터, 재생 여부)."""
+    """(색 기준, 섹터, 날짜 슬라이더 기간 또는 None)."""
     basis = ui.seg("색 기준", gd.BASES, default="수익률", key=f"{p}_basis") or "수익률"
     try:
         c1, c2 = st.columns([3, 2], vertical_alignment="center")
     except TypeError:
         c1, c2 = st.columns([3, 2])
     sec = c1.selectbox("섹터", ["전체 섹터"] + sectors_list, key=f"{p}_sector", label_visibility="collapsed")
-    play = False
+    rng = None
     if basis in gd.PERIOD_BASES:
-        play = c2.toggle("기간 재생 (1일 → 1년)", key=f"{p}_play", help="지도 아래 ▶ 재생 버튼이나 슬라이더로 기간을 넘겨 봅니다")
-    return basis, (None if sec == "전체 섹터" else sec), play
+        if c2.toggle("날짜별로 보기", key=f"{p}_play", help="고른 기간의 시작일부터 날짜마다 누적 수익률이 어떻게 변했는지, "
+                                                         "지도 아래 슬라이더를 끌어서 봅니다 (▶ 누르면 자동으로 넘어감)"):
+            per = st.session_state.get("mk_world_per") or "1일"
+            dflt = {"3개월": "3개월", "연초 이후": "연초 이후", "1년": "1년"}.get(per, "1개월")
+            rng = ui.seg("슬라이더 기간", list(gd.PATH_RANGES), default=dflt, key=f"{p}_rng") or dflt
+    return basis, (None if sec == "전체 섹터" else sec), rng
 
 
 def _regions(d: pd.DataFrame, basis: str, iso: str, cap_fmt) -> pd.DataFrame:
@@ -269,24 +283,60 @@ def _regions(d: pd.DataFrame, basis: str, iso: str, cap_fmt) -> pd.DataFrame:
     return reg
 
 
+MAP_CONFIG = {"displayModeBar": False, "scrollZoom": True, "doubleClick": "reset"}
+
+
+def _date_frames(iso, d, reg, gj, basis, rng, close, idx_sym, ref, sel, lab_index, cap_fmt):
+    """날짜마다 '범위 시작일부터 그날까지 누적 수익률'로 장면을 만든다. 반환 (색 범위, [(날짜, traces), ...]) 또는 None."""
+    import plotly.graph_objects as go
+
+    with st.spinner(f"{rng} 날짜별 수익률을 계산하는 중 (전 종목 일봉을 처음 받을 때는 1~2분 걸릴 수 있습니다)..."):
+        ds, cum = gd.stock_path(d, rng)
+        ipath = gd.index_path(close, idx_sym, rng, ds) if basis == "지수 대비" else None
+    if len(ds) == 0 or cum.empty:
+        st.caption("일봉을 받지 못해 날짜별로 보기를 할 수 없습니다.")
+        return None
+    scenes = []
+    for k, dt in enumerate(ds):
+        v = cum.iloc[:, k] - (float(ipath.iloc[k]) if ipath is not None else 0.0)
+        dq = d.assign(V=v.values, Ret=cum.iloc[:, k].values)
+        rq = _regions(dq, basis, iso, cap_fmt).reindex(reg.index)  # 구역 순서를 고정 (클릭 번호가 어긋나지 않게)
+        rq[["Name", "Short", "lat", "lon", "CapTxt", "N", "Top"]] = reg[["Name", "Short", "lat", "lon", "CapTxt", "N", "Top"]]
+        if iso == "USA":
+            rq["Abbr"] = reg["Abbr"]
+        scenes.append((f"{dt:%Y-%m-%d}", rq, dq.dropna(subset=["plat", "plon"]).reset_index(drop=True)))
+    zs = [z for _n, rq, pq in scenes for z in list(to_z(basis, rq["V"], ref)) + list(to_z(basis, pq["V"], ref))]
+    zm = z_range(basis, zs)
+    start = scenes[0][0]
+    word = "수익률" if basis == "수익률" else f"{INDEX[iso][1]} 대비"
+    frames = []
+    for k, (nm, rq, pq) in enumerate(scenes):
+        tr = _traces(iso, rq, pq, gj, basis, f"{start}~{nm[5:]} {word}", ref, zm, sel, lab_index, static_pts=True)
+        if k < len(scenes) - 1:  # 점은 색만 바꾼다 (글자까지 다시 보내면 너무 무거움)
+            cap_max = float(pq["Marcap"].max()) if len(pq) else 1.0
+            tr[1] = go.Scattergeo(marker=_pt_marker(pq, _nz(to_z(basis, pq["V"], ref)), SCALES[basis], zm, cap_max))
+        frames.append((nm, tr))
+    return zm, frames
+
+
 def _render(iso: str, inside: pd.DataFrame, outside: pd.DataFrame, gj, per: str, cap_fmt, note: str, close) -> None:
     import market
 
     ss = st.session_state
     p = f"gm_{iso.lower()}"
-    basis, sec, play = _controls(iso, p, gd.sectors_by_cap(inside, outside))
+    basis, sec, rng = _controls(iso, p, gd.sectors_by_cap(inside, outside))
     if sec:
         inside, outside = inside[inside["Sector"] == sec], outside[outside["Sector"] == sec]
     if inside.empty:
         st.info("고른 섹터에 지도 안에 본사를 둔 종목이 없습니다.")
         return
     idx_sym = INDEX[iso][0]
-    pers = list(market.PERIODS) if play else [per]
+    pers = [per]
     if basis == "PER":
         _pe_button(pd.concat([inside, outside]), iso == "KOR", p)
     if basis == "종합 점수":
         _score_button(pd.concat([inside, outside]), iso == "KOR", p)
-    quick = per == "1일" and not play and basis in ("수익률", "지수 대비", "PER", "종합 점수")
+    quick = per == "1일" and not rng and basis in ("수익률", "지수 대비", "PER", "종합 점수")
     with st.spinner("값 계산 중..." if quick else "일봉을 받아 계산하는 중..."):
         ret_in, ret_out = gd.returns_for(inside, pers), gd.returns_for(outside, [per]) if len(outside) else None
         idx = gd.index_returns(close, idx_sym, pers)
@@ -300,29 +350,20 @@ def _render(iso: str, inside: pd.DataFrame, outside: pd.DataFrame, gj, per: str,
     sel = sel if sel in reg.index else None
     lab_index = [k for k in reg.head(12 if iso == "USA" else 17).index if reg.loc[k, "V"] == reg.loc[k, "V"]]
 
-    # 재생할 때는 모든 기간의 값으로 장면을 만들고, 색 범위를 하나로 맞춘다
     import plotly.graph_objects as go
 
-    if play:
-        scenes = []
-        for q in pers:
-            dq = _values(inside, basis, q, ret_in, idx, iso, p).assign(CapTxt=d["CapTxt"])
-            scenes.append((q, _regions(dq, basis, iso, cap_fmt), dq.dropna(subset=["plat", "plon"]).reset_index(drop=True)))
-        zs = [z for _q, rq, pq in scenes for z in list(to_z(basis, rq["V"], ref)) + list(to_z(basis, pq["V"], ref))]
-        zm = z_range(basis, zs)
-        frames = []
-        for q, rq, pq in scenes:
-            rq = rq.reindex(reg.index)  # 구역 순서를 첫 장면과 같게 (클릭 번호가 어긋나지 않게)
-            frames.append((q, _traces(iso, rq, pq, gj, basis, f"{q} " + label.replace(f"{per} ", ""), ref, zm, sel, lab_index)))
-        fig = go.Figure(data=_traces(iso, reg, pts, gj, basis, label, ref, zm, sel, lab_index))
+    frames = _date_frames(iso, d, reg, gj, basis, rng, close, idx_sym, ref, sel, lab_index, cap_fmt) if rng else None
+    if frames:
+        zm, frames = frames
+        fig = go.Figure(data=frames[-1][1])
         _layout(fig, iso, gj)
-        _add_player(fig, frames, per)
+        _add_player(fig, frames, frames[-1][0])
     else:
         zm = z_range(basis, list(to_z(basis, reg["V"], ref)) + list(to_z(basis, pts["V"], ref)))
         fig = go.Figure(data=_traces(iso, reg, pts, gj, basis, label, ref, zm, sel, lab_index))
         _layout(fig, iso, gj)
 
-    hit = ui.new_click(ui.chart_points(fig, f"{p}_map"), f"{p}_map")
+    hit = ui.new_click(ui.chart_points(fig, f"{p}_map", config=MAP_CONFIG), f"{p}_map")
     if hit:
         cn, i = hit
         if cn == 0 and i < len(reg):
@@ -339,7 +380,12 @@ def _render(iso: str, inside: pd.DataFrame, outside: pd.DataFrame, gj, per: str,
             ss[f"{p}_region"] = None if k == sel else k
             ss.pop(f"{p}_point", None)
             st.rerun()
-    st.caption(desc + (" · 재생 중에도 아래 카드·목록은 위에서 고른 기간 기준" if play else ""))
+    if frames:
+        st.caption(f"색 = {rng} 시작일부터 슬라이더 날짜까지의 누적 {'수익률' if basis == '수익률' else INDEX[iso][1] + ' 대비 초과수익'} "
+                   "(빨강 상승 · 파랑 하락) · 슬라이더를 끌어서 날짜를 넘기고 ▶로 자동 재생 · 아래 카드·목록은 세계 지도에서 고른 기간 기준")
+    else:
+        st.caption(desc)
+    st.caption("지도: 스크롤하면 그 위치를 중심으로 확대·축소, 끌어서 이동, 두 번 누르면 처음 크기")
     st.caption(note + (f" · 섹터: {sec}" if sec else ""))
     _detail(iso, p, d, out, reg, basis, per, label, cap_fmt)
 
@@ -457,18 +503,17 @@ def render_kr(snap: pd.DataFrame, per: str, close=None) -> None:
     if snap is None or snap.empty or not {"Code", "Name", "Marcap", "ChangesRatio"}.issubset(snap.columns):
         st.caption("국내 종목 시세를 불러오지 못했습니다.")
         return
-    n = ui.seg("종목 수", [100, 200, 400], default=200, key="gm_kor_n", format_func=lambda x: f"상위 {x}") or 200
     key = kr.dart_key()
     try:
         with st.spinner("본사 위치를 불러오는 중" + (" (DART 주소는 처음 한 번만 조금 걸립니다)..." if key else "...")):
-            inside, outside, n_exact = gd.kr_frame(snap, int(n), key)
+            inside, outside, n_exact = gd.kr_frame(snap, None, key)
     except Exception as e:  # noqa: BLE001
         st.caption(f"본사 지역 정보를 불러오지 못했습니다: {e}")
         return
     gj = gd.kr_geojson()
     how = (f"시·군·구 위치 {n_exact}/{len(inside)}곳 (DART 기업개황 주소)" if key else
            "시도 안에 흩어 찍음 · OpenDART 키를 넣으면 시·군·구까지 정확히 찍습니다")
-    note = (f"시가총액 상위 {int(n)}종목 (우선주 제외) · 본사 시도: KRX 상장회사 정보 · {how}"
+    note = (f"코스피·코스닥 전체 {len(inside) + len(outside):,}종목 (우선주 제외) · 본사 시도: KRX 상장회사 정보 · {how}"
             + ("" if gj is not None else " · 시도 경계를 받지 못해 원으로 표시")
             + (f" · 해외 본사·지역 미상 {len(outside)}종목" if len(outside) else ""))
     _render("KOR", inside, outside, gj, per, market._krw, note, close)
