@@ -13,7 +13,8 @@ import streamlit as st
 
 import ui
 
-from options import OPT_PRESETS, is_us_ticker, mgrid
+from options_data import OPT_PRESETS, is_us_ticker
+from ui import mgrid
 
 try:
     import yfinance as yf
