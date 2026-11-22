@@ -2,6 +2,7 @@
 그릭스·DV01·환율 노출, 몬테카를로/과거 시나리오 VaR·ES(자산군별 기여), 스트레스 시나리오를 계산한다.
 위험 요인: 기초자산별 주가, 미 국채 10년 금리, 국고채 10년 금리, 원/달러 환율 (최근 일별 변화).
 채권은 해당 통화 10년 금리 변화만큼 곡선 전체가 평행 이동한다고 보고 듀레이션·볼록성으로 재평가한다.
+요인마다 GARCH(1,1)로 지금 변동성을 예측하고 하루씩 이어 붙여 기간 손익을 만든다 (몬테카를로: 상관 t분포, 과거 시나리오: 필터드 히스토리컬).
 """
 from datetime import datetime, timedelta
 
@@ -156,6 +157,78 @@ def changes(lv: pd.DataFrame, h: int) -> pd.DataFrame:
     return pd.DataFrame(out).dropna()
 
 
+def _fname(c: str) -> str:
+    if c == "FX":
+        return "원/달러 환율"
+    if c == "RATE:USD":
+        return "미 국채 10년 금리"
+    if c == "RATE:KRW":
+        return "국고채 10년 금리"
+    return c.split(":", 1)[1] + " 주가"
+
+
+def garch_sims(d1: pd.DataFrame, h: int, method: str = "mc", n: int = 20000, seed: int = 17):
+    """요인별 GARCH(1,1)로 h거래일 누적 변화를 시뮬레이션. 반환 ({요인: 배열}, 요인 표).
+    mc: 표준화 잔차의 상관 + 공통 자유도 t분포 / fhs: 과거 표준화 잔차 벡터를 날짜 단위로 다시 뽑음."""
+    import garch
+
+    d1 = d1.dropna()
+    cols = list(d1.columns)
+    fits, Z, rows = {}, {}, []
+    for c in cols:
+        f = None
+        try:
+            f = garch.fit(d1[c], years=None)
+        except Exception:  # noqa: BLE001
+            f = None
+        fits[c] = f
+        x = d1[c]
+        Z[c] = f["z"] if f else (x - x.mean()) / (x.std() or 1.0)
+        rate = c.startswith("RATE")
+        unit = (lambda v: f"{v * 1e4:,.0f}bp") if rate else (lambda v: f"{v * 100:.1f}%")
+        sd_now = np.sqrt((f["next"] if f else x.var()) * 252)
+        sd_lr = np.sqrt((f["VL"] if f else x.var()) * 252)
+        rows.append({"요인": _fname(c), "지금 변동성": unit(sd_now), "장기 평균": unit(sd_lr),
+                     "지금 ÷ 장기": f"{sd_now / sd_lr:.2f}배" if sd_lr > 0 else "-",
+                     "지속성 α+β": f"{f['persist']:.3f}" if f else "-",
+                     "반감기(일)": f"{f['half_life']:.0f}" if f and np.isfinite(f["half_life"]) else "-"})
+    zdf = pd.DataFrame(Z).dropna()
+    zv = zdf[cols].values
+    zv = (zv - zv.mean(0)) / np.where(zv.std(0) > 0, zv.std(0), 1.0)
+    rng = np.random.default_rng(seed)
+    k = len(cols)
+    if method == "mc":
+        R = np.corrcoef(zv.T) if k > 1 else np.ones((1, 1))
+        R = np.atleast_2d(R)
+        try:
+            Lc = np.linalg.cholesky(R + np.eye(k) * 1e-10)
+        except np.linalg.LinAlgError:
+            Lc = np.eye(k)
+        nus = [fits[c]["nu"] for c in cols if fits[c]]
+        nu = float(np.clip(np.median(nus), 4.0, 30.0)) if nus else 8.0
+
+        def draw():
+            g = rng.standard_normal((n, k)) @ Lc.T
+            w = rng.chisquare(nu, size=(n, 1))
+            return g * np.sqrt((nu - 2) / w)
+    else:
+        def draw():
+            return zv[rng.integers(0, len(zv), size=n)]
+
+    s2 = np.array([fits[c]["next"] if fits[c] else d1[c].var() for c in cols], float)
+    mu = np.array([fits[c]["mu"] if fits[c] else d1[c].mean() for c in cols], float)
+    om = np.array([fits[c]["omega"] if fits[c] else 0.0 for c in cols], float)
+    al = np.array([fits[c]["alpha"] if fits[c] else 0.0 for c in cols], float)
+    be = np.array([fits[c]["beta"] if fits[c] else 1.0 for c in cols], float)
+    S2 = np.tile(s2, (n, 1))
+    tot = np.zeros((n, k))
+    for _ in range(max(int(h), 1)):
+        e = np.sqrt(S2) * draw()
+        tot += mu + e
+        S2 = om + al * e * e + be * S2
+    return {c: tot[:, i] for i, c in enumerate(cols)}, pd.DataFrame(rows)
+
+
 # ----------------------------------------------------------------------
 # 재평가 (원화 손익)
 # ----------------------------------------------------------------------
@@ -273,7 +346,8 @@ def render(key: str = "ra") -> None:
     c1, c2, c3 = st.columns(3)
     h = c1.selectbox("기간", [1, 5, 10, 20], index=0, key=f"{key}_h", format_func=lambda x: f"{x}거래일")
     meth = c2.radio("방법", ["몬테카를로", "과거 시나리오"], horizontal=True, key=f"{key}_m",
-                    help="몬테카를로: 최근 1년 변화의 변동성·상관으로 정규분포 2만 개 · 과거 시나리오: 최근 2년 실제로 있었던 변화를 그대로 적용")
+                    help="둘 다 요인마다 GARCH(1,1)로 지금 변동성을 예측해 하루씩 이어 붙입니다. 몬테카를로: 상관을 반영한 t분포 충격 2만 개 · "
+                         "과거 시나리오: 최근 2년 실제로 있었던 하루치 충격(표준화)을 다시 뽑아 씀 (필터드 히스토리컬)")
     conf = c3.selectbox("신뢰수준", [0.95, 0.99], index=1, key=f"{key}_c", format_func=lambda x: f"{x * 100:.0f}%")
     lv = factor_levels(G)
     if lv.empty or len(lv) < 60:
@@ -282,20 +356,8 @@ def render(key: str = "ra") -> None:
     for cur in G["bonds"]:
         if f"RATE:{cur}" not in lv:
             st.warning(f"{'미 국채' if cur == 'USD' else '국고채'} 10년 금리 이력을 받지 못해 VaR에서 {'달러' if cur == 'USD' else '원화'} 채권의 금리 위험이 빠졌습니다 (스트레스에는 반영).")
-    if meth == "몬테카를로":
-        d1 = changes(lv, 1).iloc[-252:]
-        cov = np.cov(d1.values.T) * h
-        cov = np.atleast_2d(cov)
-        rng = np.random.default_rng(17)
-        try:
-            L = np.linalg.cholesky(cov + np.eye(len(cov)) * 1e-14)
-        except np.linalg.LinAlgError:
-            L = np.diag(np.sqrt(np.clip(np.diag(cov), 0, None)))
-        Z = rng.standard_normal((20000, len(cov))) @ L.T
-        X = {c: Z[:, i] for i, c in enumerate(d1.columns)}
-    else:
-        dh = changes(lv, h).iloc[-504:]
-        X = {c: dh[c].values for c in dh.columns}
+    with st.spinner("위험 요인마다 GARCH(1,1) 변동성을 추정하는 중..."):
+        X, ftab = garch_sims(changes(lv, 1), h, "mc" if meth == "몬테카를로" else "fhs")
     P = reval(G, X, h / 252)
     tot = sum(P.values())
     q = np.quantile(tot, 1 - conf)
@@ -321,6 +383,13 @@ def render(key: str = "ra") -> None:
         if len(df) > 1:
             st.caption(f"단독 VaR 합계 {df['단독 VaR'].sum():,.0f}원 − 전체 VaR {var:,.0f}원 = 분산 효과 {div:,.0f}원. "
                        "ES 기여는 전체가 크게 잃은 경우들에서 각 자산군이 평균적으로 잃은 금액이라 다 더하면 ES와 같습니다.")
+    exp_f, op_f = ui.more("위험 요인별 변동성 (GARCH(1,1))", key=f"{key}_more_garch")
+    if op_f:
+        with exp_f:
+            st.dataframe(ftab, hide_index=True, use_container_width=True)
+            st.caption("지금 변동성 = 내일 하루 변동성 예측(연환산), 장기 평균 = 시간이 지나면 돌아갈 수준. 지속성(α+β)이 1에 가까울수록 "
+                       "충격이 오래 남고, 반감기는 지금과 장기 평균의 차이가 절반으로 줄어드는 데 걸리는 거래일입니다. "
+                       "추정이 안 된 요인은 최근 2년 표본 변동성을 그대로 씁니다.")
     fig = go.Figure(go.Histogram(x=tot, nbinsx=80, marker_color="#4C9BE8", opacity=0.8))
     fig.add_vline(x=q, line_color="#E5534B", line_dash="dash", annotation_text=f"VaR {conf * 100:.0f}%")
     fig.update_layout(height=240, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), xaxis_title=f"{h}거래일 손익(원)",
