@@ -280,6 +280,7 @@ def _map_controls(prefix: str, markets: list) -> str:
     return ui.seg("시장", markets, default=markets[0], key=f"{prefix}_mk") or markets[0]
 
 
+@ui.fragment
 def _heatmap(snap: pd.DataFrame) -> None:
     need = {"Code", "Name", "Marcap", "ChangesRatio"}
     if not need.issubset(snap.columns):
@@ -323,6 +324,7 @@ def _us_movers_table(df: pd.DataFrame, title: str) -> str:
             f'<th style="text-align:right;padding:3px 6px;font-weight:500">거래대금</th></tr></thead><tbody>{rows}</tbody></table>').replace("$", "&#36;")
 
 
+@ui.fragment
 def _us_market() -> None:
     """미국 주식시장: 국내와 같은 구성 (상승·하락 종목 수, 거래대금, 시장 지도, 시가총액·거래대금 상위, 상승·하락률 상위)."""
     import sectors
@@ -485,6 +487,21 @@ def render_market() -> None:
     st.markdown(f'<div class="qh-n">시장 개요 <span class="qh-code">{asof} 기준 · 일봉 종가(장중엔 지연 시세)</span></div>',
                 unsafe_allow_html=True)
     country = _world_map(close)
+    _country_map(country, snap, close)
+    if country == "한국":
+        _kr_market(snap)
+    elif country == "미국":
+        _us_market()
+    _tiles_part(close, kr3y)
+    _period_part(close, kr3y)
+    if errs:
+        st.caption("일부 데이터를 불러오지 못했습니다: " + " · ".join(errs))
+    st.caption("출처: Yahoo Finance · KRX(FinanceDataReader) · WICS(와이즈인덱스) · 나스닥 · S&P 500(GICS). 투자 판단의 참고 자료로만 사용하세요.")
+
+
+# 아래 부분들은 각각 따로 다시 그린다 (ui.fragment): 한 곳의 버튼을 눌러도 다른 지도·표를 다시 계산하지 않아 빠르다.
+@ui.fragment
+def _country_map(country, snap, close) -> None:
     try:
         import geomap
 
@@ -493,13 +510,10 @@ def render_market() -> None:
         if type(e).__name__ in ("RerunException", "StopException"):  # 화면 다시 그리기·페이지 이동은 그대로 보낸다
             raise
         st.caption(f"나라 지도를 그리지 못했습니다: {e}")
-    if country == "한국":
-        _kr_market(snap)
-    elif country == "미국":
-        _us_market()
 
-    # ---- 지수 · 환율 · 금리 · 원자재 (더보기)
-    all_rows = [(name, _series(close, kr3y, sym, kind), kind) for _t, items in GROUPS for sym, name, kind in items]
+
+@ui.fragment
+def _tiles_part(close, kr3y) -> None:
     exp, op = ui.more("지수 · 환율 · 금리 · 원자재 · 가상자산 시세", key="mk_more_tiles")
     if op:
         with exp:
@@ -512,7 +526,11 @@ def render_market() -> None:
                     sym, name, kind = items[names.index(pick)]
                     _detail(sym, name, kind, close, key=f"mk_tile_det_{gi}")
 
-    # ---- 기간별 수익률 (더보기)
+
+
+@ui.fragment
+def _period_part(close, kr3y) -> None:
+    all_rows = [(name, _series(close, kr3y, sym, kind), kind) for _t, items in GROUPS for sym, name, kind in items]
     exp, op = ui.more("기간별 등락률 더보기 (1주 · 1개월 · 3개월 · 연초 이후 · 1년)", key="mk_more_ret")
     if op:
         with exp:
@@ -555,6 +573,3 @@ def render_market() -> None:
                 sym, name, kind = row_items[i]
                 ui.section(f"{name} 차트")
                 _detail(sym, name, kind, close, key="mk_ret_det")
-    if errs:
-        st.caption("일부 데이터를 불러오지 못했습니다: " + " · ".join(errs))
-    st.caption("출처: Yahoo Finance · KRX(FinanceDataReader) · WICS(와이즈인덱스) · 나스닥 · S&P 500(GICS). 투자 판단의 참고 자료로만 사용하세요.")
