@@ -25,13 +25,19 @@ GROUPS = [
 RATE_KINDS = {"^IRX", "^TNX"}
 
 
+# 세계 지도에 올릴 나라: ISO-3 코드 → (이름, 대표지수 심볼, 지수 이름). 나라를 늘리려면 여기에 추가.
+COUNTRIES = {"KOR": ("한국", "^KS11", "코스피"), "USA": ("미국", "^GSPC", "S&P 500")}
+PERIODS = {"1일": None, "1주": 7, "1개월": 30, "3개월": 91, "연초 이후": "ytd", "1년": 365}
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_quotes() -> pd.DataFrame:
-    """Yahoo 일별 종가 (최근 1년). 열 = 심볼."""
+    """Yahoo 일별 종가 (최근 2년). 열 = 심볼."""
     import yfinance as yf
 
     syms = [s for _, items in GROUPS for s, _, _ in items]
-    d = yf.download(syms, period="1y", interval="1d", progress=False, auto_adjust=False, threads=True)
+    syms += [v[1] for v in COUNTRIES.values() if v[1] not in syms]
+    d = yf.download(syms, period="2y", interval="1d", progress=False, auto_adjust=False, threads=True)
     close = d["Close"] if isinstance(d.columns, pd.MultiIndex) else d[["Close"]]
     close.index = pd.to_datetime(close.index).tz_localize(None) if getattr(close.index, "tz", None) else pd.to_datetime(close.index)
     return close.sort_index()
@@ -71,15 +77,81 @@ def _fmt(v: float, kind: str) -> str:
     return f"{v:,.2f}"
 
 
-def _series(close: pd.DataFrame, kr3y, sym: str, kind: str) -> pd.Series:
-    if close is None or sym not in close.columns:
-        return pd.Series(dtype=float)
-    s = close[sym].dropna()
+def _norm(s: pd.Series, sym: str, kind: str) -> pd.Series:
+    s = s.dropna()
     if sym in ("^TNX", "^IRX") and len(s) and float(s.iloc[-1]) > 20:  # 예전 표기(×10) 대비
         s = s / 10
     if kind == "jpy":
         s = s * 100
     return s
+
+
+def _series(close: pd.DataFrame, kr3y, sym: str, kind: str) -> pd.Series:
+    if close is None or sym not in close.columns:
+        return pd.Series(dtype=float)
+    return _norm(close[sym], sym, kind)
+
+
+@st.cache_data(ttl=60 * 60, show_spinner=False)
+def load_long(sym: str) -> pd.Series:
+    """한 지표의 일봉 종가 최근 5년 (세부 차트의 '5년'용)."""
+    import yfinance as yf
+
+    d = yf.download(sym, period="5y", interval="1d", progress=False, auto_adjust=False)
+    if d is None or d.empty:
+        return pd.Series(dtype=float)
+    c = d["Close"]
+    if isinstance(c, pd.DataFrame):
+        c = c.iloc[:, 0]
+    c.index = pd.to_datetime(c.index).tz_localize(None) if getattr(c.index, "tz", None) else pd.to_datetime(c.index)
+    return c.sort_index()
+
+
+DETAIL_PERIODS = {"1개월": 30, "3개월": 91, "6개월": 182, "1년": 365, "2년": 730, "5년": 1826}
+
+
+def _detail(sym: str, name: str, kind: str, close: pd.DataFrame, key: str) -> None:
+    """지수·환율·금리·원자재 하나의 세부 차트: 기간 고르기 · 현재·기간 등락·최고·최저 카드 · 선 차트."""
+    import plotly.graph_objects as go
+
+    per = ui.seg("기간", list(DETAIL_PERIODS), default="1년", key=f"{key}_per") or "1년"
+    if per == "5년":
+        with st.spinner(f"{name} 5년 시세를 불러오는 중..."):
+            try:
+                s = _norm(load_long(sym), sym, kind)
+            except Exception:  # noqa: BLE001
+                s = pd.Series(dtype=float)
+    else:
+        s = _series(close, None, sym, kind)
+    if len(s) < 2:
+        st.caption(f"{name} 시세를 불러오지 못했습니다.")
+        return
+    s = s[s.index >= s.index[-1] - pd.Timedelta(days=DETAIL_PERIODS[per])]
+    last, first = float(s.iloc[-1]), float(s.iloc[0])
+    hi_d, lo_d = s.idxmax(), s.idxmin()
+    if kind == "rate":
+        chg = (last - first) * 100
+        chg_txt, sign = f"{chg:+.0f}bp", chg
+    else:
+        chg = (last / first - 1) * 100 if first else np.nan
+        chg_txt, sign = (f"{chg:+.2f}%" if chg == chg else "-"), chg
+    items = [(f"{name} 현재", _fmt(last, kind), f"{s.index[-1]:%Y-%m-%d} 기준"),
+             (f"{per} 등락", chg_txt, f"{s.index[0]:%Y-%m-%d} {_fmt(first, kind)} 대비", sign),
+             (f"{per} 최고", _fmt(float(s.max()), kind), f"{hi_d:%Y-%m-%d}"),
+             (f"{per} 최저", _fmt(float(s.min()), kind), f"{lo_d:%Y-%m-%d}")]
+    if kind != "rate" and len(s) > 20:
+        vol = float(np.log(s).diff().std() * np.sqrt(252) * 100)
+        items.append((f"{per} 변동성 (연)", f"{vol:.1f}%", "일간 로그수익률 기준"))
+    ui.cards(items, cols=len(items))
+    color = ui.UP if sign == sign and sign > 0 else (ui.DOWN if sign == sign and sign < 0 else ui.FLAT)
+    unit = "%" if kind == "rate" else ""
+    fig = go.Figure(go.Scatter(x=s.index, y=s.values, mode="lines", line=dict(color=color, width=1.8), name=name,
+                               hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.3f}" + unit + "<extra></extra>"))
+    fig.add_hline(y=first, line=dict(color="rgba(140,135,124,.6)", width=1, dash="dot"))
+    fig.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10), showlegend=False,
+                      yaxis=dict(ticksuffix=unit, tickformat=",.2f" if kind != "usd0" else ",.0f"))
+    st.plotly_chart(fig, use_container_width=True, key=f"{key}_fig")
+    st.caption(f"점선 = {per} 시작 값 · 출처: Yahoo Finance 일봉 종가 ({sym})")
 
 
 def _tiles(rows: list) -> None:
@@ -209,15 +281,12 @@ def _map_controls(prefix: str, markets: list | None, sizes: list, default_n: int
         c1, c2 = st.columns([2, 1], vertical_alignment="bottom")
     except TypeError:
         c1, c2 = st.columns([2, 1])
-    seg = getattr(st, "segmented_control", None) or getattr(st, "pills", None)
     mk, n = (markets[0] if markets else None), default_n
-    if seg:
-        if markets:
-            with c1:
-                mk = seg("시장", markets, default=markets[0], key=f"{prefix}_mk", label_visibility="collapsed") or markets[0]
-        with c2:
-            n = seg("종목 수", sizes, default=default_n, key=f"{prefix}_n", label_visibility="collapsed",
-                    format_func=lambda x: f"상위 {x}")
+    if markets:
+        with c1:
+            mk = ui.seg("시장", markets, default=markets[0], key=f"{prefix}_mk") or markets[0]
+    with c2:
+        n = ui.seg("종목 수", sizes, default=default_n, key=f"{prefix}_n", format_func=lambda x: f"상위 {x}")
     return mk, (int(n) if n else None)
 
 
@@ -328,31 +397,98 @@ def _us_market() -> None:
                          .rename_axis("섹터"), use_container_width=True)
 
 
-def _with_ctx(fn):
-    """작업 스레드에서도 Streamlit 캐시가 경고 없이 동작하도록 현재 실행 정보를 붙인다."""
-    try:
-        from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+def _kr_market(snap) -> None:
+    """국내 주식시장: 상승·하락 종목 수, 거래대금, 시장 지도, 시가총액·거래대금 상위, 상승·하락률 상위."""
+    if snap is None or snap.empty or "ChangesRatio" not in snap.columns:
+        st.caption("국내 종목 시세를 불러오지 못했습니다.")
+        return
+    ui.section("국내 주식시장", "KRX 전 종목 (장중엔 지연 시세)")
+    items = []
+    for mk in ("KOSPI", "KOSDAQ"):
+        m = snap[snap["Market"].astype(str).str.upper().str.startswith(mk)] if "Market" in snap.columns else snap
+        up, dn = int((m["ChangesRatio"] > 0).sum()), int((m["ChangesRatio"] < 0).sum())
+        flat = int((m["ChangesRatio"] == 0).sum())
+        amt = float(m["Amount"].sum()) if "Amount" in m.columns else np.nan
+        items += [(f"{mk} 상승 / 하락", f"{up:,} / {dn:,}", f"보합 {flat:,}", up - dn),
+                  (f"{mk} 거래대금", f"{amt / 1e12:,.1f}조원" if amt == amt else "-")]
+    ui.cards(items, cols=4)
 
-        ctx = get_script_run_ctx()
-    except Exception:  # noqa: BLE001
-        return fn
+    _heatmap(snap)
+    liquid = snap[snap["Amount"] >= 1e10] if "Amount" in snap.columns else snap  # 거래대금 100억 이상만 (급등락 잡주 제외)
+    c1, c2 = st.columns(2)
+    with c1:
+        if "Marcap" in snap.columns:
+            st.markdown(_movers_table(snap.nlargest(10, "Marcap"), "시가총액 상위"), unsafe_allow_html=True)
+    with c2:
+        if "Amount" in snap.columns:
+            st.markdown(_movers_table(snap.nlargest(10, "Amount"), "거래대금 상위"), unsafe_allow_html=True)
+    exp, op = ui.more("상승률 · 하락률 상위 더보기 (거래대금 100억 이상)", key="mk_more_movers")
+    if op:
+        with exp:
+            c3, c4 = st.columns(2)
+            c3.markdown(_movers_table(liquid.nlargest(10, "ChangesRatio"), "상승률 상위"), unsafe_allow_html=True)
+            c4.markdown(_movers_table(liquid.nsmallest(10, "ChangesRatio"), "하락률 상위"), unsafe_allow_html=True)
 
-    def run():
-        import threading
 
-        try:
-            add_script_run_ctx(threading.current_thread(), ctx)
-        except Exception:  # noqa: BLE001
-            pass
-        return fn()
+def _period_ret(s: pd.Series, per: str) -> float:
+    if len(s) < 2:
+        return np.nan
+    v = PERIODS[per]
+    if v is None:
+        return (float(s.iloc[-1]) / float(s.iloc[-2]) - 1) * 100
+    return _ret(s, ytd=True) if v == "ytd" else _ret(s, v)
 
-    return run
+
+def _world_map(close) -> str:
+    """세계 지도 (나라별 대표지수 수익률로 색칠). 고른 나라 이름을 돌려준다."""
+    import plotly.graph_objects as go
+
+    ss = st.session_state
+    names = [v[0] for v in COUNTRIES.values()]
+    ss.setdefault("mk_country", names[0])
+    ui.section("세계 증시", "나라별 대표지수 수익률 · 나라를 누르면 아래에 그 나라 지도와 시장 지도")
+    per = ui.seg("기간", list(PERIODS), default="1일", key="mk_world_per") or "1일"
+    iso, rets, txt, hov = [], [], [], []
+    for code, (nm, sym, inm) in COUNTRIES.items():
+        s = close[sym].dropna() if close is not None and sym in close.columns else pd.Series(dtype=float)
+        r = _period_ret(s, per)
+        iso.append(code)
+        rets.append(r)
+        lv = f"{float(s.iloc[-1]):,.2f}" if len(s) else "-"
+        txt.append(f"<b>{inm}</b><br>{r:+.2f}%" if r == r else f"<b>{inm}</b><br>-")
+        hov.append(f"{nm} · {inm} {lv}<br>{per} {r:+.2f}%" if r == r else f"{nm} · {inm}")
+    vals = np.array([x if x == x else 0.0 for x in rets])
+    m = max(float(np.nanmax(np.abs(vals))) if len(vals) else 1.0, 0.5)
+    scale = [[0, ui.DOWN], [0.5, "#D9D6CF"], [1, ui.UP]]
+    fig = go.Figure()
+    fig.add_trace(go.Choropleth(locations=iso, z=vals, locationmode="ISO-3", colorscale=scale, zmin=-m, zmax=m,
+                                marker_line_color="rgba(255,255,255,.6)", marker_line_width=0.6, text=hov,
+                                hovertemplate="%{text}<extra></extra>", showscale=False))
+    fig.add_trace(go.Scattergeo(locations=iso, locationmode="ISO-3", text=txt, mode="markers+text", textposition="top center",
+                                marker=dict(size=16, color=[ui.UP if v > 0 else (ui.DOWN if v < 0 else ui.FLAT) for v in vals],
+                                            opacity=.85, line=dict(width=1.5, color="white")),
+                                textfont=dict(size=12), hovertext=hov, hoverinfo="text"))
+    fig.update_geos(projection_type="natural earth", showcountries=True, countrycolor="rgba(128,128,128,.35)",
+                    showcoastlines=False, showland=True, landcolor="rgba(128,128,128,.12)", showocean=False,
+                    showframe=False, lataxis_range=[-50, 78], bgcolor="rgba(0,0,0,0)")
+    fig.update_layout(height=360, margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor="rgba(0,0,0,0)", showlegend=False,
+                      dragmode=False, clickmode="event+select")
+    hit = ui.new_click(ui.chart_points(fig, "mk_world"), "mk_world")
+    if hit and 0 <= hit[1] < len(names):
+        ss["mk_country"] = names[hit[1]]
+    ss["mk_country_seg"] = ss["mk_country"]
+    pick = ui.seg("나라", names, key="mk_country_seg",
+                  on_change=lambda: ss.__setitem__("mk_country", ss.get("mk_country_seg") or ss["mk_country"]))
+    if pick:
+        ss["mk_country"] = pick
+    st.caption(f"색 = 대표지수 {per} 수익률 (빨강 상승 · 파랑 하락). 지금은 한국·미국만 · 지도에서 나라를 누르거나 위 버튼으로 고르세요.")
+    return ss["mk_country"]
 
 
 def render_market() -> None:
     with st.spinner("시장 데이터를 불러오는 중..."):
         with ThreadPoolExecutor(max_workers=2) as ex:
-            f_q, f_x = (ex.submit(_with_ctx(fn)) for fn in (load_quotes, load_krx_snapshot))
+            f_q, f_x = (ex.submit(ui.with_ctx(fn)) for fn in (load_quotes, load_krx_snapshot))
             close = kr3y = snap = None
             errs = []
             for nm, f in (("해외·지수", f_q), ("국내 종목", f_x)):
@@ -369,53 +505,43 @@ def render_market() -> None:
     asof = close.index[-1].strftime("%Y-%m-%d") if close is not None and len(close) else ""
     st.markdown(f'<div class="qh-n">시장 개요 <span class="qh-code">{asof} 기준 · 일봉 종가(장중엔 지연 시세)</span></div>',
                 unsafe_allow_html=True)
-    all_rows = []
-    for title, items in GROUPS:
-        ui.section(title)
-        rows = [(name, _series(close, kr3y, sym, kind), kind) for sym, name, kind in items]
-        all_rows += rows
-        _tiles(rows)
+    country = _world_map(close)
+    try:
+        import geomap
 
-    # ---- 국내 시장 상황
-    if snap is not None and not snap.empty and "ChangesRatio" in snap.columns:
-        ui.section("국내 주식시장", "KRX 전 종목 (장중엔 지연 시세)")
-        items = []
-        for mk in ("KOSPI", "KOSDAQ"):
-            m = snap[snap["Market"].astype(str).str.upper().str.startswith(mk)] if "Market" in snap.columns else snap
-            up, dn = int((m["ChangesRatio"] > 0).sum()), int((m["ChangesRatio"] < 0).sum())
-            flat = int((m["ChangesRatio"] == 0).sum())
-            amt = float(m["Amount"].sum()) if "Amount" in m.columns else np.nan
-            items += [(f"{mk} 상승 / 하락", f"{up:,} / {dn:,}", f"보합 {flat:,}", up - dn),
-                      (f"{mk} 거래대금", f"{amt / 1e12:,.1f}조원" if amt == amt else "-")]
-        ui.cards(items, cols=4)
+        geomap.render(country, snap, close)
+    except Exception as e:  # noqa: BLE001
+        if type(e).__name__ in ("RerunException", "StopException"):  # 화면 다시 그리기·페이지 이동은 그대로 보낸다
+            raise
+        st.caption(f"나라 지도를 그리지 못했습니다: {e}")
+    if country == "한국":
+        _kr_market(snap)
+    elif country == "미국":
+        _us_market()
 
-        _heatmap(snap)
-        liquid = snap[snap["Amount"] >= 1e10] if "Amount" in snap.columns else snap  # 거래대금 100억 이상만 (급등락 잡주 제외)
-        c1, c2 = st.columns(2)
-        with c1:
-            if "Marcap" in snap.columns:
-                st.markdown(_movers_table(snap.nlargest(10, "Marcap"), "시가총액 상위"), unsafe_allow_html=True)
-        with c2:
-            if "Amount" in snap.columns:
-                st.markdown(_movers_table(snap.nlargest(10, "Amount"), "거래대금 상위"), unsafe_allow_html=True)
-        exp, op = ui.more("상승률 · 하락률 상위 더보기 (거래대금 100억 이상)", key="mk_more_movers")
-        if op:
-            with exp:
-                c3, c4 = st.columns(2)
-                c3.markdown(_movers_table(liquid.nlargest(10, "ChangesRatio"), "상승률 상위"), unsafe_allow_html=True)
-                c4.markdown(_movers_table(liquid.nsmallest(10, "ChangesRatio"), "하락률 상위"), unsafe_allow_html=True)
-
-    # ---- 미국 시장 상황
-    _us_market()
+    # ---- 지수 · 환율 · 금리 · 원자재 (더보기)
+    all_rows = [(name, _series(close, kr3y, sym, kind), kind) for _t, items in GROUPS for sym, name, kind in items]
+    exp, op = ui.more("지수 · 환율 · 금리 · 원자재 · 가상자산 시세", key="mk_more_tiles")
+    if op:
+        with exp:
+            for gi, (title, items) in enumerate(GROUPS):
+                ui.section(title)
+                _tiles([(name, _series(close, kr3y, sym, kind), kind) for sym, name, kind in items])
+                names = [name for _s, name, _k in items]
+                pick = ui.seg("눌러서 차트 보기", names, key=f"mk_tile_pick_{gi}", collapsed=False)
+                if pick in names:
+                    sym, name, kind = items[names.index(pick)]
+                    _detail(sym, name, kind, close, key=f"mk_tile_det_{gi}")
 
     # ---- 기간별 수익률 (더보기)
     exp, op = ui.more("기간별 등락률 더보기 (1주 · 1개월 · 3개월 · 연초 이후 · 1년)", key="mk_more_ret")
     if op:
         with exp:
-            rows = []
-            for name, s, kind in all_rows:
+            rows, row_items = [], []
+            for (name, s, kind), (sym, _n, _k) in zip(all_rows, [it for _t, items in GROUPS for it in items]):
                 if len(s) < 2:
                     continue
+                row_items.append((sym, name, kind))
                 if kind == "rate":
                     def bp(days=None, ytd=False, s=s):
                         if ytd:
@@ -429,8 +555,27 @@ def render_market() -> None:
                     f = lambda x: "-" if x != x else f"{x:+.2f}%"  # noqa: E731
                     rows.append({"지표": name, "현재": _fmt(float(s.iloc[-1]), kind), "1주": f(_ret(s, 7)), "1개월": f(_ret(s, 30)),
                                  "3개월": f(_ret(s, 91)), "연초 이후": f(_ret(s, ytd=True)), "1년": f(_ret(s, 365))})
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-            st.caption("금리는 bp(0.01%p) 변화, 나머지는 % 등락률입니다.")
+            t = pd.DataFrame(rows)
+            pcols = ["1주", "1개월", "3개월", "연초 이후", "1년"]
+
+            def _color(v):  # 오르면 빨강, 내리면 파랑 (0이거나 값이 없으면 그대로)
+                v = str(v)
+                if not any(ch in "123456789" for ch in v):
+                    return ""
+                if v.startswith("+"):
+                    return f"color:{ui.UP};font-weight:600"
+                if v.startswith("-"):
+                    return f"color:{ui.DOWN};font-weight:600"
+                return ""
+
+            sty = t.style
+            sty = (sty.map if hasattr(sty, "map") else sty.applymap)(_color, subset=pcols)
+            i = ui.table_pick(sty, "mk_ret_tbl", use_container_width=True, hide_index=True)
+            st.caption("금리는 bp(0.01%p) 변화, 나머지는 % 등락률입니다. 행을 누르면 아래에 그 지표의 차트가 나옵니다.")
+            if i is not None and i < len(row_items):
+                sym, name, kind = row_items[i]
+                ui.section(f"{name} 차트")
+                _detail(sym, name, kind, close, key="mk_ret_det")
     if errs:
         st.caption("일부 데이터를 불러오지 못했습니다: " + " · ".join(errs))
     st.caption("출처: Yahoo Finance · KRX(FinanceDataReader) · WICS(와이즈인덱스) · 나스닥 · S&P 500(GICS). 투자 판단의 참고 자료로만 사용하세요.")
