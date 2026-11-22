@@ -13,7 +13,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from options import mgrid
+from ui import mgrid
 
 try:
     import yfinance as yf
