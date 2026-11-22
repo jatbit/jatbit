@@ -418,13 +418,21 @@ def kr_geojson() -> dict | None:
 #   Exact(도시·시군구 좌표인지), Marcap, Close, ChangesRatio, Amount, Sector, Industry, ysym(Yahoo 심볼),
 #   Query(차트 페이지 입력), RsKey(기업 리서치 입력), SectorEn·IndustryEn(미국 점수 계산용)
 # ----------------------------------------------------------------------
-def _spread_all(d: pd.DataFrame, step_fn) -> pd.DataFrame:
+def _spread_all(d: pd.DataFrame, radius_fn) -> pd.DataFrame:
+    """같은 좌표에 모인 점들을 해바라기 모양으로 펼친다. radius_fn(행) = 그 무리가 넘지 말아야 할 반지름(도).
+    점이 많을수록 촘촘하게 (반지름 ≈ 간격 × √개수 를 넘지 않게), 큰 종목일수록 가운데."""
     d = d.sort_values("Marcap", ascending=False).reset_index(drop=True)
-    d["_k"] = d.groupby([d["lat"].round(3), d["lon"].round(3)]).cumcount()
-    xy = [_spread(a, b, int(k), step_fn(r)) if a == a else (np.nan, np.nan)
-          for a, b, k, r in zip(d["lat"], d["lon"], d["_k"], d.to_dict("records"))]
+    g = d.groupby([d["lat"].round(3), d["lon"].round(3)])
+    d["_k"], d["_n"] = g.cumcount(), g["Marcap"].transform("size")
+    xy = []
+    for a, b, k, n, r in zip(d["lat"], d["lon"], d["_k"], d["_n"], d.to_dict("records")):
+        if a != a:
+            xy.append((np.nan, np.nan))
+            continue
+        R, step = radius_fn(r)
+        xy.append(_spread(a, b, int(k), min(step, R / math.sqrt(max(int(n), 1)))))
     d["plat"], d["plon"] = [x[0] for x in xy], [x[1] for x in xy]
-    return d.drop(columns=["_k"])
+    return d.drop(columns=["_k", "_n"])
 
 
 def us_frame() -> tuple:
@@ -449,7 +457,7 @@ def us_frame() -> tuple:
     d["Region"] = d["State"]
     d["Place"] = [f"{c}, {US_STATES[s][0]}" if s in US_STATES else (f"{c}, {COUNTRY_KO.get(n, n)}" if isinstance(n, str) and n else "알 수 없음")
                   for c, s, n in zip(d["City"].fillna(""), d["State"], d["Country"])]
-    d = _spread_all(d, lambda r: 0.10 if r.get("Exact") is True else 0.35)
+    d = _spread_all(d, lambda r: (0.6, 0.10) if r.get("Exact") is True else (1.2, 0.35))
     inside = d[d["Region"].isin(list(US_STATES))].copy()
     outside = d[~d["Region"].isin(list(US_STATES)) & d["HQ"].notna()].assign(Region="해외 본사")
     return inside, outside, int(inside["Exact"].fillna(False).astype(bool).sum())
@@ -489,7 +497,7 @@ def kr_frame(snap: pd.DataFrame, n: int | None, dart_key: str | None) -> tuple:
     m["ysym"] = m["Code"] + np.where(kq, ".KQ", ".KS")
     m["Key"], m["Label"], m["Query"], m["RsKey"] = m["Code"], m["Name"], m["Name"], m["Code"]
     m["SectorEn"], m["IndustryEn"] = "", ""
-    m = _spread_all(m, lambda r: 0.006 if r["Exact"] else (SIDO[r["Region"]][3] / 5 if r["Region"] in SIDO else 0.03))
+    m = _spread_all(m, lambda r: (0.04, 0.006) if r["Exact"] else ((SIDO[r["Region"]][3], 0.03) if r["Region"] in SIDO else (0.1, 0.03)))
     inside = m[m["Region"].isin(list(SIDO))].copy()
     outside = m[~m["Region"].isin(list(SIDO))].assign(Region="해외 본사")
     return inside, outside, int(inside["Exact"].sum())
