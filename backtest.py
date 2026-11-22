@@ -12,7 +12,7 @@ import streamlit as st
 
 import ui
 
-from options import mgrid
+from ui import mgrid
 
 TD = 252
 
