@@ -210,6 +210,7 @@ def render_chain() -> None:
         st.error(f"옵션 가격을 불러오지 못했습니다: {e}. 잠시 후 다시 시도해 주세요.")
         return
     T = years_to_expiry(expiry)
+    P = _garch_T(P, T)
     d = build_chain(raw, P, T, basis)
     if d.empty:
         st.warning("해당 만기의 옵션 가격이 없습니다.")
@@ -251,6 +252,15 @@ def render_chain() -> None:
     msg = st.session_state.pop("opt_add_msg", None)
     if msg:
         st.success(msg + " '델타·감마 헷지' 탭에서 확인하세요.")
+
+
+def _garch_T(P: dict, T: float) -> dict:
+    """이론가 변동성이 GARCH면 고른 만기까지의 평균 변동성 예측으로 바꾼다."""
+    if P.get("hv_pick") == GARCH_PICK and P.get("garch"):
+        import garch
+
+        return dict(P, sig_theo=garch.term_vol(P["garch"], max(T * 252, 1)))
+    return P
 
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
@@ -297,6 +307,7 @@ def _render_chain_shared() -> None:
         st.error(f"옵션 가격을 불러오지 못했습니다: {e}. 잠시 후 다시 시도해 주세요.")
         return
     T = years_to_expiry(expiry)
+    P = _garch_T(P, T)
     d = build_chain(raw, P, T, st.session_state.get("opt_greek_basis", "IV"))
     if d.empty:
         st.warning("해당 만기의 옵션 가격이 없습니다.")
