@@ -146,7 +146,7 @@ def _fmt_pct(x, nd=2):
 
 
 def _grid(items, cols=4):
-    from options import mgrid
+    from ui import mgrid
 
     mgrid(items, cols)
 
