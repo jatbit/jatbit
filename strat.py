@@ -245,18 +245,43 @@ def _offsets(tmpl, legs_df, S, width):
     return out
 
 
-def backtest(close: pd.Series, shape: list, hold_days: int, r: float, q: float, vol_win: int, vol_mult: float,
-             stop: float | None, take: float | None, cost: float, mult: float) -> pd.DataFrame:
-    """매 hold_days 거래일마다 진입, 만기 = 진입 후 hold_days 거래일. 하루씩 BSM으로 재평가하며 손절·익절."""
-    close = close.dropna()
+def _vol_fn(close: pd.Series, vol_win):
+    """vol(i, H): i번째 날 장 마감 기준 '앞으로 H거래일 평균 변동성'(연환산).
+    vol_win = "GARCH" 이면 GARCH(1,1) 예측(모수는 이 구간 전체로 한 번 추정, 분산은 그날까지 정보만 사용), 숫자면 HV 그 기간."""
     lr = np.log(close).diff()
-    hv = (lr.rolling(vol_win).std() * math.sqrt(252)).bfill()
+    if vol_win == "GARCH":
+        import garch
+
+        f = garch.fit(lr.dropna(), years=None)
+        if f is not None:
+            e = lr.fillna(0.0).values - f["mu"]
+            s2 = garch._filter(e * e, f["VL"], f["alpha"], f["beta"], f["VL"] * (1 - f["persist"]))
+            nxt = f["VL"] * (1 - f["persist"]) + f["alpha"] * e * e + f["beta"] * s2
+            p, VL = f["persist"], f["VL"]
+
+            def vol(i, H):
+                H = max(int(H), 1)
+                fac = (1 - p ** H) / ((1 - p) * H)
+                return math.sqrt(max(VL + (nxt[i] - VL) * fac, 0.0) * 252)
+
+            return vol, 60
+        vol_win = 60
+    hv = (lr.rolling(int(vol_win)).std() * math.sqrt(252)).bfill().values
+    return (lambda i, H: float(hv[i])), int(vol_win)
+
+
+def backtest(close: pd.Series, shape: list, hold_days: int, r: float, q: float, vol_win, vol_mult: float,
+             stop: float | None, take: float | None, cost: float, mult: float) -> pd.DataFrame:
+    """매 hold_days 거래일마다 진입, 만기 = 진입 후 hold_days 거래일. 하루씩 BSM으로 재평가하며 손절·익절.
+    vol_win: "GARCH" 또는 HV 기간(일)."""
+    close = close.dropna()
+    vol, warm = _vol_fn(close, vol_win)
     idx = close.index
     trades = []
-    i = vol_win + 1
+    i = warm + 1
     while i + hold_days < len(idx):
         S0 = float(close.iloc[i])
-        sig0 = max(float(hv.iloc[i]) * vol_mult, 0.05)
+        sig0 = max(vol(i, hold_days) * vol_mult, 0.05)
         T0 = hold_days / 252
         legs = []
         for kind, km, n in shape:
@@ -278,7 +303,7 @@ def backtest(close: pd.Series, shape: list, hold_days: int, r: float, q: float, 
         for j in range(i + 1, i + hold_days + 1):
             S = float(close.iloc[j])
             Tl = max((i + hold_days - j) / 252, 0.0)
-            sig = max(float(hv.iloc[j]) * vol_mult, 0.05)
+            sig = max(vol(j, i + hold_days - j) * vol_mult, 0.05)
             v = 0.0
             for k, K, n, px in legs:
                 if k == "S":
@@ -316,10 +341,20 @@ def render_backtest(tmpl, legs_df, width, ctx, key) -> None:
     c1, c2, c3, c4 = st.columns(4)
     yrs = c1.selectbox("기간", [3, 5, 10], index=1, key=f"{key}_bty", format_func=lambda x: f"최근 {x}년")
     hold = c2.selectbox("보유 기간(만기)", [10, 21, 42, 63], index=1, key=f"{key}_bth", format_func=lambda x: f"{x}거래일")
-    vwin = c3.selectbox("변동성 창", [20, 60, 120], index=0, key=f"{key}_btv", format_func=lambda x: f"HV {x}일")
+    vwin = c3.selectbox("변동성", ["GARCH", 20, 60, 120], index=0, key=f"{key}_btv2",
+                        format_func=lambda x: "GARCH(1,1) 예측" if x == "GARCH" else f"HV {x}일")
     iv_ratio = ctx.get("iv_hv") or 1.0
-    vm = c4.number_input("IV ÷ HV 배수", 0.5, 2.5, float(round(iv_ratio, 2)), 0.05, key=f"{key}_btm",
-                         help="옵션 가격에 쓸 변동성 = 그때의 HV × 이 배수. 기본값은 지금 시장의 IV ÷ HV")
+    if vwin == "GARCH":
+        try:
+            import garch
+
+            gf = garch.fit_close(close)
+            g = garch.term_vol(gf, hold) if gf else float("nan")
+            iv_ratio = ctx["sig"] / g if g == g and g > 0 and np.isfinite(ctx.get("sig", np.nan)) else 1.0
+        except Exception:  # noqa: BLE001
+            iv_ratio = 1.0
+    vm = c4.number_input("IV ÷ 변동성 배수", 0.5, 2.5, float(round(min(max(iv_ratio, 0.5), 2.5), 2)), 0.05, key=f"{key}_btm_{vwin}_{hold}",
+                         help="옵션 가격에 쓸 변동성 = 그때의 변동성(GARCH 예측 또는 HV) × 이 배수. 기본값은 지금 시장의 IV ÷ 지금 변동성")
     c5, c6, c7 = st.columns(3)
     stop = c5.selectbox("손절 (최대손실 대비)", [None, 0.5, 0.75, 1.0], index=2, key=f"{key}_bts",
                         format_func=lambda x: "없음" if x is None else f"{x * 100:.0f}%")
@@ -361,8 +396,10 @@ def render_backtest(tmpl, legs_df, width, ctx, key) -> None:
         show["청산일"] = show["청산일"].dt.strftime("%Y-%m-%d")
         show["변동성"] = (show["변동성"] * 100).round(1)
         st.dataframe(show.round(2), hide_index=True, use_container_width=True, height=300)
-    st.caption("과거 옵션 시세가 무료로 없어 그때의 주가와 역사적 변동성(× 배수)으로 BSM 가격을 다시 만든 결과입니다. "
-               "스큐(행사가별 IV 차이), 호가 차이, 거래 불가 구간은 반영되지 않습니다. 행사가는 진입일 주가 대비 같은 비율로 잡았습니다.")
+    st.caption("과거 옵션 시세가 무료로 없어 그때의 주가와 변동성(× 배수)으로 BSM 가격을 다시 만든 결과입니다. "
+               + ("변동성은 그날까지의 수익률로 GARCH(1,1)가 예측한 '남은 기간 평균 변동성'이며, 모수(α·β)는 이 구간 전체로 한 번 추정했습니다. "
+                  if vwin == "GARCH" else "")
+               + "스큐(행사가별 IV 차이), 호가 차이, 거래 불가 구간은 반영되지 않습니다. 행사가는 진입일 주가 대비 같은 비율로 잡았습니다.")
 
 
 __all__ = [n for n in dir() if not n.startswith("__")]
