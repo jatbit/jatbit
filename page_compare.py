@@ -57,6 +57,7 @@ def render_compare(listing: pd.DataFrame) -> None:
         return
     start_d, end_d = period
 
+    prefetch_prices([it["code"] for it in items], start_d.isoformat())  # 여러 종목을 동시에 받아 둠
     fig = go.Figure()
     rows = []
     for i, it in enumerate(items):
