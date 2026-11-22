@@ -190,7 +190,9 @@ def add_kr_rows(rows: list) -> None:
 
 
 def price_kr_book(book: pd.DataFrame) -> tuple:
-    """{코드: {"S","r","q","close","name","mult","legs":[...]}} — 가격을 넣었으면 그 가격의 IV, 없으면 HV 60일."""
+    """{코드: {"S","r","q","close","name","mult","legs":[...]}} — 가격을 넣었으면 그 가격의 IV, 없으면 GARCH(1,1)로 예측한 만기까지 평균 변동성."""
+    import garch
+
     r_s, r_lab = kr_rf()
     r = math.log1p(r_s)
     out, warns = {}, []
@@ -220,9 +222,10 @@ def price_kr_book(book: pd.DataFrame) -> tuple:
             sig = float(bsm.implied_vol(np.array([px]), u["S"], np.array([K]), T, r, 0.0, np.array([is_call]))[0])
             src = "입력 가격"
             if not np.isfinite(sig):
-                sig, src = u["hv"], "HV 60일 (IV 계산 실패)"
+                sig, how = garch.vol_for(u["close"], T * 252)
+                src = f"{how} (IV 계산 실패)"
         else:
-            sig, src = u["hv"], "HV 60일"
+            sig, src = garch.vol_for(u["close"], T * 252)
             px = float(bsm.price(u["S"], K, T, r, 0.0, sig, is_call))
         g = bsm.greeks(u["S"], K, T, r, 0.0, sig, is_call)
         u["legs"].append({"exp": str(rw["만기"])[:10], "is_call": is_call, "K": float(K), "n": float(n), "T": T, "mkt": float(px),
@@ -305,7 +308,7 @@ def render_kr_add() -> None:
         K = a3.number_input("행사가", value=float(round(S / stp) * stp), step=float(stp), key=f"kr_K2_{code}")
         n = a4.number_input("수량(계약, 매도 −)", value=1, step=1, key=f"kr_n2_{code}")
         px = a5.number_input("가격 (모르면 0)", value=0.0, step=float(stp) / 50, key=f"kr_px2_{code}",
-                             help="0이면 HV 60일로 이론가를 계산합니다")
+                             help="0이면 GARCH(1,1)로 예측한 만기까지 평균 변동성으로 이론가를 계산합니다")
         st.button("추가", key=f"kr_add_man_{code}", on_click=_add_msg,
                   args=({"기초자산": code, "만기": e, "종류": kind, "행사가": K, "수량(계약)": n, "가격": px or np.nan},
                         f"{name} {e} {kind} {K:,.0f} × {n}계약을 추가했습니다."))
