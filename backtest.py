@@ -23,7 +23,7 @@ def _month_end(v: pd.Series) -> pd.Series:
     except Exception:  # noqa: BLE001  (pandas 2.2 미만)
         return v.resample("M").last()
 REBAL = {"리밸런싱 안 함 (매수 후 보유)": None, "매월": "M", "분기마다": "Q", "반기마다": "H", "매년": "Y"}
-COLORS = ["#E5534B", "#4C9BE8", "#5BB56E", "#F2A93B", "#9B6FD6", "#3BB5B5"]
+COLORS = ["#E5534B", "#4C9BE8", "#D97AB0", "#F2A93B", "#9B6FD6", "#3BB5B5"]
 
 
 # ----------------------------------------------------------------------
