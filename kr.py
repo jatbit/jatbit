@@ -177,9 +177,10 @@ def yahoo_frame(R: dict, fx: float = 1.0) -> pd.DataFrame | None:
 # OpenDART
 # ----------------------------------------------------------------------
 def dart_key() -> str | None:
-    k = st.session_state.get("dart_key_input") or None
-    if k:
-        return k.strip()
+    for _n in ("dart_key_global", "dart_key_input"):  # 화면 오른쪽 위 '키 설정' 칸 → 기업 리서치의 칸 → Secrets 순서
+        k = st.session_state.get(_n) or None
+        if k and str(k).strip():
+            return str(k).strip()
     try:
         k = st.secrets.get("DART_API_KEY")
     except Exception:  # noqa: BLE001
