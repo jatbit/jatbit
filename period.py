@@ -66,8 +66,12 @@ US_TOP5 = ["NVDA", "AAPL", "GOOGL", "MSFT", "AMZN"]  # 고정 목록(2026-11 기
 
 def _preset(kind: str) -> None:
     """시가총액 상위 5개 종목을 두 탭(수익률 비교·포트폴리오)에 동시에 채운다."""
-    listing = st.session_state.get("_listing")
     if kind == "KR":
+        try:  # 세션에 목록이 없을 수 있어 (다른 화면에서 먼저 열지 않은 경우) 직접 불러온다
+            import data_load
+            listing = data_load.load_listing()
+        except Exception:  # noqa: BLE001
+            listing = None
         labels = []
         if listing is not None and "Marcap" in listing.columns:
             d = listing.dropna(subset=["Marcap"])
@@ -96,6 +100,9 @@ def period_input(key: str, mirror: str = None, presets: bool = False, default_da
     """빠른 기간 버튼(오늘 기준) + 직접 선택 달력을 한 줄에. 종료일은 오늘이며, 데이터는 가장 최근 영업일까지 나온다.
     mirror: 같은 기간을 공유할 다른 페이지의 period_input 키."""
     today = kst_today()
+    _dflt = {30: "1개월", 90: "3개월", 180: "6개월", 365: "1년", 1825: "5년", 3650: "10년", 3652: "10년"}.get(default_days)
+    if _dflt and f"{key}_quick" not in st.session_state and key not in st.session_state:  # 처음 열 때 기본 기간 버튼에 선택 표시
+        st.session_state[f"{key}_quick"] = _dflt
     cols = _row([3.4, 2.2] + ([1, 1] if presets else []))
     if hasattr(st, "pills"):
         with cols[0]:
