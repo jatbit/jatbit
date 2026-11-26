@@ -43,8 +43,12 @@ def _apply_preset() -> None:
             st.session_state[k] = v
 
 
-def _reset() -> None:
-    for k, v in {**_BASE, "sc_preset": None}.items():
+_BASIC = {"sc_mk": ["KOSPI", "KOSDAQ"], "sc_capmin": 1000, "sc_amtmin": 0, "sc_chg": (-30.0, 30.0),
+          "sc_sec_kr": [], "sc_ind_kr": [], "sc_sec_us": [], "sc_ind_us": []}
+
+
+def _reset() -> None:  # 기술 조건뿐 아니라 기본 조건(시장·업종·시가총액·거래대금·등락률)도 함께 되돌린다
+    for k, v in {**_BASE, **_BASIC, "sc_preset": None}.items():
         st.session_state[k] = v
 
 
@@ -256,6 +260,17 @@ def render_screener() -> None:
         if amt_min:
             D = D[D["Amount"].fillna(0) >= amt_min * 1e8]
         D = D[(D["ChangesRatio"] >= chg_rng[0]) & (D["ChangesRatio"] <= chg_rng[1])]
+        _on = []  # 기본 값이 아닌 조건은 눈에 보이게 표시 (조건 때문에 결과가 0건인 걸 모르고 지나치는 일 방지)
+        if cap_min != 1000:
+            _on.append(f"시가총액 ≥ {cap_min:,}억")
+        if amt_min:
+            _on.append(f"거래대금 ≥ {amt_min:,}억")
+        if tuple(chg_rng) != (-30.0, 30.0):
+            _on.append(f"등락률 {chg_rng[0]:+g}~{chg_rng[1]:+g}%")
+        if sec_sel or ind_sel:
+            _on.append("섹터·업종 선택")
+        if _on:
+            st.caption("적용 중인 기본 조건: " + " · ".join(_on))
 
     # ---- 기술적 지표 (대상 전체를 한 번에 받아 캐시)
     with st.spinner(f"{len(U)}개 종목의 1년 일봉으로 기술적 지표를 계산하는 중... (처음 한 번 10~30초, 이후 1시간 재사용)"):
@@ -284,7 +299,7 @@ def render_screener() -> None:
     store = st.session_state.get("sc_scores", {})
     scores = {s: _total(store[(domestic, s)]) for s in D["Symbol"].astype(str)
               if (domestic, s) in store and not store[(domestic, s)].get("err")}
-    (t1, o1), (t2, o2) = ui.lazy_tabs(["검색 결과", "점수 순위 TOP 20"], key="sc_res_tabs")
+    (t1, o1), (t2, o2) = ui.lazy_tabs(["검색 결과", "모델 점수 상위 20 (참고용)"], key="sc_res_tabs")
     if o2:
         with t2:
             _render_scores(D, domestic)
@@ -318,7 +333,7 @@ def _results(D, U, T, domestic, scores, rsi_n, ma_s, vol_n, hv_n) -> None:
         out["현재가"] = out["현재가"].round(0)
     pct = st.column_config.NumberColumn
     cfg = {"점수": st.column_config.ProgressColumn("점수", min_value=0, max_value=100, format="%d",
-                                                 help="'점수 순위' 탭에서 계산한 6개월 종합 점수 (0~100, 50 = 중립)"),
+                                                 help="'모델 점수 상위 20' 탭에서 계산한 6개월 종합 점수 (0~100, 50 = 중립)"),
            "현재가": pct("현재가", format="localized" if domestic else "%.2f"),
            "등락률(%)": pct("등락률(%)", format="%+.2f"), "시가총액(억원)": pct("시가총액(억원)", format="localized"),
            "거래대금(억원)": pct("거래대금(억원)", format="localized"),
@@ -330,7 +345,7 @@ def _results(D, U, T, domestic, scores, rsi_n, ma_s, vol_n, hv_n) -> None:
            "거래량 배수": pct("거래량 배수", format="%.1f배", help=f"오늘 거래량 ÷ 최근 {vol_n}일 평균. 2배 이상이면 관심이 몰린 것"),
            "변동성(%)": pct("변동성(%)", format="%.0f", help=f"최근 {hv_n}일 일별 수익률의 연환산 표준편차")}
     kw = dict(use_container_width=True, hide_index=True, column_config=cfg, height=min(38 * (len(out) + 1) + 4, 620))
-    i = ui.table_pick(out, "sc_table", **kw)
+    i = ui.table_pick(ui.signed_style(out, ["등락률(%)", "1개월(%)", "3개월(%)", "1년(%)", f"{ma_s}일선 이격(%)"]), "sc_table", **kw)
     if i is not None:
         r = out.iloc[i]
         q = str(r["종목"]) if domestic else str(r["코드"])
@@ -341,8 +356,8 @@ def _results(D, U, T, domestic, scores, rsi_n, ma_s, vol_n, hv_n) -> None:
             _go("research", "rs_ticker", str(r["코드"]))
     st.download_button("결과 CSV 내려받기", out.to_csv(index=False).encode("utf-8-sig"), file_name="screener.csv", mime="text/csv")
     st.caption("국내는 KRX 당일 시세(장중엔 지연)와 Yahoo 일봉, 미국은 Yahoo 일봉 기준입니다. 기술적 지표는 1시간마다 새로 계산합니다. "
-               "조건에 맞는다는 것이 매수·매도 신호를 뜻하지는 않습니다."
-               + ("" if scores else " 매수·매도 점수는 '점수 순위' 탭에서 계산하면 이 표에도 붙습니다."))
+               "조건에 맞는다고 해서 사거나 팔라는 뜻이 아닙니다."
+               + ("" if scores else " 모델 점수는 '모델 점수 상위 20' 탭에서 계산하면 이 표에도 붙습니다."))
 
 
 # ----------------------------------------------------------------------
@@ -427,7 +442,7 @@ def _render_scores(D: pd.DataFrame, domestic: bool) -> None:
     est = max(1, round(len(todo or jobs) * (6 if domestic else 4) / 3 / 60))
     if not have:
         with st.container(border=True):
-            st.markdown(f"**검색 결과 {len(jobs):,}종목의 매수·매도 점수를 매겨 상위 20종목을 보여줍니다**")
+            st.markdown(f"**검색 결과 {len(jobs):,}종목의 모델 점수를 계산해 상위 20종목을 보여줍니다 (참고용이며 투자 권유가 아닙니다)**")
             st.caption(f"종목마다 10년치 주가·재무제표로 '6개월 뒤 오를지'를 판정합니다. 약 {est}분 걸리고, 그동안 이 화면을 그대로 두세요."
                        + (" 조건을 좁혀 종목 수를 줄이면 빨라집니다." if len(jobs) > 150 else ""))
             go_ = st.button("점수 계산 시작", key="sc_score_btn", type="primary")
@@ -467,7 +482,7 @@ def _render_scores(D: pd.DataFrame, domestic: bool) -> None:
     nc = st.column_config.NumberColumn
     cfg = {"순위": nc("순위", format="%d", width="small"),
            "종합 점수": st.column_config.ProgressColumn("종합 점수", min_value=0, max_value=100, format="%d점",
-                                                     help="50 = 중립, 55 이상 약한 매수, 65 이상 매수, 45 이하 약한 매도, 35 이하 매도"),
+                                                     help="50 = 중립, 55 이상 다소 높음, 65 이상 높음, 45 이하 다소 낮음, 35 이하 낮음"),
            "위험 신호": st.column_config.TextColumn("위험 신호", help="부실 위험 등이 켜지면 점수 상한이 50점")}
     cfg.update({v: nc(v, format="%d") for v in SCORE_COLS.values()})
     kw = dict(use_container_width=True, hide_index=True, column_config=cfg, height=min(36 * (len(top) + 1) + 4, 760))
