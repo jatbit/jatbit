@@ -66,13 +66,16 @@ def optimize_portfolios(mu: np.ndarray, cov: np.ndarray, rf: float, cap: float, 
 
 
 def render_portfolio(listing: pd.DataFrame) -> None:
-    ordered = listing.sort_values("Name")
+    ordered = listing.assign(_pf=~listing["Code"].astype(str).str.endswith("0")).sort_values(["_pf", "Marcap"], ascending=[True, False], na_position="last")  # 보통주·시가총액 큰 순 (검색해도 삼성전자가 먼저)
     options = {f"{r.Name} ({r.Code})": (r.Code, r.Name, str(r.Market)) for r in ordered.itertuples()}
 
+    _ok = set(options)
+    if isinstance(st.session_state.get("pf_selected"), list):  # 주소로 들어온 값 중 목록에 없는 종목은 뺀다
+        st.session_state["pf_selected"] = [x for x in st.session_state["pf_selected"] if x in _ok]
     c1, c2, c3 = _row([3, 2, 1])
     selected = c1.multiselect(
         "국내 종목 (2개 이상, 이름을 입력하면 검색됩니다)",
-        list(options.keys()), key="pf_selected",
+        list(options.keys()), key="pf_selected", placeholder="종목 이름이나 코드를 입력하세요",
         on_change=_mirror, args=("pf_selected", "cmp_selected"),
         help="수익률 비교 페이지와 종목·기간 입력이 함께 바뀝니다",
     )
@@ -128,7 +131,8 @@ def render_portfolio(listing: pd.DataFrame) -> None:
         default_bench = 2
     with pf_set:
         bench_name = st.selectbox("CAPM 벤치마크(시장 지수)", list(bench_opts), index=default_bench, key="pf_bench")
-        cap_pct = st.slider("종목당 최대 비중 (%)", min_value=int(math.ceil(100 / n)), max_value=100, value=100, step=1)
+        cap_pct = st.slider("종목당 최대 비중 (%)", min_value=int(math.ceil(100 / n)), max_value=100, value=100, step=1,
+                            help=f"{n}종목이면 합이 100%가 되도록 최소 {int(math.ceil(100 / n))}%부터 고를 수 있습니다.")
     cap = cap_pct / 100
     bench_code = bench_opts[bench_name]
 
@@ -140,20 +144,36 @@ def render_portfolio(listing: pd.DataFrame) -> None:
     # 가격 불러오기 → 공통 거래일로 정렬
     series = {}
     prefetch_prices([it["code"] for it in items] + [bench_code], start_d.isoformat())  # 여러 종목을 동시에 받아 둠
-    for it in items + [{"code": bench_code, "name": bench_name}]:
+    skipped = []
+    for it in items + [{"code": bench_code, "name": bench_name, "_bench": True}]:
         try:
             d = load_prices(it["code"], start_d.isoformat(), end_d.isoformat())
         except Exception as e:  # noqa: BLE001
-            st.error(f"{it['name']}: 데이터를 불러오지 못했습니다 ({e})")
-            return
+            if it.get("_bench"):
+                st.error(f"CAPM 벤치마크({it['name']}) 시세를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
+                return
+            st.warning(friendly_error(e, it["name"]) + " 이 종목은 제외하고 계산합니다.")
+            skipped.append(it["name"])
+            continue
         if d is None or d.empty or "Close" not in d:
-            st.error(f"{it['name']}: 선택한 기간에 데이터가 없습니다.")
-            return
+            if it.get("_bench"):
+                st.error(f"{it['name']}: 선택한 기간에 데이터가 없습니다.")
+                return
+            st.warning(f"{it['name']}: 선택한 기간에 데이터가 없어 제외하고 계산합니다.")
+            skipped.append(it["name"])
+            continue
         series[it["name"]] = d["Close"].dropna()
+    if skipped:  # 못 받은 종목만 빼고 나머지는 그대로 계산한다 (예전엔 종목 하나가 틀리면 결과 전체가 사라졌음)
+        items = [it for it in items if it["name"] not in skipped]
+        names = [it["name"] for it in items]
+        if len(items) < 2:
+            st.info("계산할 수 있는 종목이 2개 미만입니다. 종목을 다시 확인해 주세요.")
+            return
+        cap = max(cap, 1.0 / len(items))
     P = pd.concat(series, axis=1, join="inner").dropna()
     R = P.pct_change().dropna()
     if len(R) < 30:
-        st.warning(f"모든 종목이 겹치는 거래일이 {len(R)}일뿐입니다. 기간을 늘리거나 종목을 바꿔 보세요.")
+        st.warning(f"모든 종목이 겹치는 거래일이 {len(R)}일뿐입니다. 최소 30거래일(약 6주) 이상이 필요해요. 기간을 늘리거나 종목을 바꿔 보세요.")
         return
     Rs, m = R[names], R[bench_name]
 
@@ -191,6 +211,8 @@ def render_portfolio(listing: pd.DataFrame) -> None:
     # ---- 핵심 결과: 최대 샤프 포트폴리오
     o, e = pstat["최대 샤프 (최적)"], pstat["동일 비중"]
     ui.section("최적 포트폴리오 (최대 샤프)", f"{P.index[0]:%Y-%m-%d} ~ {P.index[-1]:%Y-%m-%d} · 공통 거래일 {len(R):,}일")
+    st.caption("주의: 같은 기간의 과거 데이터로 비중을 골랐기 때문에 이 기간의 성과는 실제보다 좋게 나옵니다(사후 최적화). "
+               "'연환산 기대수익률'은 과거 평균을 1년으로 환산한 값이라 기간이 짧을수록 크게 흔들리며, 아래 CAPM 기대수익률(시장 위험 기준)과 다를 수 있습니다.")
     ui.cards([
         ("연환산 기대수익률", _pct(o["c"]["mean_a"], True), f"동일 비중 {_pct(e['c']['mean_a'], True)}", o["c"]["mean_a"]),
         ("연환산 표준편차", _pct(o["c"]["std_a"]), f"동일 비중 {_pct(e['c']['std_a'])}"),
