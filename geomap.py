@@ -135,7 +135,7 @@ def _layout(fig, iso: str, gj) -> None:
     if iso == "USA":
         fig.update_geos(scope="usa", projection_type="albers usa", showland=True, landcolor="rgba(128,128,128,.10)",
                         showlakes=False, bgcolor="rgba(0,0,0,0)", subunitcolor="rgba(255,255,255,.6)")
-        h = 470
+        h = 620
     else:
         fig.update_geos(projection_type="mercator", lataxis_range=[33.0, 38.75], lonaxis_range=[125.0, 130.0],
                         showland=True, landcolor="rgba(128,128,128,.12)", showcountries=True, countrycolor="rgba(128,128,128,.4)",
@@ -252,7 +252,7 @@ def _label(basis: str, per: str, iso: str, idx: dict) -> tuple:
                                  "(장중엔 오늘 거래가 덜 쌓여 낮게 나올 수 있음)")
     if basis == "PER":
         return ("PER", "색 = 후행 PER, 나라 안 중앙값 대비 · 청록 = 싸다, 갈색 = 비싸다 · 구역 PER = Σ시가총액 ÷ Σ순이익 (적자 제외)")
-    return ("종합 점수", "색 = 기업 리서치 종합 점수 (6개월 상승 우세 정도, 50 = 중립) · 빨강 = 높음, 파랑 = 낮음")
+    return ("종합 점수", "색 = 기업 리서치 모델 점수 (과거 데이터로 계산한 참고 지표, 50 = 중립) · 빨강 = 높음, 파랑 = 낮음")
 
 
 # ----------------------------------------------------------------------
@@ -261,6 +261,14 @@ def _label(basis: str, per: str, iso: str, idx: dict) -> tuple:
 def _controls(iso: str, p: str, sectors_list: list) -> tuple:
     """(색 기준, 섹터, 날짜 슬라이더 기간 또는 None)."""
     basis = ui.seg("색 기준", gd.BASES, default="수익률", key=f"{p}_basis") or "수익률"
+    _inm = INDEX[iso][1]
+    _help = {"수익률": "고른 기간 동안 얼마나 올랐는지(빨강)·내렸는지(파랑)를 보여줍니다.",
+             "지수 대비": f"{_inm}보다 얼마나 더 올랐는지(빨강)·덜 올랐는지(파랑)를 보여줍니다.",
+             "거래대금 증가율": "최근 거래대금이 직전 20거래일 평균보다 얼마나 늘었는지 보여줍니다.",
+             "PER": "주가 ÷ 주당순이익. 이익에 비해 주가가 얼마나 비싼지 보여줍니다 (낮을수록 싼 편).",
+             "종합 점수": "기업 리서치의 모델 점수입니다. 과거 데이터로 계산한 참고 지표이며 투자 권유가 아닙니다 (50점 = 중립)."}.get(basis, "")
+    if _help:
+        st.caption(_help + (" 색이 없는 어두운 주는 해당 지표를 낼 종목이 없는 곳입니다." if iso == "USA" else ""))
     try:
         c1, c2 = st.columns([3, 2], vertical_alignment="center")
     except TypeError:
