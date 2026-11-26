@@ -533,6 +533,14 @@ def render_kr(snap: pd.DataFrame, per: str, close=None) -> None:
     except Exception as e:  # noqa: BLE001
         st.caption(f"본사 지역 정보를 불러오지 못했습니다: {e}")
         return
+    if inside.empty:  # 본사 지역을 하나도 못 찾았을 때 원인을 알 수 있게 숫자를 보여준다
+        try:
+            _rg = gd.kr_regions()
+            st.warning(f"본사 위치를 찾지 못했습니다. KRX 지역 정보 {int(_rg['Sido'].notna().sum()):,}/{len(_rg):,}곳, "
+                       f"DART 주소 {sum(1 for v in gd._addr_store().values() if v):,}곳{'' if key else ' (DART 키 없음)'}. 잠시 뒤 새로고침해 주세요.")
+        except Exception:  # noqa: BLE001
+            st.warning("본사 위치를 찾지 못했습니다. 잠시 뒤 새로고침해 주세요.")
+        return
     gj = gd.kr_geojson()
     how = (f"시·군·구 위치 {n_exact}/{len(inside)}곳 (DART 기업개황 주소)" if key else
            "시도 안에 흩어 찍음 · OpenDART 키를 넣으면 시·군·구까지 정확히 찍습니다")
