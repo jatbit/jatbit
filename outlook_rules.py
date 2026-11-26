@@ -101,7 +101,7 @@ def _verdict(score: float, n: int):
     if not n:
         return None
     x = score / n
-    return "상승 우세" if x >= CUT else ("하락 우세" if x <= -CUT else "중립")
+    return "지표 양호" if x >= CUT else ("지표 부진" if x <= -CUT else "중립")
 
 
 def _sig_txt(s) -> str:
@@ -235,7 +235,7 @@ RELIABLE_WIDTH = 20  # 80% 구간 폭이 이 점수 이하이면 한 점으로, 
 
 
 def score_label(x):
-    return "매수" if x >= 65 else ("약한 매수" if x >= 55 else ("중립·보유" if x > 45 else ("약한 매도" if x > 35 else "매도")))
+    return "높음" if x >= 65 else ("다소 높음" if x >= 55 else ("중간" if x > 45 else ("다소 낮음" if x > 35 else "낮음")))
 
 
 # ----------------------------------------------------------------------
