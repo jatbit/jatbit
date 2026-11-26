@@ -28,6 +28,9 @@
 | `ui.table_pick(df, key, **kw)` | 표에서 고른 행 번호 |
 | `ui.with_ctx(fn)` | 작업 스레드에서 Streamlit 캐시를 쓸 때 함수에 씌우기 |
 | `ui.UP` / `ui.DOWN` / `ui.FLAT` | 상승 빨강 · 하락 파랑 · 보합 |
+| `ui.url_page(이름)` + `ui.URL_SPECS` | 페이지 본문을 감싸 입력값을 주소창(`?q=…`)에 담고, 링크로 열면 그 값으로 시작 (새 입력을 주소에 담으려면 `URL_SPECS`에 추가) |
+| `ui.signed_style(df, 열들)` · `ui.updown(상승, 하락)` · `ui.verdict(문구, up/down)` | 플러스 빨강·마이너스 파랑 표 · 상승/하락 수 색 · 판단 상자 (초록은 쓰지 않음) |
+| `data_load.friendly_error(e, 이름)` · `similar_names` | 시세 오류를 쉬운 문구로 · 못 찾았을 때 비슷한 종목 안내 |
 
 ## 2. 파트별 파일
 
