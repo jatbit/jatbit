@@ -274,6 +274,8 @@ def _addr_store() -> dict:
 def _dart_addr(corp: str, key: str) -> str:
     q = urllib.parse.urlencode({"crtfc_key": key, "corp_code": corp})
     j = json.loads(_get(f"https://opendart.fss.or.kr/api/company.json?{q}", timeout=15).decode("utf-8"))
+    if j.get("status") in ("010", "011", "012", "020", "800", "900", "901"):  # 키 오류·한도 초과 등은 '주소 없음'으로 기억하지 않는다 (다음에 다시 받음)
+        raise RuntimeError("DART " + str(j.get("status")))
     return str(j.get("adres") or "") if j.get("status") == "000" else ""
 
 
