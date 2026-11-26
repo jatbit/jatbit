@@ -159,10 +159,10 @@ def _gauge_svg(title, d, reliable, sub="", px=132):
     r, sw, C = 44, 10, 2 * np.pi * 44
     lo, hi, mid = (max(0.0, min(100.0, d[k])) for k in ("lo", "hi", "mid"))
     if reliable:
-        col = "#1B9E5A" if mid >= 55 else ("#D9534F" if mid <= 45 else "#8A8F98")
+        col = "#E5484D" if mid >= 55 else ("#3B82F6" if mid <= 45 else "#8A8F98")
         lab, small = score_label(mid), "점"
     else:
-        col = "#1B9E5A" if lo >= 55 else ("#D9534F" if hi <= 45 else "#8A8F98")
+        col = "#E5484D" if lo >= 55 else ("#3B82F6" if hi <= 45 else "#8A8F98")
         lab, small = ("점수 높은 쪽" if lo >= 55 else ("점수 낮은 쪽" if hi <= 45 else "판단 보류")), f"{lo:.0f}–{hi:.0f}"
     arc = ""
     if mid > 0.5:
