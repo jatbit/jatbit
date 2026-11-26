@@ -56,3 +56,10 @@ def parse_periods(text: str, default=(5, 20, 60, 120), lo: int = 2, hi: int = 40
             if lo <= n <= hi and n not in out:
                 out.append(n)
     return sorted(out)[:max_n] or list(default)
+
+
+def sigma_gap(s: pd.Series, n: int = 20) -> pd.Series:
+    """이동평균에서 표준편차(σ) 몇 개만큼 떨어져 있는지: (종가 - n일 평균) ÷ n일 표준편차."""
+    m = s.rolling(n, min_periods=n).mean()
+    sd = s.rolling(n, min_periods=n).std(ddof=1)
+    return ((s - m) / sd.where(sd > 0)).astype(float)
