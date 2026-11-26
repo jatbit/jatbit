@@ -342,7 +342,7 @@ def _payoff_chart(code: str, u: dict, h_days: float, rng: float, u_hedged: dict 
     first_T = min([lg["T"] for lg in u["legs"]], default=None)
     curves = {"오늘": (pnl_at(u, xs, 0.0), COLORS["today"], "dot")}
     if u_hedged is not None and (u_hedged["legs"] or u_hedged["shares"] != u["shares"]):
-        curves["헷지 거래까지 넣으면 (오늘)"] = (pnl_at(u_hedged, xs, 0.0), "#5BB56E", "solid")
+        curves["헷지 거래까지 넣으면 (오늘)"] = (pnl_at(u_hedged, xs, 0.0), "#2BB3B1", "solid")
     if h_days > 0 and (first_T is None or abs(h_days / 365 - first_T) > 0.5 / 365):
         curves[f"{h_days:g}일 뒤"] = (pnl_at(u, xs, h_days / 365), COLORS["horizon"], "dash")
     if first_T is not None:
