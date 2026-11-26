@@ -112,9 +112,13 @@ def _research_rest(t, info: dict) -> dict:
 
 def _basic_info(t) -> dict:
     """시세(chart) 응답에 딸려 오는 메타데이터로 만든 최소한의 기업 정보. '_partial' 표시를 붙인다."""
+    prev_close = None
     try:
-        t.history(period="5d", auto_adjust=False)
+        h5 = t.history(period="5d", auto_adjust=False)
         hm = dict(getattr(t, "history_metadata", None) or t.get_history_metadata() or {})
+        cl = h5["Close"].dropna() if h5 is not None and len(h5) else None
+        if cl is not None and len(cl) >= 2:  # 전일 종가 = 마지막에서 두 번째 종가 (chartPreviousClose는 5일 전 값이라 쓰면 안 된다)
+            prev_close = float(cl.iloc[-2])
     except Exception:  # noqa: BLE001
         return {}
     if not hm:
@@ -122,7 +126,7 @@ def _basic_info(t) -> dict:
     out = {"longName": hm.get("longName"), "shortName": hm.get("shortName") or hm.get("symbol"),
            "quoteType": hm.get("instrumentType"), "currency": hm.get("currency"), "exchange": hm.get("exchangeName"),
            "currentPrice": hm.get("regularMarketPrice"), "regularMarketPrice": hm.get("regularMarketPrice"),
-           "previousClose": hm.get("chartPreviousClose") or hm.get("previousClose"),
+           "previousClose": prev_close or hm.get("previousClose"),
            "fiftyTwoWeekHigh": hm.get("fiftyTwoWeekHigh"), "fiftyTwoWeekLow": hm.get("fiftyTwoWeekLow"), "_partial": True}
     try:
         fi = t.fast_info
