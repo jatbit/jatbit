@@ -101,6 +101,9 @@ button[data-baseweb="tab"][aria-selected="true"] p { color: var(--ink); font-wei
   .kc, .mt { grid-template-columns: repeat(2, minmax(0,1fr)) !important; }
   .qh-p .px { font-size: 1.9rem; } .qh-n { font-size: 1.2rem; }
 }
+[data-testid="InputInstructions"] > span { display: none; }                      /* 'Press Enter to apply' 영문 안내를 한글로 */
+[data-testid="InputInstructions"]::after { content: "Enter로 적용"; font-size: .72rem; opacity: .75; }
+[data-testid="stPills"] div { flex-wrap: wrap; }                                  /* 좁은 화면에서 기간 버튼이 잘리지 않게 줄바꿈 */
 </style>
 """
 
@@ -165,6 +168,94 @@ def snapshot_state() -> None:
 
 
 # ----------------------------------------------------------------------
+# 주소창에 입력값 담기 (새로고침해도 유지, 링크로 공유)
+# ----------------------------------------------------------------------
+# 페이지 주소 이름 → [(주소 파라미터, 입력 키, 종류)]. 종류: str · int · list(쉼표) · dates(시작_끝)
+URL_SPECS = {
+    "chart": [("q", "single_query", "str"), ("per", "single_period", "dates"), ("type", "single_type", "str"),
+              ("basis", "single_basis", "str"), ("ind", "single_ind", "list")],
+    "research": [("t", "rs_ticker", "str")],
+    "screener": [("u", "sc_uni", "str"), ("n", "sc_topn", "int"), ("p", "sc_preset", "str"), ("cap", "sc_capmin", "int")],
+    "compare": [("s", "cmp_selected", "list"), ("x", "cmp_extra", "str"), ("per", "cmp_period", "dates")],
+    "portfolio": [("s", "pf_selected", "list"), ("x", "pf_extra", "str"), ("per", "pf_period", "dates")],
+    "market": [("c", "mk_country", "str"), ("w", "mk_world_per", "str")],
+    "backtest": [("c", "bt_codes", "str"), ("src", "bt_src", "str")],
+}
+
+
+def _url_parse(raw: str, kind: str):
+    if kind == "int":
+        return int(float(raw))
+    if kind == "list":
+        return [x for x in raw.split("|") if x]
+    if kind == "dates":
+        a, b = raw.split("_")
+        return (date.fromisoformat(a), date.fromisoformat(b))
+    return raw
+
+
+def _url_fmt(v, kind: str) -> str:
+    if v is None or v == "" or v == []:
+        return ""
+    if kind == "list":
+        return "|".join(str(x) for x in v)
+    if kind == "dates":
+        return f"{v[0].isoformat()}_{v[1].isoformat()}" if isinstance(v, (tuple, list)) and len(v) == 2 else ""
+    return str(v)
+
+
+def url_load(page: str) -> None:
+    """페이지를 처음 열 때, 주소에 담긴 값으로 입력칸을 채운다 (이미 입력한 값이 있으면 건드리지 않음)."""
+    flag = f"_url_loaded_{page}"
+    if st.session_state.get(flag):
+        return
+    st.session_state[flag] = True
+    try:
+        qp = st.query_params
+        for param, key, kind in URL_SPECS.get(page, []):
+            if param in qp and key not in st.session_state:
+                try:
+                    st.session_state[key] = _url_parse(str(qp[param]), kind)
+                except Exception:  # noqa: BLE001  (잘못된 주소 값은 무시)
+                    pass
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def url_write(page: str) -> None:
+    """실행이 끝날 때, 지금 입력값을 주소창에 반영한다 (이 페이지와 상관없는 파라미터는 지운다)."""
+    try:
+        qp = st.query_params
+        spec = URL_SPECS.get(page, [])
+        want = {}
+        for param, key, kind in spec:
+            sv = _url_fmt(st.session_state.get(key), kind)
+            if sv:
+                want[param] = sv
+        for k in list(qp.keys()):
+            if k not in want:
+                del qp[k]
+        for k, v in want.items():
+            if qp.get(k) != v:
+                qp[k] = v
+    except Exception:  # noqa: BLE001
+        pass
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def url_page(page: str):
+    """with ui.url_page("chart"): 페이지 본문 — 열 때 주소 값을 읽고, 끝날 때 주소에 담는다."""
+    url_load(page)
+    try:
+        yield
+    finally:
+        url_write(page)
+
+
+# ----------------------------------------------------------------------
 # 지연 로딩 탭 · 더보기
 # ----------------------------------------------------------------------
 def lazy_tabs(labels: list, key: str) -> list:
@@ -221,6 +312,28 @@ def quote_header(name: str, code: str = "", meta: str = "", price: str = "", chg
     st.markdown(out.replace("$", "&#36;"), unsafe_allow_html=True)
 
 
+class Raw(str):
+    """cards 값에 넣으면 HTML 그대로 쓴다 (직접 만든 span만 넣을 것)."""
+
+
+def updown(up: int, dn: int) -> "Raw":
+    """'399 / 465' — 상승 수는 빨강, 하락 수는 파랑."""
+    return Raw(f'<span class="up">{up:,}</span> / <span class="down">{dn:,}</span>')
+
+
+def verdict(msg: str, kind: str) -> None:
+    """판단 상자: up 빨강(상승) · down 파랑(하락) · 그 밖에는 기본 안내 상자. msg는 **굵게** 만 지원."""
+    if kind not in ("up", "down"):
+        st.info(msg)
+        return
+    c = UP if kind == "up" else DOWN
+    body = html.escape(msg)
+    import re as _re
+    body = _re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", body)
+    st.markdown(f'<div style="border-left:4px solid {c};background:{c}1F;padding:.65rem .9rem;border-radius:6px;margin:.3rem 0">{body}</div>'
+                .replace("$", "&#36;"), unsafe_allow_html=True)
+
+
 def cards(items: list, cols: int = 4) -> None:
     """지표 카드 격자. items: (라벨, 값[, 보조 문구[, 등락값(색)]]). 라벨 옆 ?에 설명."""
     from glossary import CSS, icon, tip
@@ -233,7 +346,7 @@ def cards(items: list, cols: int = 4) -> None:
         right = " qr" if cols > 1 and (i % cols) >= cols / 2 else ""
         vcls = f" {_cls(sign)}" if sign is not None else ""
         cells += (f'<div class="kc-c{right}"><div class="kc-l"><span>{html.escape(lab)}</span>{icon(tip(lab))}</div>'
-                  f'<div class="kc-v{vcls}">{html.escape(str(val))}</div>'
+                  f'<div class="kc-v{"" if isinstance(val, Raw) else vcls}">{val if isinstance(val, Raw) else html.escape(str(val))}</div>'
                   + (f'<div class="kc-s">{html.escape(str(sub))}</div>' if sub else "") + "</div>")
     st.markdown((CSS + f'<div class="kc" style="grid-template-columns:repeat({cols},minmax(0,1fr))">{cells}</div>').replace("$", "&#36;"),
                 unsafe_allow_html=True)
@@ -383,6 +496,26 @@ def new_click(points: list, key: str):
         return None
     st.session_state[sk] = (cn, i)
     return int(cn or 0), int(i)
+
+
+def signed_style(df, cols):
+    """표에서 지정한 숫자 열을 플러스 빨강 · 마이너스 파랑으로 칠한다 (Styler). 실패하면 원래 표를 돌려준다."""
+    try:
+        cols = [c for c in cols if c in df.columns]
+
+        def _f(v):
+            try:
+                v = float(v)
+            except Exception:  # noqa: BLE001
+                return ""
+            if v != v or v == 0:
+                return ""
+            return f"color:{UP if v > 0 else DOWN}"
+
+        sty = df.style
+        return (sty.map if hasattr(sty, "map") else sty.applymap)(_f, subset=cols)
+    except Exception:  # noqa: BLE001
+        return df
 
 
 def table_pick(df, key: str, **kw):
