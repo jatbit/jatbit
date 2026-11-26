@@ -397,7 +397,7 @@ def render_peers(ticker: str, R: dict, domestic: bool = False, code: str | None 
             continue
         v = T.at[ticker, m] if ticker in T.index else np.nan
         rk = ranks[m]
-        col = "#5BB56E" if np.isfinite(rk) and rk >= 66 else ("#E5534B" if np.isfinite(rk) and rk <= 33 else "#B0B4BA")
+        col = "#E5484D" if np.isfinite(rk) and rk >= 66 else ("#3B82F6" if np.isfinite(rk) and rk <= 33 else "#B0B4BA")
         bar = (f'<div style="height:5px;background:rgba(128,128,128,.2);border-radius:3px;margin-top:3px">'
                f'<div style="width:{rk if np.isfinite(rk) else 0:.0f}%;height:5px;background:{col};border-radius:3px"></div></div>')
         cells += (f'<div style="min-width:0"><div style="font-size:0.78rem"><span style="opacity:.7">{m}</span>{icon(tip(m))}</div>'
