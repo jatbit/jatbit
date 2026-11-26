@@ -303,8 +303,8 @@ def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool, F=None, s
         r["기간"] = r["period"].map(lambda p: labels.get(p, p)) if "period" in r else [str(i) for i in range(len(r))]
         r = r.iloc[::-1]
         fig = go.Figure()
-        for col, nm, color in [("strongBuy", "적극 매수", "#1B7F3B"), ("buy", "매수", "#5BB56E"), ("hold", "보유", "#B0B4BA"),
-                               ("sell", "매도", "#E8875B"), ("strongSell", "적극 매도", "#C93C3C")]:
+        for col, nm, color in [("strongBuy", "적극 매수", "#C53030"), ("buy", "매수", "#E5484D"), ("hold", "보유", "#B0B4BA"),
+                               ("sell", "매도", "#3B82F6"), ("strongSell", "적극 매도", "#1E4FD8")]:
             fig.add_trace(go.Bar(y=r["기간"], x=r[col], name=nm, orientation="h", marker_color=color,
                                  hovertemplate=nm + " %{x}명<extra></extra>"))
         fig.update_layout(barmode="stack", height=200, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
