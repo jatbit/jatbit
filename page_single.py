@@ -5,11 +5,11 @@ from common import *  # noqa: F401,F403
 # ======================================================================
 # 탭 1: 주가 조회
 # ======================================================================
-IND_OPTS = ["이동평균선", "볼린저밴드", "RSI", "MACD", "일목균형표", "피보나치"]
+IND_OPTS = ["이동평균선", "볼린저밴드", "RSI", "MACD", "일목균형표", "피보나치", "이동평균 이격(σ)"]
 IND_DEFAULTS = {"single_ma_n": "5, 20, 60, 120", "single_bb_n": 20, "single_bb_k": 2.0, "single_rsi_n": 14, "single_rsi_hi": 70,
                 "single_rsi_lo": 30, "single_macd_f": 12, "single_macd_s": 26, "single_macd_g": 9,
                 "single_ichi_t": 9, "single_ichi_k": 26, "single_ichi_s": 52, "single_ichi_d": 26,
-                "single_fib_lv": "0, 0.236, 0.382, 0.5, 0.618, 0.786, 1, 1.618, 2.618", "single_fib_sens": 10.0, "single_fib_nth": 1}
+                "single_fib_lv": "0, 0.236, 0.382, 0.5, 0.618, 0.786, 1, 1.618, 2.618", "single_fib_sens": 10.0, "single_fib_nth": 1, "single_sg_n": 20}
 
 
 def _clean_ind_state() -> None:
@@ -79,6 +79,9 @@ def _ind_settings(inds: list) -> dict:
             F["dates"] = [col.date_input(nm, value=None, key=f"single_fib_d{i}") for i, (col, nm) in enumerate(zip(cols, names))]
             F["sens"], F["nth"] = IND_DEFAULTS["single_fib_sens"], 1
         P["fib"] = F
+    if IND_OPTS[6] in inds:
+        P["sg_n"] = int(st.number_input("이격 기준 이동평균 기간 (일)", 5, 400, IND_DEFAULTS["single_sg_n"], step=1, key="single_sg_n",
+                                        help="종가가 이 기간 이동평균보다 이 기간 표준편차의 몇 배만큼 위·아래인지 계산합니다"))
     st.button("기본값으로 되돌리기", key="single_ind_reset", on_click=_reset_ind)
     return P
 
@@ -113,6 +116,61 @@ def _indicator_base(code: str, start_d, end_d, weekly: bool, longest: int = 120)
 
 
 
+def _sigma_chart(s: pd.Series, n: int, x0, title: str):
+    import ta
+
+    g = ta.sigma_gap(s, n)
+    g = g[g.index >= x0].dropna()
+    if g.empty:
+        return None, float("nan")
+    cur = float(g.iloc[-1])
+    f = go.Figure(go.Scatter(x=g.index, y=g, mode="lines", line=dict(color="#4A5568", width=1.4),
+                             hovertemplate="%{x|%Y-%m-%d}<br>%{y:+.2f}σ<extra></extra>", name=title))
+    for lv, col, dash in ((2, UP_COLOR, "dot"), (1, "#A0AEC0", "dot"), (0, "#718096", "solid"), (-1, "#A0AEC0", "dot"), (-2, DOWN_COLOR, "dot")):
+        f.add_hline(y=lv, line_width=1, line_dash=dash, line_color=col)
+    f.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])], hoverformat="%Y-%m-%d")
+    f.update_yaxes(title_text="σ", tickvals=[-3, -2, -1, 0, 1, 2, 3], ticksuffix="σ", zeroline=False)
+    f.update_layout(height=230, margin=dict(l=10, r=10, t=28, b=10), font=dict(size=11), showlegend=False,
+                    title=dict(text=title, font=dict(size=13), x=0.0))
+    return f, cur
+
+
+def _sigma_state(v: float) -> str:
+    if v != v:
+        return "-"
+    a = abs(v)
+    return "평균 부근" if a < 1 else ("평균보다 높음" if v > 0 else "평균보다 낮음") if a < 2 else ("평균보다 크게 높음" if v > 0 else "평균보다 크게 낮음")
+
+
+def _sigma_section(chosen: dict, start_d, end_d, n: int) -> None:
+    """이동평균 이격(σ): 종목은 종목대로, 소속 시장 지수는 지수대로 따로 보여준다."""
+    st.markdown(f"**이동평균 이격 ({n}일 기준, σ)**")
+    bcode, bname = benchmark_for(chosen.get("market", ""), chosen["domestic"])
+    items = [(chosen["label"].split(" (")[0], chosen["code"], "종목")]
+    if bcode != chosen["code"]:
+        items.append((bname, bcode, "지수"))
+    back = (pd.Timestamp(start_d) - pd.Timedelta(days=int(n * 1.5) + 60)).date().isoformat()
+    cols = st.columns(len(items))
+    for col, (nm, code, kind) in zip(cols, items):
+        with col:
+            try:
+                d = load_prices(code, back, end_d.isoformat())
+                s = d["Close"].dropna() if d is not None and not d.empty else None
+            except Exception:  # noqa: BLE001
+                s = None
+            if s is None or len(s) <= n:
+                st.caption(f"{nm}: 이동평균을 계산할 시세가 부족합니다.")
+                continue
+            f, cur = _sigma_chart(s, n, pd.Timestamp(start_d), f"{kind} · {nm}")
+            if f is None:
+                st.caption(f"{nm}: 조회 기간 안에 계산된 값이 없습니다.")
+                continue
+            st.metric(f"{nm} 현재", f"{cur:+.2f}σ", _sigma_state(cur), delta_color="off")
+            st.plotly_chart(f, use_container_width=True)
+    st.caption(f"(종가 − {n}일 이동평균) ÷ {n}일 가격 표준편차. 0 = 이동평균 위치, ±2σ 밖은 최근 {n}일 흐름에서 많이 벗어난 상태입니다. "
+               "과거 데이터로 계산한 참고 값이며 매매 판단이 아닙니다.")
+
+
 def render_single(listing: pd.DataFrame) -> None:
     c1, c2 = _row([5, 1])
     query = c1.text_input(
@@ -124,7 +182,7 @@ def render_single(listing: pd.DataFrame) -> None:
             chart_type = st.radio("차트 종류", ["선", "캔들"], horizontal=True, key="single_type")
             basis = st.radio("표시 기준", ["주가", "수익률"], horizontal=True, key="single_basis")
             _clean_ind_state()
-            inds = st.multiselect("보조지표", IND_OPTS, key="single_ind", placeholder="이동평균선, 볼린저밴드, RSI, MACD, 일목균형표, 피보나치")
+            inds = st.multiselect("보조지표", IND_OPTS, key="single_ind", placeholder="이동평균선, 볼린저밴드, RSI, MACD, 일목균형표, 피보나치, 이동평균 이격(σ)")
             IP = _ind_settings(inds)
             rate_sel = rate_controls("single")
     period = period_input("single_period")
@@ -405,6 +463,8 @@ def render_single(listing: pd.DataFrame) -> None:
     st.plotly_chart(fig, use_container_width=True)
     if weekly:
         st.caption("기간이 길어 캔들을 주봉(1주 = 1개)으로 묶어서 표시합니다. 위 지표는 일별 데이터 기준입니다.")
+    if IND_OPTS[6] in inds and "sg_n" in IP:
+        _sigma_section(chosen, start_d, end_d, IP["sg_n"])
 
     exp, op = ui.more("상세 통계 더보기 · 변동성 · 샤프비율 · CAPM · VaR", key="single_more_stats")
     if op:
