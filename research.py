@@ -11,6 +11,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+import data_load
 import ui
 
 from options_data import OPT_PRESETS, is_us_ticker
@@ -65,7 +66,8 @@ def render_research() -> None:
             st.error(f"국내 종목 목록을 불러오지 못했습니다: {e}")
             return
         if not cands:
-            st.warning(f"'{q}'에 해당하는 국내 상장 종목을 찾지 못했습니다.")
+            st.warning(f"'{q}'에 해당하는 국내 상장 종목을 찾지 못했습니다. 국내 종목은 이름이나 6자리 코드(예: 삼성전자, 005930), "
+                       "미국 종목은 티커(예: AAPL)로 입력해 주세요.")
             return
         if len(cands) > 1 and cands[0]["name"] != q and not re.fullmatch(r"\d{6}", q):
             labels = [f"{c['name']} ({c['code']}, {c['market']})" for c in cands]
@@ -86,7 +88,12 @@ def render_research() -> None:
     try:
         R = load_research(ticker)
         if (R.get("info") or {}).get("_partial"):
-            st.caption("Yahoo가 지금 기업 정보 요청을 막고 있어 이름·시세 위주로 보여줍니다. 잠시 후 다시 열면 모든 지표가 채워집니다.")
+            _c1, _c2 = st.columns([4, 1])
+            _c1.caption("Yahoo가 지금 기업 정보 요청을 막고 있어 이름·시세 위주로 보여줍니다. '-'로 보이는 항목은 데이터가 없는 게 아니라 "
+                        "아직 가져오지 못한 것입니다. 잠시 뒤 '다시 시도'를 눌러 보세요.")
+            if _c2.button("다시 시도", key="rs_retry", use_container_width=True):
+                _load_research_partial.clear()
+                st.rerun()
     except Exception as e:  # noqa: BLE001
         if domestic and ticker.endswith(".KS"):  # 코스피·코스닥 구분이 틀린 경우 다른 쪽으로 다시 시도
             try:
@@ -101,6 +108,25 @@ def render_research() -> None:
     info = R["info"]
     if domestic:  # 상승·하락 판단의 업종 유형 판별용 (KRX 업종명)
         R["_ksec"] = " ".join(x for x in (c.get("sector"), c.get("industry")) if x)
+    if domestic and code:  # 국내 종목의 현재가·전일 대비·시가총액은 스크리너와 같은 KRX 값으로 맞춘다 (Yahoo 값과 어긋나는 일 방지)
+        try:
+            _k = data_load.krx_listing_raw()
+            _k = _k[_k["Code"].astype(str) == str(code)] if "Code" in _k.columns else _k[_k["Symbol"].astype(str) == str(code)]
+            if len(_k):
+                _r = _k.iloc[0]
+                _c, _chg = _num(_r.get("Close")), _num(_r.get("Changes"))
+                if _c:
+                    info = dict(info)
+                    info["currentPrice"] = _c
+                    info["regularMarketPrice"] = _c
+                    if _chg is not None:
+                        info["previousClose"] = _c - _chg
+                        info["regularMarketPreviousClose"] = _c - _chg
+                    if _num(_r.get("Marcap")):
+                        info["marketCap"] = _num(_r.get("Marcap"))
+                    R["info"] = info
+        except Exception:  # noqa: BLE001
+            pass
     ccy = info.get("currency") or ("KRW" if domestic else "USD")
     money.set_cur(ccy)
     cur = "$" if ccy == "USD" else ("₩" if ccy == "KRW" else "")
@@ -321,10 +347,10 @@ def _render_main(ticker: str, R: dict, info: dict, cur: str, ko: bool, F=None, s
         st.caption("재무제표를 불러오지 못했습니다 (ETF이거나 데이터 제공처 응답 지연).")
 
     # ---- 5-1. 재무비율·주가·PER 그래프 (직접 선택)
-    try:  # 매수·매도 원형 점수 3개 (재무비율 그래프 섹션 바로 위)
+    try:  # 모델 점수 원형 3개 (재무비율 그래프 섹션 바로 위)
         render_score_gauges(sec, R, ticker, n_eps, src)
     except Exception as e:  # noqa: BLE001
-        st.caption(f"매수·매도 점수를 계산하지 못했습니다 ({e}).")
+        st.caption(f"모델 점수를 계산하지 못했습니다 ({e}).")
     exp, op = ui.more("재무비율 · 주가 · 밸류에이션 그래프 더보기 (직접 골라서 겹쳐 보기)", key=f"rs_more_combo_{ticker}")
     if op:
         with exp:
