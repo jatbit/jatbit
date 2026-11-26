@@ -17,8 +17,8 @@ from rates import add_rates, rate_controls
 
 
 LINE_COLOR = "#2B6CB0"
-UP_COLOR = "#D64545"      # 국내 관행: 상승 = 빨강
-DOWN_COLOR = "#2B6CB0"    # 하락 = 파랑
+UP_COLOR = "#E5484D"      # 국내 관행: 상승 = 빨강
+DOWN_COLOR = "#3B82F6"    # 하락 = 파랑
 VOLUME_COLOR = "#A0AEC0"
 SERIES_COLORS = ["#2B6CB0", "#D64545", "#2F855A", "#B7791F", "#6B46C1", "#0987A0", "#DD6B20", "#4A5568"]
 
@@ -165,6 +165,20 @@ def _cached(code: str, b: str):
     return None if best is None else best[1]
 
 
+_NOT_FOUND = ("404", "not found", "no data found", "delisted", "no price data", "symbol may be")
+
+
+def friendly_error(e, name: str = "") -> str:
+    """시세 조회 오류를 일반 사용자가 알아볼 말로 바꾼다 (내부 주소·영문 오류 문구는 숨김)."""
+    t = str(e).lower()
+    who = f"'{name}'" if name else "이 종목"
+    if any(x in t for x in _NOT_FOUND):
+        return f"{who}을(를) 찾을 수 없습니다. 철자를 확인해 주세요. (예: 삼성전자, 005930, AAPL)"
+    if "429" in t or "too many" in t or "rate limit" in t:
+        return f"{who}: 요청이 몰려 잠시 막혔습니다. 1분쯤 뒤에 다시 시도해 주세요."
+    return f"{who}의 시세를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요."
+
+
 def _fetch_prices(code: str, b: str, S: dict | None = None) -> pd.DataFrame:
     """일시적인 네트워크 오류로 데이터가 빠지지 않도록 최대 3번까지 다시 시도한다. (성공한 결과만 저장)"""
     last_err = None
@@ -188,6 +202,8 @@ def _fetch_prices(code: str, b: str, S: dict | None = None) -> pd.DataFrame:
             return d
         except Exception as e:  # noqa: BLE001
             last_err = e
+            if any(x in str(e).lower() for x in _NOT_FOUND):  # 없는 종목은 다시 시도해도 같다 (몇 초만 낭비)
+                break
             time.sleep(1.5 * (attempt + 1))
     raise last_err
 
@@ -300,6 +316,17 @@ def _futures_candidate(t: str) -> dict:
     return {"code": t, "label": label, "name": nm, "domestic": False, "market": "US"}
 
 
+def similar_names(query: str, listing: pd.DataFrame, n: int = 4) -> list:
+    """못 찾았을 때 보여줄 비슷한 종목 이름 (오타 안내용)."""
+    import difflib
+
+    try:
+        names = listing.sort_values("Marcap", ascending=False, na_position="last")["Name"].astype(str).tolist()
+        return difflib.get_close_matches(query.strip(), names, n=n, cutoff=0.5)
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def find_candidates(query: str, listing: pd.DataFrame) -> list[dict]:
     """검색어로 종목 후보를 찾는다. (국내: 이름/코드, 해외: 티커)"""
     q = query.strip()
@@ -309,6 +336,9 @@ def find_candidates(query: str, listing: pd.DataFrame) -> list[dict]:
     by_code = listing[listing["Code"] == q]
     exact = listing[listing["Name"] == q]
     partial = listing[listing["Name"].str.contains(q, case=False, regex=False)]
+    if "Marcap" in partial.columns:  # 보통주 먼저, 시가총액 큰 순 ('현대차'를 치면 우선주보다 현대차가 먼저)
+        partial = partial.assign(_pf=~partial["Code"].astype(str).str.endswith("0")).sort_values(
+            ["_pf", "Marcap"], ascending=[True, False], na_position="last").drop(columns="_pf")
     found = pd.concat([by_code, exact, partial]).drop_duplicates(subset="Code")
 
     candidates = [
