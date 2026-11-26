@@ -45,7 +45,28 @@ def _quotes_raw() -> pd.DataFrame:
     d = yf.download(syms, period="2y", interval="1d", progress=False, auto_adjust=False, threads=True)
     close = d["Close"] if isinstance(d.columns, pd.MultiIndex) else d[["Close"]]
     close.index = pd.to_datetime(close.index).tz_localize(None) if getattr(close.index, "tz", None) else pd.to_datetime(close.index)
-    return close.sort_index()
+    close = close.sort_index()
+    return _krx_index_fix(close)
+
+
+def _krx_index_fix(close: pd.DataFrame) -> pd.DataFrame:
+    """Yahoo의 코스피·코스닥 일봉은 하루 이틀 늦게 올라오는 때가 있어, KRX 일봉(FinanceDataReader)으로 최근 구간을 덮어쓴다."""
+    try:
+        import FinanceDataReader as fdr
+
+        start = (pd.Timestamp.now(tz="Asia/Seoul").tz_localize(None) - pd.Timedelta(days=20)).strftime("%Y-%m-%d")
+        for sym, code in (("^KS11", "KS11"), ("^KQ11", "KQ11")):
+            if sym not in close.columns:
+                continue
+            k = fdr.DataReader(code, start)["Close"].dropna()
+            k.index = pd.to_datetime(k.index).tz_localize(None) if getattr(k.index, "tz", None) else pd.to_datetime(k.index)
+            if k.empty:
+                continue
+            close = close.reindex(close.index.union(k.index)).sort_index()
+            close.loc[k.index, sym] = k.values
+    except Exception:  # noqa: BLE001  KRX 쪽이 안 되면 야후 값을 그대로 쓴다
+        pass
+    return close
 
 
 def load_krx_snapshot() -> pd.DataFrame:  # 캐시는 krx_listing_raw (뒤에서 새로 고침)가 맡음
