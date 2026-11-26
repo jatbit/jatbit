@@ -280,7 +280,7 @@ def render_insider(ticker: str, R: dict) -> None:
         h = h[h.index >= now - pd.DateOffset(months=int(months) + 1)]
         f = go.Figure(go.Scatter(x=h.index, y=h.values, name="주가", line=dict(color="#888", width=1.5),
                                  hovertemplate="%{x|%Y-%m-%d} %{y:,.2f}<extra></extra>"))
-        for code, nm, color, sym in (("P", "장내 매수", "#1B9E4B", "triangle-up"), ("S", "장내 매도", "#E5534B", "triangle-down")):
+        for code, nm, color, sym in (("P", "장내 매수", "#E5484D", "triangle-up"), ("S", "장내 매도", "#3B82F6", "triangle-down")):
             x = ps[ps["code"] == code].groupby(["date", "owner"]).agg(value=("value", "sum"), shares=("shares", "sum"),
                                                                     role=("role", "first"), plan=("plan", "max")).reset_index()
             if x.empty:
