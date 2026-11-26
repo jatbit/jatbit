@@ -244,9 +244,14 @@ def _sector_map() -> pd.DataFrame:
     return sectors.kr_sector_map()[0]
 
 
-# 시장 지도 색: 0% 회색 → ±30%까지 서서히 진해지고, ±30% 이상은 가장 진한 빨강·파랑으로 고정 (일일 등락 제한폭 기준)
+# 시장 지도 색: 0% 회색 → ±30%까지 (작은 등락도 보이게 곡선으로) 진해지고, ±30% 이상은 가장 진한 빨강·파랑으로 고정 (일일 등락 제한폭 기준)
 HEAT_LIM = 30.0
 HEAT_SCALE = [[0, "#0033CC"], [0.5, "#41454F"], [1, "#D4000F"]]
+
+
+def _heat_pos(v: float) -> float:
+    """등락률 → 색 위치(0~1). 제곱근 곡선: 작은 등락도 상승·하락 색이 구분되고, 30%에서 가장 진해진다."""
+    return (min(abs(v), HEAT_LIM) / HEAT_LIM) ** 0.5
 
 
 def _treemap(m: pd.DataFrame, title: str, sub: str, money_fmt, height: int = 560) -> None:
@@ -280,7 +285,7 @@ def _treemap(m: pd.DataFrame, title: str, sub: str, money_fmt, height: int = 560
         customdata=[[float(c), t, p] for c, t, p in zip(chg, cap_txt, px_txt)],
         texttemplate="<b>%{label}</b><br>%{customdata[0]:+.2f}%",
         hovertemplate="<b>%{label}</b><br>등락률 %{customdata[0]:+.2f}%<br>시가총액 %{customdata[1]}<br>%{customdata[2]}<extra></extra>",
-        marker=dict(colors=[float(x) for x in np.clip(chg, -HEAT_LIM, HEAT_LIM)], cmin=-HEAT_LIM, cmax=HEAT_LIM, showscale=False,
+        marker=dict(colors=[float(np.sign(x)) * _heat_pos(float(x)) for x in chg], cmin=-1, cmax=1, showscale=False,
                     colorscale=HEAT_SCALE,
                     line=dict(width=1, color="rgba(0,0,0,0.35)")),
         tiling=dict(pad=1), pathbar=dict(visible=True), maxdepth=4, textfont=dict(color="white"),
