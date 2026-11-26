@@ -145,10 +145,12 @@ def _sigma_state(v: float) -> str:
 def _sigma_section(chosen: dict, start_d, end_d, n: int) -> None:
     """이동평균 이격(σ): 종목은 종목대로, 소속 시장 지수는 지수대로 따로 보여준다."""
     st.markdown(f"**이동평균 이격 ({n}일 기준, σ)**")
-    bcode, bname = benchmark_for(chosen.get("market", ""), chosen["domestic"])
+    bcode, bname = benchmark_for(chosen.get("market", ""), chosen["domestic"], chosen["code"])
     items = [(chosen["label"].split(" (")[0], chosen["code"], "종목")]
     if bcode != chosen["code"]:
         items.append((bname, bcode, "지수"))
+    if not chosen["domestic"] and "DJI" not in (bcode, chosen["code"]):  # 미국 종목은 다우존스도 같이
+        items.append(("다우존스", "DJI", "지수"))
     back = (pd.Timestamp(start_d) - pd.Timedelta(days=int(n * 1.5) + 60)).date().isoformat()
     cols = st.columns(len(items))
     for col, (nm, code, kind) in zip(cols, items):
@@ -209,7 +211,7 @@ def render_single(listing: pd.DataFrame) -> None:
         chosen = candidates[0]
 
     # 종목과 CAPM 벤치마크 지수를 동시에 받아 둔다 (종목 하나는 한 번만 받고 기간·지표·52주는 잘라 씀)
-    prefetch_prices([chosen["code"], benchmark_for(chosen.get("market", ""), chosen["domestic"])[0]],
+    prefetch_prices([chosen["code"], benchmark_for(chosen.get("market", ""), chosen["domestic"], chosen["code"])[0]],
                     min(start_d, kst_today() - timedelta(days=372)).isoformat())
     try:
         df = load_prices(chosen["code"], start_d.isoformat(), end_d.isoformat())
@@ -470,7 +472,7 @@ def render_single(listing: pd.DataFrame) -> None:
     if op:
         with exp:
             rf, rf_label = risk_free_for(domestic, df.index[-1].date())
-            show_stats(df, rf, rf_label, benchmark_for(chosen.get("market", ""), domestic))
+            show_stats(df, rf, rf_label, benchmark_for(chosen.get("market", ""), domestic, chosen["code"]))
             r_d = df["Close"].dropna().pct_change().dropna()
             if len(r_d) >= 20:
                 st.markdown("**VaR · ES (1일 손실률)**")
