@@ -101,7 +101,7 @@ def _combo_chart(sec, R: dict, ticker: str, px, n_eps, src: str = "SEC 10-K") ->
     end = pd.Timestamp(period[1]) + pd.Timedelta(days=1) if period else None
     if rt is not None and period:
         rt = rt[[c for c in rt.columns if start <= pd.Timestamp(c) <= end]] if any(start <= pd.Timestamp(c) <= end for c in rt.columns) else rt
-    palette = ["#4C9BE8", "#F2A93B", "#E5534B", "#5BB56E", "#9B6FD6", "#2BB3B1", "#D97AB0", "#8C8C8C", "#C9A227", "#3D7DCA"]
+    palette = ["#4C9BE8", "#F2A93B", "#E5534B", "#7C8DB5", "#9B6FD6", "#2BB3B1", "#D97AB0", "#8C8C8C", "#C9A227", "#3D7DCA"]
     fig = go.Figure()
     ci = 0
     for k in sel:
