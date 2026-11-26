@@ -164,10 +164,17 @@ def render_backtest(load_prices, find_candidates, listing, risk_free_for) -> Non
         base = sets.get("최대 샤프 (최적)") or [1 / len(items)] * len(items)
         ed = st.data_editor(pd.DataFrame({"종목": names, "비중(%)": [round(x * 100, 1) for x in base]}), hide_index=True,
                             disabled=["종목"], key=f"bt_w_{'|'.join(names)}", use_container_width=True)
-        wv = pd.to_numeric(ed["비중(%)"], errors="coerce").fillna(0).clip(lower=0).values
+        _raw = pd.to_numeric(ed["비중(%)"], errors="coerce").fillna(0)
+        wv = _raw.clip(lower=0).values
         if wv.sum() > 0:
             sets["직접 입력"] = list(wv / wv.sum())
-            st.caption(f"합계 {wv.sum():.1f}% → 100%로 맞춰서 사용합니다.")
+            st.caption(f"합계 {wv.sum():.1f}% → 100%로 맞춰서 사용합니다."
+                       + (" 음수는 0으로 처리됩니다 (공매도는 지원하지 않아요)." if (_raw < 0).any() else ""))
+            _sig = tuple(round(float(x), 4) for x in wv)  # 표를 고치면 아래 '비교할 비중'에 '직접 입력'을 자동으로 넣는다
+            if st.session_state.get("_bt_wsig") not in (None, _sig):
+                _cur = [x for x in st.session_state.get("bt_sets", []) if x in sets]
+                st.session_state["bt_sets"] = _cur + (["직접 입력"] if "직접 입력" not in _cur else [])
+            st.session_state["_bt_wsig"] = _sig
     pick = st.multiselect("비교할 비중", list(sets), default=list(sets)[:3], key="bt_sets")
     if not pick:
         st.info("비교할 비중을 하나 이상 고르세요.")
@@ -326,7 +333,7 @@ def render_backtest(load_prices, find_candidates, listing, risk_free_for) -> Non
             tbl = pd.DataFrame({"y": mr.index.year, "m": mr.index.month, "r": mr.values * 100}).pivot(index="y", columns="m", values="r")
             tbl = tbl.reindex(columns=range(1, 13))
             z = tbl.values
-            hm = go.Figure(go.Heatmap(z=z, x=[f"{m}월" for m in range(1, 13)], y=[str(y) for y in tbl.index], colorscale="RdYlGn", zmid=0,
+            hm = go.Figure(go.Heatmap(z=z, x=[f"{m}월" for m in range(1, 13)], y=[str(y) for y in tbl.index], colorscale=[[0,"#3B82F6"],[0.5,"#E6E3DC"],[1,"#E5484D"]], zmid=0,
                                       text=[[f"{x:+.1f}" if np.isfinite(x) else "" for x in row] for row in z], texttemplate="%{text}",
                                       hovertemplate="%{y}년 %{x} %{z:+.2f}%<extra></extra>", showscale=False))
             hm.update_layout(height=max(220, 28 * len(tbl) + 60), margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
