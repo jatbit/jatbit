@@ -114,9 +114,34 @@ def risk_free_for(domestic: bool, asof: date) -> tuple:
     )
 
 
-def benchmark_for(market: str, domestic: bool) -> tuple:
-    """종목이 속한 시장의 벤치마크 지수 (코드, 이름)."""
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def _us_exchange(code: str) -> str:
+    """미국 종목이 상장된 거래소 이름 (Yahoo). 못 받으면 예외 (실패는 기억하지 않음)."""
+    import yfinance as yf
+
+    ex = str(yf.Ticker(code).fast_info["exchange"] or "")
+    if not ex:
+        raise RuntimeError("거래소 없음")
+    return ex
+
+
+def is_nasdaq_listed(code: str) -> bool:
+    """나스닥에 상장된 종목인지 (S&P 500 구성 종목이라도 나스닥 상장이면 True). 못 알아내면 False."""
+    c = str(code or "").upper()
+    if not c or c.endswith("=F") or c.endswith("=X") or c.startswith("^") or "-USD" in c:
+        return False
+    try:
+        ex = _us_exchange(c).lower()
+    except Exception:  # noqa: BLE001
+        return False
+    return ex in ("nms", "ngm", "ncm") or "nasdaq" in ex
+
+
+def benchmark_for(market: str, domestic: bool, code: str = "") -> tuple:
+    """종목이 속한 시장의 벤치마크 지수 (코드, 이름). 나스닥 상장 미국 종목은 S&P 500이 아니라 나스닥 종합."""
     if not domestic:
+        if code and is_nasdaq_listed(code):
+            return "IXIC", "나스닥 종합"
         return "US500", "S&P 500"
     if str(market).upper().startswith("KOSDAQ"):
         return "KQ11", "코스닥 지수"
