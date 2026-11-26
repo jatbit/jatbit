@@ -244,9 +244,17 @@ def _sector_map() -> pd.DataFrame:
     return sectors.kr_sector_map()[0]
 
 
-# 시장 지도 색: 0% 회색 → ±30%까지 서서히 진해지고, ±30% 이상은 가장 진한 빨강·파랑으로 고정 (일일 등락 제한폭 기준)
+# 시장 지도 색: 0% 흰색 → ±30%까지 서서히 진해지고, ±30% 이상은 가장 진한 빨강·파랑으로 고정 (일일 등락 제한폭 기준)
 HEAT_LIM = 30.0
-HEAT_SCALE = [[0, "#0033CC"], [0.5, "#41454F"], [1, "#D4000F"]]
+HEAT_SCALE = [[0, "#0033CC"], [0.5, "#FFFFFF"], [1, "#D4000F"]]
+
+
+def _heat_text(v: float) -> str:
+    """칸 색(흰색~진한 색)에 맞춰 글자색: 연한 칸은 어두운 글자, 진한 칸은 흰 글자."""
+    t = min(abs(v) / HEAT_LIM, 1.0)
+    end = (0xD4, 0x00, 0x0F) if v >= 0 else (0x00, 0x33, 0xCC)
+    r, g, b = (255 + (e - 255) * t for e in end)
+    return "#1A1D23" if 0.2126 * r + 0.7152 * g + 0.0722 * b > 140 else "#FFFFFF"
 
 
 def _treemap(m: pd.DataFrame, title: str, sub: str, money_fmt, height: int = 560) -> None:
@@ -283,7 +291,7 @@ def _treemap(m: pd.DataFrame, title: str, sub: str, money_fmt, height: int = 560
         marker=dict(colors=[float(x) for x in np.clip(chg, -HEAT_LIM, HEAT_LIM)], cmin=-HEAT_LIM, cmax=HEAT_LIM, showscale=False,
                     colorscale=HEAT_SCALE,
                     line=dict(width=1, color="rgba(0,0,0,0.35)")),
-        tiling=dict(pad=1), pathbar=dict(visible=True), maxdepth=4, textfont=dict(color="white"),
+        tiling=dict(pad=1), pathbar=dict(visible=True), maxdepth=4, textfont=dict(color=[_heat_text(float(x)) for x in chg]),
     ))
     fig.update_layout(height=height, margin=dict(l=0, r=0, t=24, b=0))
     st.plotly_chart(fig, use_container_width=True)
