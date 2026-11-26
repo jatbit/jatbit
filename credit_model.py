@@ -35,7 +35,7 @@ ICE = {"AAA": ("BAMLC0A1CAAA", "BAMLC0A1CAAAEY"), "AA": ("BAMLC0A2CAA", "BAMLC0A
        "CCC 이하": ("BAMLH0A3HYC", "BAMLH0A3HYCEY")}
 OTHER = {"DGS1": "미 국채 1년", "DGS5": "미 국채 5년", "DGS10": "미 국채 10년", "DAAA": "무디스 Aaa 회사채", "DBAA": "무디스 Baa 회사채",
          "BAMLC0A0CM": "투자등급 전체 OAS", "BAMLH0A0HYM2": "하이일드 전체 OAS"}
-COLORS = {"AAA": "#1B7F3B", "AA": "#3FA35B", "A": "#4C9BE8", "BBB": "#9B6FD6", "BB": "#F2A93B", "B": "#E5534B", "CCC 이하": "#8B1E1E"}
+COLORS = {"AAA": "#1E4FD8", "AA": "#3B82F6", "A": "#7AA7F0", "BBB": "#9B6FD6", "BB": "#F2A93B", "B": "#E5484D", "CCC 이하": "#8B1E1E"}
 FIN_SECTORS = ("Financial Services",)
 
 
