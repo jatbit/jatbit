@@ -209,7 +209,7 @@ def render_earnings(ticker: str, R: dict, domestic: bool = False) -> None:
 
         f = go.Figure()
         xs = [pd.Timestamp(w).strftime("%Y-%m-%d") for w in S["when"]]
-        f.add_trace(go.Bar(x=xs, y=S["surp"].clip(-100, 100), name="서프라이즈(%)", marker_color=np.where(S["surp"] >= 0, "#5BB56E", "#E5534B"),
+        f.add_trace(go.Bar(x=xs, y=S["surp"].clip(-100, 100), name="서프라이즈(%)", marker_color=np.where(S["surp"] >= 0, "#E5484D", "#3B82F6"),
                            customdata=S["surp"], hovertemplate="%{x} 서프라이즈 %{customdata:+.1f}%<extra></extra>"))
         if not rx.empty:
             f.add_trace(go.Scatter(x=[d.strftime("%Y-%m-%d") for d in rx["발표일"]], y=rx["다음날 반응"] * 100, name="다음날 주가 반응(%)",
@@ -235,7 +235,7 @@ def render_earnings(ticker: str, R: dict, domestic: bool = False) -> None:
             if len(rx) >= 4:
                 fs = go.Figure(go.Scatter(x=rx["서프라이즈"], y=rx["다음날 반응"] * 100, mode="markers",
                                           text=[d.strftime("%Y-%m") for d in rx["발표일"]],
-                                          marker=dict(size=9, color=np.where(rx["다음날 반응"] >= 0, "#5BB56E", "#E5534B")),
+                                          marker=dict(size=9, color=np.where(rx["다음날 반응"] >= 0, "#E5484D", "#3B82F6")),
                                           hovertemplate="%{text}<br>서프라이즈 %{x:+.1f}%<br>반응 %{y:+.2f}%<extra></extra>"))
                 fs.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
                                  xaxis=dict(title="서프라이즈(%)", ticksuffix="%", zeroline=True),
@@ -353,7 +353,7 @@ def render_earnings(ticker: str, R: dict, domestic: bool = False) -> None:
                 f = go.Figure()
                 f.add_trace(go.Scatter(x=h.index, y=h.values, name="주가", line=dict(color="#888", width=1.3)))
                 colors = pt.get("Action", pd.Series("", index=pt.index)).astype(str).str.lower().map(
-                    {"up": "#5BB56E", "down": "#E5534B"}).fillna("#4C9BE8")
+                    {"up": "#E5484D", "down": "#3B82F6"}).fillna("#A0A4AB")
                 f.add_trace(go.Scatter(x=pt.index, y=pt["currentPriceTarget"], mode="markers", name="목표주가",
                                        marker=dict(size=8, color=colors), text=pt.get("Firm"),
                                        hovertemplate="%{x|%Y-%m-%d} %{text}<br>목표주가 %{y:,.2f}<extra></extra>"))
