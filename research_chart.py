@@ -299,8 +299,8 @@ def render_score_gauges(sec, R: dict, ticker: str, n_eps, src: str = "SEC 10-K")
     opts = dict(quarterly=ss.get(f"rs_o_q_{ticker}", not domestic) and not domestic, momentum=ss.get(f"rs_o_m_{ticker}", True),
                 surprise=ss.get(f"rs_o_s_{ticker}", True), peers=False, flags=ss.get(f"rs_o_f_{ticker}", True),
                 extra=ss.get(f"rs_o_x_{ticker}", True))
-    st.markdown("##### 매수·매도 점수 (6개월)")
-    st.markdown('<div style="font-size:11px;opacity:.6;margin-top:-8px">투자 권유 아님 · 과거 데이터로 계산한 모델 점수</div>',
+    st.markdown("##### 모델 점수 (6개월)")
+    st.markdown('<div style="font-size:11px;opacity:.6;margin-top:-8px">과거 데이터로 계산한 참고용 모델 점수 · 특정 종목의 매수·매도를 권유하지 않습니다</div>',
                 unsafe_allow_html=True)
     try:
         with st.spinner("과거 시점마다 다시 판정해 점수를 계산하는 중... (같은 업종 대표 종목 사례를 처음 모을 때는 1~2분 걸립니다)"):
