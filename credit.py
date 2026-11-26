@@ -126,7 +126,7 @@ def _pp(x, nd=2):
     if abs(x) < 1e-12:
         return f"{0:.{nd}f}%"
     if abs(x) < 0.0001:
-        return f"{x * 100:.1e}%"
+        return "0.01% 미만"  # 과학적 표기(3.1e-05) 대신 쉬운 말로
     return f"{x * 100:.{nd}f}%"
 
 
@@ -379,8 +379,8 @@ def render_credit(ticker: str, R: dict, sec: pd.DataFrame | None, domestic: bool
                     f = go.Figure()
                     f.add_trace(go.Scatter(x=xs, y=Zd["Z"], name="Z (제조업)", mode="lines+markers", line=dict(color="#4C9BE8", width=2)))
                     f.add_trace(go.Scatter(x=xs, y=Zd["Z2"], name="Z'' (비제조업)", mode="lines+markers", line=dict(color="#9B6FD6", width=2, dash="dot")))
-                    for y, c, t in ((2.99, "#1B9E4B", "Z 안전 2.99"), (1.81, "#E5534B", "Z 부실 1.81"), (2.60, "#1B9E4B", "Z'' 안전 2.60"),
-                                    (1.10, "#E5534B", "Z'' 부실 1.10")):
+                    for y, c, t in ((2.99, "#3B82F6", "Z 안전 2.99"), (1.81, "#E5484D", "Z 부실 1.81"), (2.60, "#3B82F6", "Z'' 안전 2.60"),
+                                    (1.10, "#E5484D", "Z'' 부실 1.10")):
                         f.add_hline(y=y, line_dash="dash" if "Z''" not in t else "dot", line_color=c, line_width=1,
                                     annotation_text=t, annotation_font_size=9)
                     f.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
