@@ -71,7 +71,8 @@ def resolve(q: str, listing: pd.DataFrame | None = None) -> list:
     else:
         exact = df[df["Name"] == q]
         part = df[df["Name"].str.contains(q, case=False, regex=False, na=False)]
-        hit = pd.concat([exact, part.sort_values("Marcap", ascending=False)]).drop_duplicates("Code")
+        part = part.assign(_pf=~part["Code"].astype(str).str.endswith("0")).sort_values(["_pf", "Marcap"], ascending=[True, False], na_position="last").drop(columns="_pf")  # 보통주 먼저, 시가총액 큰 순
+        hit = pd.concat([exact, part]).drop_duplicates("Code")
     out = []
     for r in hit.head(15).itertuples():
         out.append({"code": r.Code, "name": r.Name, "market": str(r.Market), "yahoo": yahoo_symbol(r.Code, r.Market),
