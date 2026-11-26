@@ -220,7 +220,7 @@ def render_book(ts) -> None:
             c1, c2 = st.columns(2)
             with c1:
                 lab = [f"{k:g}년" for k in bm.KEY_T]
-                fig = go.Figure(go.Bar(x=lab, y=-V["krd"], marker_color=["#E5534B" if v > 0 else "#4C9BE8" for v in V["krd"]],
+                fig = go.Figure(go.Bar(x=lab, y=-V["krd"], marker_color=["#E5484D" if v > 0 else "#3B82F6" for v in V["krd"]],
                                        hovertemplate="%{x} 금리 1bp ↑ → %{y:,.0f}<extra></extra>"))
                 fig.update_layout(height=250, margin=dict(l=10, r=10, t=30, b=10), font=dict(size=11),
                                   title=dict(text="만기 구간별 1bp 상승 시 손익 (키 레이트)", font=dict(size=12)), yaxis=dict(title=cur))
