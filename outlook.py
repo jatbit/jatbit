@@ -1,10 +1,10 @@
-"""기업 리서치: 고른 재무비율로 '상승 우세 / 중립 / 하락 우세'를 판단하고, 같은 방법을 과거에 적용했을 때의 결과를 보여준다.
+"""기업 리서치: 고른 재무비율로 '지표 양호 / 중립 / 지표 부진'를 판단하고, 같은 방법을 과거에 적용했을 때의 결과를 보여준다.
 
 방법 (방법론 해설 문서의 '앱에 넣는다면' 설계)
 - 수익성·안정성·효율성·현금흐름 비율: 전년보다 좋아졌으면 +1, 나빠졌으면 −1 (피오트로스키 F-스코어 방식)
 - 성장률: 플러스 성장 +1, 마이너스 성장 −1
 - 밸류에이션(PER 등): 고른 기간 안에서 그때까지의 값 중 상위 20%면 −1, 하위 20%면 +1 (자기 과거 대비 평균회귀)
-- 점수 합 ÷ 근거 수가 +0.25 이상이면 상승 우세, −0.25 이하면 하락 우세
+- 점수 합 ÷ 근거 수가 +0.25 이상이면 지표 양호, −0.25 이하면 지표 부진
 과거 검증: 기간 안의 매달 첫 거래일마다 그때까지 공시된 숫자로 다시 판정하고 그 뒤 1·3·6개월·1년 주가 수익률을 붙인다.
 기대수익률: 과거에 지금과 같은 판정이었던 달들의 이후 수익률 평균 (사례가 적으면 기간 전체 평균 쪽으로 당김).
 업종 유형(성장·기술 / 경기민감 / 금융 / 리츠 / 방어)에 따라 지표 가중치와 PER을 읽는 방법을 바꾼다 (PROFILES).
@@ -77,14 +77,14 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
             peers=o2.toggle("동종업계 비교", value=False, key=f"rs_o_p_{ticker}", disabled=domestic,
                             help="고른 재무비율이 동종업계 비교 탭의 회사들 가운데 상위·하위 20%인지. 처음 켜면 회사들 재무제표를 받느라 30초쯤 걸립니다."),
             flags=o2.toggle("위험 신호 거부권 (Altman Z'' · Beneish M)", value=True, key=f"rs_o_f_{ticker}",
-                            help="부실 위험(Z'' 1.1 미만)이나 이익 조작 의심(M −1.78 초과)이면 '상승 우세'를 '중립'으로 낮춥니다."),
+                            help="부실 위험(Z'' 1.1 미만)이나 이익 조작 의심(M −1.78 초과)이면 '지표 양호'를 '중립'으로 낮춥니다."),
             extra=o2.toggle("추가 신호 (고점 대비 하락 · 현금 품질 · 주주환원 · 외국인 수급)", value=True,
                             key=f"rs_o_x_{ticker}",
                             help="업종별 대표 종목 검증에서 효과가 있었던 업종에만 씁니다. "
-                                 "고점 대비 하락(경기민감형·국내 제외): 52주 고점보다 15% 넘게 빠지고 3개월 마이너스면 매도 쪽 · "
-                                 "현금 품질(성장·기술형): 영업현금흐름 ÷ 순이익 1.1배 이상 매수 쪽, 0.8배 미만 매도 쪽 · "
-                                 "주주환원(성장·기술형, 경기민감형): 배당+자사주 매입이 잉여현금흐름의 50% 이상이고 시가총액의 3% 이상이면 매수 쪽 · "
-                                 "외국인 수급(국내): 60거래일 외국인 지분율이 0.5%p 넘게 늘면 매수 쪽, 줄면 매도 쪽이고, 늘 때는 PER 등이 비싸도 감점 안 함. "
+                                 "고점 대비 하락(경기민감형·국내 제외): 52주 고점보다 15% 넘게 빠지고 3개월 마이너스면 부정 신호 · "
+                                 "현금 품질(성장·기술형): 영업현금흐름 ÷ 순이익 1.1배 이상 긍정 신호, 0.8배 미만 부정 신호 · "
+                                 "주주환원(성장·기술형, 경기민감형): 배당+자사주 매입이 잉여현금흐름의 50% 이상이고 시가총액의 3% 이상이면 긍정 신호 · "
+                                 "외국인 수급(국내): 60거래일 외국인 지분율이 0.5%p 넘게 늘면 긍정 신호, 줄면 부정 신호이고, 늘 때는 PER 등이 비싸도 감점 안 함. "
                                  "이익 고점 위치와 PBR ÷ ROE는 검증에서 효과가 없어 뺐습니다. 조건에 걸릴 때만 근거에 들어갑니다."),
         )
         if domestic:
@@ -123,12 +123,12 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
         st.caption("고른 항목의 값이 부족해 판단할 수 없습니다 (전년 값이 없거나 비교할 과거 값이 적음).")
         return
     fl_now = _flags_at(flags, c, now_d) if flags else []
-    capped = bool(fl_now) and vd == "상승 우세"
+    capped = bool(fl_now) and vd == "지표 양호"
     if capped:
         vd = "중립"
     msg = (f"**{vd}**{' (위험 신호로 낮춤)' if capped else ''} — 점수 {sc:+.1f} / {n:.1f} "
            f"({P['name']} 기준 · {c['freq']} 재무 · {now_d:%Y-%m-%d})")
-    (st.success if vd == "상승 우세" else st.error if vd == "하락 우세" else st.info)(msg)
+    __import__("ui").verdict(msg, "up" if vd == "지표 양호" else "down" if vd == "지표 부진" else "")
     if fl_now:
         st.warning("위험 신호: " + ", ".join(fl_now))
 
@@ -252,7 +252,7 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
     # ---- 판정별 평균과 과거 판정 내역
     with st.expander("과거 판정과 이후 수익률"):
         sm = []
-        for v_ in ("상승 우세", "중립", "하락 우세"):
+        for v_ in ("지표 양호", "중립", "지표 부진"):
             g_ = [r for r in rows if r["verdict"] == v_]
             line = [v_, f"{len(g_)}"]
             for lab, _d in HORIZONS:
@@ -276,7 +276,7 @@ def render_outlook(sec, R: dict, ticker: str, sel: list, daily: dict, options=No
 
     # ---- 여러 종목 검증
     with st.expander(f"여러 종목으로 '{P['name']}' 규칙 검증"):
-        st.caption(f"대표 종목 {', '.join(VAL_TICKERS[prof])}에 이 업종의 추천 지표·분기 재무·모멘텀·위험 신호를 똑같이 적용합니다 "
+        st.caption(f"대표 종목 {', '.join(VAL_TICKERS[prof])}에 이 업종에 쓰는 지표·분기 재무·모멘텀·위험 신호를 똑같이 적용합니다 "
                    "(최근 10년, 동종업계 비교·실적 서프라이즈 제외). 처음 실행은 1~2분 걸리고 결과는 1주일 저장됩니다.")
         run_key = f"rs_val_{prof}"
         st.button("검증 실행", key=f"rs_valbtn_{ticker}_{prof}", on_click=_val_on, args=(prof,))
