@@ -264,7 +264,8 @@ def kr_regions() -> pd.DataFrame:
     out = pd.DataFrame({"Code": desc["Code"].astype(str).str.zfill(6), "RegionRaw": desc["Region"].astype(str)})
     out["Sido"] = out["RegionRaw"].map(sido_key)
     if out["Sido"].notna().sum() == 0:  # 지역 열이 비어 있으면 결과를 기억하지 않는다 (다음에 다시 받음)
-        raise RuntimeError("KRX 지역 값 없음 · 열 " + ",".join(map(str, desc.columns))[:120] + " · 예시 " + "|".join(out["RegionRaw"].head(3)))
+        _ex = [str(v) for v in desc["Region"].dropna().head(3).tolist()]
+        raise RuntimeError("KRX 지역 값 없음 · 열 " + ",".join(str(c) for c in desc.columns)[:120] + f" · 지역 값 {int(desc['Region'].notna().sum())}/{len(desc)}개 · 예시 " + "|".join(_ex))
     return out.drop_duplicates("Code")
 
 
