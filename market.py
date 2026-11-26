@@ -351,13 +351,13 @@ def _us_market() -> None:
     ui.section("미국 주식시장", "S&P 500 구성 종목 (장중엔 15분 지연 · 정규장 기준)")
     items = []
     up, dn = int((sp["ChangesRatio"] > 0).sum()), int((sp["ChangesRatio"] < 0).sum())
-    items += [("S&P 500 상승 / 하락", f"{up:,} / {dn:,}", f"보합 {int((sp['ChangesRatio'] == 0).sum()):,}", up - dn),
+    items += [("S&P 500 상승 / 하락", ui.updown(up, dn), f"보합 {int((sp['ChangesRatio'] == 0).sum()):,}"),
               ("S&P 500 거래대금", f"${sp['Amount'].sum() / 1e9:,.0f}B" if sp["Amount"].notna().any() else "-")]
     if allq is not None and len(allq):
         a = allq.dropna(subset=["ChangesRatio"])
         a = a[(a["Marcap"] > 0) | a["Marcap"].isna()]
         u2, d2 = int((a["ChangesRatio"] > 0).sum()), int((a["ChangesRatio"] < 0).sum())
-        items += [("미국 상장 전체 상승 / 하락", f"{u2:,} / {d2:,}", "나스닥·NYSE·AMEX", u2 - d2),
+        items += [("미국 상장 전체 상승 / 하락", ui.updown(u2, d2), "나스닥·NYSE·AMEX"),
                   ("미국 상장 전체 거래대금", f"${a['Amount'].sum() / 1e9:,.0f}B")]
     ui.cards(items, cols=4)
 
@@ -398,7 +398,7 @@ def _kr_market(snap) -> None:
         up, dn = int((m["ChangesRatio"] > 0).sum()), int((m["ChangesRatio"] < 0).sum())
         flat = int((m["ChangesRatio"] == 0).sum())
         amt = float(m["Amount"].sum()) if "Amount" in m.columns else np.nan
-        items += [(f"{mk} 상승 / 하락", f"{up:,} / {dn:,}", f"보합 {flat:,}", up - dn),
+        items += [(f"{mk} 상승 / 하락", ui.updown(up, dn), f"보합 {flat:,}"),
                   (f"{mk} 거래대금", f"{amt / 1e12:,.1f}조원" if amt == amt else "-")]
     ui.cards(items, cols=4)
 
@@ -517,11 +517,19 @@ def render_market() -> None:
     st.markdown(f'<div class="qh-n">시장 개요 <span class="qh-code">{asof} 기준 · 일봉 종가(장중엔 지연 시세)</span></div>',
                 unsafe_allow_html=True)
     country = _world_map(close)
+    note = st.empty()  # 나라를 바꾼 직후, 아래에 이전 나라 지도가 남아 있는 동안 안내 (제목과 내용이 어긋나 보이는 것 방지)
+    shown = st.session_state.get("_mk_shown")
+    if shown is not None and shown != country:
+        if note is not None:
+            note.info(f"{country} 지도를 불러오는 중입니다. 아래 화면은 이전 나라 것이라 곧 바뀝니다.")
     _country_map(country, snap, close)
     if country == "한국":
         _kr_market(snap)
     elif country == "미국":
         _us_market()
+    if note is not None:
+        note.empty()
+    st.session_state["_mk_shown"] = country
     _tiles_part(close, kr3y)
     _period_part(close, kr3y)
     if errs:
@@ -560,7 +568,7 @@ def _tiles_part(close, kr3y) -> None:
                 ui.section(title)
                 _tiles([(name, _series(close, kr3y, sym, kind), kind) for sym, name, kind in items])
                 names = [name for _s, name, _k in items]
-                pick = ui.seg("눌러서 차트 보기", names, key=f"mk_tile_pick_{gi}", collapsed=False)
+                pick = ui.seg("아래에서 고르면 차트가 열립니다", names, key=f"mk_tile_pick_{gi}", collapsed=False)
                 if pick in names:
                     sym, name, kind = items[names.index(pick)]
                     _detail(sym, name, kind, close, key=f"mk_tile_det_{gi}")
