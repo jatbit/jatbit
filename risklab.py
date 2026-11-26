@@ -250,7 +250,7 @@ def render_stress(items: list, names: list, w: list, P: pd.DataFrame, bench: pd.
         st.plotly_chart(f, use_container_width=True)
         sc0 = st.selectbox("종목별 기여도 보기", [sc for sc, _ in ok], key=key + "_ct")
         ct = dict(ok)[sc0]["contrib"]
-        f2 = go.Figure(go.Bar(x=list(ct), y=[v * 100 for v in ct.values()], marker_color=["#5BB56E" if v >= 0 else "#E5534B" for v in ct.values()],
+        f2 = go.Figure(go.Bar(x=list(ct), y=[v * 100 for v in ct.values()], marker_color=["#E5484D" if v >= 0 else "#3B82F6" for v in ct.values()],
                               hovertemplate="%{x} %{y:+.2f}%p<extra></extra>"))
         f2.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), yaxis=dict(title="손익 기여(%p)", ticksuffix="%p"))
         st.plotly_chart(f2, use_container_width=True)
