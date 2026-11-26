@@ -139,7 +139,9 @@ def render_single(listing: pd.DataFrame) -> None:
 
     candidates = find_candidates(query, listing)
     if not candidates:
-        st.warning("일치하는 종목이 없습니다. 종목명을 다시 확인해 주세요.")
+        _sim = similar_names(query, listing)
+        st.warning("일치하는 종목이 없습니다. 종목명이나 코드를 다시 확인해 주세요. 예: 삼성전자, 005930, AAPL"
+                   + (f" · 혹시 이 종목인가요? {', '.join(_sim)}" if _sim else ""))
         return
 
     if len(candidates) > 1:
@@ -154,7 +156,7 @@ def render_single(listing: pd.DataFrame) -> None:
     try:
         df = load_prices(chosen["code"], start_d.isoformat(), end_d.isoformat())
     except Exception as e:  # noqa: BLE001
-        st.error(f"주가 데이터를 불러오지 못했습니다: {e}")
+        st.error(friendly_error(e, chosen.get("name", "")))
         return
     if df is None or df.empty:
         st.warning("선택한 기간에 데이터가 없습니다. 기간을 바꿔 보세요.")
@@ -387,7 +389,7 @@ def render_single(listing: pd.DataFrame) -> None:
         )
     # 봉이 많을수록 간격을 넓혀 봉을 가늘게 (굵고 뭉개져 보이는 현상 방지)
     box_gap = 0.3 if n_bars <= 60 else 0.45 if n_bars <= 150 else 0.6
-    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])], rangeslider_visible=False)
+    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])], rangeslider_visible=False, hoverformat="%Y-%m-%d")
     if rate_sel:
         add_rates(fig, rate_sel, start_d, end_d, n_rows + 1, domain=list(fig.layout.yaxis.domain))
     fig.update_yaxes(title_text="수익률(%)" if pct_mode else "가격", row=1, col=1, tickformat=",.1f" if pct_mode else ",", ticksuffix="%" if pct_mode else "")
