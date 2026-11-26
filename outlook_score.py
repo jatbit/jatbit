@@ -1,4 +1,4 @@
-"""매수·매도 점수(0~100): 과거 사례 기반 점수, 미래 추정치 점수, 게이지 그림, 스크리너용 여러 종목 점수."""
+"""모델 점수(0~100): 과거 사례 기반 점수, 미래 추정치 점수, 게이지 그림, 스크리너용 여러 종목 점수."""
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -141,11 +141,13 @@ def forward_score(c, R, fwd=None, prof="general"):
 
 def _show_score(col, title, d, reliable, note=""):
     if reliable:
-        col.metric(title, f"{d['mid']:.0f}점", score_label(d["mid"]), delta_color="normal" if d["mid"] >= 50 else "inverse")
+        col.metric(title, f"{d['mid']:.0f}점")
+        col.markdown(f":{'red' if d['mid'] >= 50 else 'blue'}[**{'▲' if d['mid'] >= 50 else '▼'} {score_label(d['mid'])}**]")  # 50점 이상 빨강 · 미만 파랑
         col.caption(f"80% 구간 {d['lo']:.0f}–{d['hi']:.0f}점. " + note)
     else:
-        side = "매수 쪽" if d["lo"] >= 55 else ("매도 쪽" if d["hi"] <= 45 else "판단 보류")
-        col.metric(title, f"{d['lo']:.0f}–{d['hi']:.0f}점", side, delta_color="off")
+        side = "점수 높은 쪽" if d["lo"] >= 55 else ("점수 낮은 쪽" if d["hi"] <= 45 else "판단 보류")
+        col.metric(title, f"{d['lo']:.0f}–{d['hi']:.0f}점")
+        col.caption(side)
         col.caption(f"근거가 부족해 범위로 표시 (가운데 {d['mid']:.0f}점). " + note)
 
 
@@ -161,7 +163,7 @@ def _gauge_svg(title, d, reliable, sub="", px=132):
         lab, small = score_label(mid), "점"
     else:
         col = "#1B9E5A" if lo >= 55 else ("#D9534F" if hi <= 45 else "#8A8F98")
-        lab, small = ("매수 쪽" if lo >= 55 else ("매도 쪽" if hi <= 45 else "판단 보류")), f"{lo:.0f}–{hi:.0f}"
+        lab, small = ("점수 높은 쪽" if lo >= 55 else ("점수 낮은 쪽" if hi <= 45 else "판단 보류")), f"{lo:.0f}–{hi:.0f}"
     arc = ""
     if mid > 0.5:
         arc = (f'<circle cx="60" cy="60" r="{r}" fill="none" stroke="{col}" stroke-width="{sw}" '
