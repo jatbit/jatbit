@@ -3,14 +3,17 @@ from common import *  # noqa: F401,F403
 
 
 def render_compare(listing: pd.DataFrame) -> None:
-    ordered = listing.sort_values("Name")
+    ordered = listing.assign(_pf=~listing["Code"].astype(str).str.endswith("0")).sort_values(["_pf", "Marcap"], ascending=[True, False], na_position="last")  # 보통주·시가총액 큰 순 (검색해도 삼성전자가 먼저)
     options = {f"{r.Name} ({r.Code})": r.Code for r in ordered.itertuples()}
     names = {r.Code: r.Name for r in ordered.itertuples()}
 
+    _ok = set(options)
+    if isinstance(st.session_state.get("cmp_selected"), list):  # 주소로 들어온 값 중 목록에 없는 종목은 뺀다
+        st.session_state["cmp_selected"] = [x for x in st.session_state["cmp_selected"] if x in _ok]
     c1, c2, c3 = _row([3, 2, 1])
     selected = c1.multiselect(
         "국내 종목 (이름을 입력하면 검색됩니다)",
-        list(options.keys()), key="cmp_selected",
+        list(options.keys()), key="cmp_selected", placeholder="종목 이름이나 코드를 입력하세요",
         on_change=_mirror, args=("cmp_selected", "pf_selected"),
     )
     extra = c2.text_input(
@@ -64,7 +67,7 @@ def render_compare(listing: pd.DataFrame) -> None:
         try:
             df = load_prices(it["code"], start_d.isoformat(), end_d.isoformat())
         except Exception as e:  # noqa: BLE001
-            st.warning(f"{it['name']}: 데이터를 불러오지 못했습니다 ({e})")
+            st.warning(friendly_error(e, it["name"]) + " 이 종목은 제외하고 비교합니다.")
             continue
         s = df["Close"].dropna() if df is not None and not df.empty else pd.Series(dtype=float)
         if s.empty or float(s.iloc[0]) == 0:
@@ -98,6 +101,7 @@ def render_compare(listing: pd.DataFrame) -> None:
     fig.add_hline(y=0, line_width=1, line_dash="dot", line_color="#718096")
     fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
     fig.update_yaxes(title_text="수익률 (기간 시작일 = 0%)", ticksuffix="%")
+    fig.update_xaxes(hoverformat="%Y-%m-%d")
     if rate_sel:
         add_rates(fig, rate_sel, start_d, end_d, 2)
     fig.update_layout(
@@ -116,8 +120,10 @@ def render_compare(listing: pd.DataFrame) -> None:
         cfg[c] = st.column_config.NumberColumn(c, format="%+.2f%%")
     cfg["연 변동성(%)"] = st.column_config.NumberColumn("연 변동성(%)", format="%.1f%%")
     cfg["최대 낙폭(%)"] = st.column_config.NumberColumn("최대 낙폭(%)", format="%.1f%%")
-    st.dataframe(summary, use_container_width=True, hide_index=True, column_config=cfg)
-    st.caption("수익률은 각 종목의 기간 첫 거래일 종가를 0%로 놓고 계산한 값입니다. 배당은 반영하지 않은 가격 기준입니다.")
+    st.dataframe(ui.signed_style(summary, ["기간 수익률(%)", "기간 내 최고(%)", "기간 내 최저(%)"]), use_container_width=True, hide_index=True, column_config=cfg)
+    st.caption("수익률은 각 종목의 기간 첫 거래일 종가를 0%로 놓고 계산한 값입니다. 배당은 반영하지 않은 가격 기준이며, 해외 종목은 현지 통화(달러 등) 기준이라 환율 변동은 들어 있지 않습니다.")
+    if len(items) > 8:
+        st.caption("종목이 많아 선이 겹쳐 보일 수 있습니다. 범례의 종목 이름을 누르면 그 선을 숨기거나 다시 볼 수 있어요.")
 
 
 # ======================================================================
