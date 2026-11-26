@@ -381,7 +381,7 @@ def evaluate(c, prof, use, rf_now):
         sc, n = _score(sg)
         vd = _verdict(sc, n)
         fl = _flags_at(flags, c, d) if flags else []
-        if fl and vd == "상승 우세":
+        if fl and vd == "지표 양호":
             vd = "중립"
         beta, rf = _beta(c, d), _rf_at(d, c["domestic"], rf_now)
         rec = dict(d=d, sig=sg, score=sc, n=n, verdict=vd, flags=fl, beta=beta, rf=rf)
