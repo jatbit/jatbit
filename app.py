@@ -21,6 +21,10 @@ import ui  # 화면 공통 요소 (ui.py)
 
 ui.apply_theme()
 
+_boot = st.empty()  # 종목 목록을 처음 받을 때(20~30초) 빈 화면 대신 보여줄 안내
+if "_listing" not in st.session_state:
+    _boot.info("데이터를 불러오는 중입니다. 처음 접속하면 20~30초 걸릴 수 있어요. 두 번째부터는 빨라집니다.")
+
 # 파일 구성은 ARCHITECTURE.md (파트별 파일 지도 · 공통 도우미 · 세션 키 접두어 · 고칠 때 순서)
 #   페이지 진입점: market.py 시장 · page_single.py 주가 조회 · research.py 기업 리서치 · screener.py 스크리너
 #                  page_compare.py 수익률 비교 · page_portfolio.py 포트폴리오 · backtest.py · options.py 옵션 · bonds.py 채권
@@ -31,45 +35,53 @@ try:
     LISTING = load_listing()
     st.session_state["_listing"] = LISTING
 except Exception as e:  # noqa: BLE001
-    st.error(f"종목 목록을 불러오지 못했습니다: {e}")
+    _boot.empty()
+    st.error("종목 목록을 불러오지 못했습니다. 잠시 후 새로고침해 주세요.")
     st.stop()
+_boot.empty()
 
 
 
 def page_market():
-    from market import render_market
+    with ui.url_page("market"):
+        from market import render_market
 
-    render_market()
+        render_market()
 
 
 def page_single():
-    from page_single import render_single
+    with ui.url_page("chart"):
+        from page_single import render_single
 
-    render_single(LISTING)
+        render_single(LISTING)
 
 
 def page_screener():
-    from screener import render_screener
+    with ui.url_page("screener"):
+        from screener import render_screener
 
-    render_screener()
+        render_screener()
 
 
 def page_compare():
-    from page_compare import render_compare
+    with ui.url_page("compare"):
+        from page_compare import render_compare
 
-    render_compare(LISTING)
+        render_compare(LISTING)
 
 
 def page_portfolio():
-    from page_portfolio import render_portfolio
+    with ui.url_page("portfolio"):
+        from page_portfolio import render_portfolio
 
-    render_portfolio(LISTING)
+        render_portfolio(LISTING)
 
 
 def page_backtest():
-    from backtest import render_backtest
+    with ui.url_page("backtest"):
+        from backtest import render_backtest
 
-    render_backtest(load_prices, find_candidates, LISTING, risk_free_for)
+        render_backtest(load_prices, find_candidates, LISTING, risk_free_for)
 
 
 def page_options():
@@ -85,9 +97,10 @@ def page_bonds():
 
 
 def page_research():
-    from research import render_research
+    with ui.url_page("research"):
+        from research import render_research
 
-    render_research()
+        render_research()
 
 
 PAGES = [
@@ -124,3 +137,4 @@ def _run_pages() -> None:
 _run_pages()
 ui.snapshot_state()
 st.caption("일봉 기준 데이터이며 실시간 시세가 아닙니다. 장중에는 지연되거나 당일 값이 반영되지 않을 수 있습니다.")
+st.caption("이 앱의 점수·지표는 과거 데이터로 계산한 참고 정보이며 특정 종목의 매수·매도를 권유하지 않습니다. 계산 방식과 기준일은 각 화면에 적혀 있고, 과거 성과가 미래를 보장하지 않습니다.")
