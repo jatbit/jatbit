@@ -225,8 +225,8 @@ def render_vol() -> None:
         with sub[0][0]:
             f = go.Figure()
             f.add_trace(go.Scatter(x=ST["days"], y=ST["atm_iv"] * 100, name="ATM IV", mode="lines+markers", line=dict(color="#4C9BE8", width=2)))
-            f.add_trace(go.Scatter(x=ST["days"], y=ST["p25"] * 100, name="25델타 풋 IV", mode="lines+markers", line=dict(color="#E5534B", dash="dot")))
-            f.add_trace(go.Scatter(x=ST["days"], y=ST["c25"] * 100, name="25델타 콜 IV", mode="lines+markers", line=dict(color="#5BB56E", dash="dot")))
+            f.add_trace(go.Scatter(x=ST["days"], y=ST["p25"] * 100, name="25델타 풋 IV", mode="lines+markers", line=dict(color="#3B82F6", dash="dot")))
+            f.add_trace(go.Scatter(x=ST["days"], y=ST["c25"] * 100, name="25델타 콜 IV", mode="lines+markers", line=dict(color="#E5484D", dash="dot")))
             f.add_hline(y=hv_now * 100, line_dash="dash", line_color="#888", annotation_text=f"HV20 {hv_now * 100:.1f}%")
             f.update_layout(height=330, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), hovermode="x unified",
                             xaxis=dict(title="잔존일수"), yaxis=dict(title="내재변동성(%)", ticksuffix="%"),
@@ -239,7 +239,7 @@ def render_vol() -> None:
                                 format_func=lambda e: f"{e} (D-{int(ST.loc[e, 'days'])})")
             d = chains[pick]
             f = go.Figure()
-            for is_call, nm, color in ((True, "콜 IV", "#5BB56E"), (False, "풋 IV", "#E5534B")):
+            for is_call, nm, color in ((True, "콜 IV", "#E5484D"), (False, "풋 IV", "#3B82F6")):
                 x = d[d["is_call"] == is_call]
                 x = x[np.isfinite(x["iv"])]
                 f.add_trace(go.Scatter(x=x["strike"], y=x["iv"] * 100, name=nm, mode="lines+markers", marker=dict(size=5),
@@ -280,8 +280,8 @@ def render_vol() -> None:
             p = d[~d["is_call"]].groupby("strike")["openInterest"].sum()
             rng = (S * 0.7, S * 1.3)
             f = go.Figure()
-            f.add_trace(go.Bar(x=c.index, y=c.values, name="콜 미결제약정", marker_color="#5BB56E"))
-            f.add_trace(go.Bar(x=p.index, y=-p.values, name="풋 미결제약정(아래)", marker_color="#E5534B"))
+            f.add_trace(go.Bar(x=c.index, y=c.values, name="콜 미결제약정", marker_color="#E5484D"))
+            f.add_trace(go.Bar(x=p.index, y=-p.values, name="풋 미결제약정(아래)", marker_color="#3B82F6"))
             if np.isfinite(mp):
                 f.add_vline(x=mp, line_color="#9B6FD6", line_dash="dash", annotation_text=f"맥스페인 {mp:,.2f}")
             f.add_vline(x=S, line_color="#888", line_dash="dot", annotation_text="현재가", annotation_position="bottom right")
@@ -321,7 +321,7 @@ def render_vol() -> None:
                     if sgn[i] != sgn[i - 1] and sgn[i] != 0:
                         flip = cum.index[i]
                         break
-                f = go.Figure(go.Bar(x=g.index, y=g.values / 1e6, marker_color=np.where(g.values >= 0, "#5BB56E", "#E5534B"),
+                f = go.Figure(go.Bar(x=g.index, y=g.values / 1e6, marker_color=np.where(g.values >= 0, "#E5484D", "#3B82F6"),
                                      hovertemplate="행사가 %{x:,.2f}<br>GEX %{y:,.2f}백만$ /1%<extra></extra>"))
                 f.add_vline(x=S, line_color="#888", line_dash="dot", annotation_text="현재가")
                 f.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11),
