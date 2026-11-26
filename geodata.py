@@ -263,6 +263,8 @@ def kr_regions() -> pd.DataFrame:
         raise RuntimeError("KRX 상장회사 정보에 지역이 없습니다")
     out = pd.DataFrame({"Code": desc["Code"].astype(str).str.zfill(6), "RegionRaw": desc["Region"].astype(str)})
     out["Sido"] = out["RegionRaw"].map(sido_key)
+    if out["Sido"].notna().sum() == 0:  # 지역 열이 비어 있으면 결과를 기억하지 않는다 (다음에 다시 받음)
+        raise RuntimeError("KRX 지역 값 없음 · 열 " + ",".join(map(str, desc.columns))[:120] + " · 예시 " + "|".join(out["RegionRaw"].head(3)))
     return out.drop_duplicates("Code")
 
 
