@@ -116,6 +116,22 @@ PAGES = [
 ]
 
 
+def _key_box() -> None:
+    """오른쪽 위 '키 설정': OpenDART 키를 붙여 넣는 칸. 이 브라우저 탭에서만 쓰이고 저장되지 않는다 (새로고침하면 다시 입력)."""
+    try:
+        _l, _r = st.columns([6, 1])
+        with _r.popover("키 설정", icon=":material/key:", use_container_width=True):
+            st.text_input("OpenDART API 키", key="dart_key_global", type="password",
+                          help="한국 지도의 시·군·구 위치, 재무제표 등에 쓰입니다. opendart.fss.or.kr에서 무료로 발급받을 수 있습니다.")
+            st.caption("이 탭에서만 쓰이고 저장되지 않습니다. 새로고침하면 다시 넣어야 합니다. "
+                       "계속 쓰려면 Streamlit 앱 설정의 Secrets에 DART_API_KEY로 넣으세요.")
+            import kr
+
+            st.caption("지금 키가 적용되어 있습니다." if kr.dart_key() else "키가 아직 없습니다.")
+    except Exception:  # noqa: BLE001  (오래된 Streamlit에서는 칸만 생략)
+        pass
+
+
 def _run_pages() -> None:
     """열린 페이지 하나만 실행한다 (예전엔 7개 탭을 매번 모두 계산해서 느렸음)."""
     if hasattr(st, "navigation") and hasattr(st, "Page"):
@@ -126,6 +142,7 @@ def _run_pages() -> None:
         except TypeError:
             nav = st.navigation(pages)
         ui.keep_state(getattr(nav, "url_path", None) or getattr(nav, "title", None))  # 다른 페이지에 갔다 와도 입력값 유지
+        _key_box()
         nav.run()
         return
     labels = [t for _, t, _, _ in PAGES]  # 아주 오래된 Streamlit
