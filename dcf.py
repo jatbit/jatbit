@@ -183,7 +183,7 @@ def render_dcf(ticker: str, R: dict, sec: pd.DataFrame | None, src_name: str = "
     if len(fcf_h):
         f = go.Figure()
         xs = [pd.Timestamp(c).strftime("%Y-%m") for c in fcf_h.index]
-        f.add_trace(go.Bar(x=xs, y=fcf_h.values, name="잉여현금흐름", marker_color=np.where(fcf_h.values >= 0, "#4C9BE8", "#E5534B"),
+        f.add_trace(go.Bar(x=xs, y=fcf_h.values, name="잉여현금흐름", marker_color=np.where(fcf_h.values >= 0, "#E5484D", "#3B82F6"),
                            hovertemplate="%{x} FCF " + money.hv() + "<extra></extra>"))
         if len(rev_h):
             m = (fcf_h / rev_h.reindex(fcf_h.index) * 100)
@@ -322,7 +322,7 @@ def render_dcf(ticker: str, R: dict, sec: pd.DataFrame | None, src_name: str = "
     sens = pd.DataFrame(grid, index=[f"WACC {w * 100:.2f}%" for w in ws], columns=cl)
     up_grid = sens / px - 1
     z = up_grid.values * 100
-    hm = go.Figure(go.Heatmap(z=z, x=cl, y=list(sens.index), colorscale="RdYlGn", zmid=0,
+    hm = go.Figure(go.Heatmap(z=z, x=cl, y=list(sens.index), colorscale=[[0,"#3B82F6"],[0.5,"#E6E3DC"],[1,"#E5484D"]], zmid=0,
                               text=[[f"{money.price(v)}<br>{u:+.0f}%" if np.isfinite(v) else "-" for v, u in zip(r1, r2)] for r1, r2 in zip(sens.values, z)],
                               texttemplate="%{text}", hovertemplate="%{y} · %{x}<br>%{text}<extra></extra>", showscale=False))
     hm.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10), font=dict(size=11), yaxis=dict(autorange="reversed"))
